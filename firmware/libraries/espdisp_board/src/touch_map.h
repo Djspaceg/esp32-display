@@ -113,6 +113,18 @@ static const Calibration CST816_ON_ELECROW_KNOB_128 = {
     /* rawXMirrored */ false, /* rawYMirrored */ false,
     /* rotateClockwise */ true};
 
+/// Starting calibration for the LilyGO T-Watch-S3's FT6336U. LilyGO's
+/// getPoint() and LVGL glue hand the raw coordinates through unchanged (no
+/// swap or mirror is configured) at its upright rotation, MX|MY, which is
+/// this firmware's rotation 0 through the panel's orientation offset of 2.
+/// Corner observations on the glass decide whether either bit flips.
+/// https://github.com/Xinyuan-LilyGO/LilyGoLib/blob/7afa3e36bd37184fb5d6d7d600c4ee9147e2cf5f/src/LilyGoWatchS3.cpp#L1058-L1082
+/// https://github.com/Xinyuan-LilyGO/LilyGoLib/blob/7afa3e36bd37184fb5d6d7d600c4ee9147e2cf5f/src/display/LV_Helper_v9.cpp#L82-L94
+static const Calibration FT6336_ON_TWATCH_S3 = {
+    /* panelShort */ 240, /* panelLong */ 240,
+    /* rawXMirrored */ false, /* rawYMirrored */ false,
+    /* rotateClockwise */ true};
+
 /// Starting calibration for the 720x720 GT911 on the Waveshare 4B. The
 /// supported vendor path uses raw rotation-0 coordinates without swapping or
 /// mirroring; physical corner validation may refine the carrier profile.

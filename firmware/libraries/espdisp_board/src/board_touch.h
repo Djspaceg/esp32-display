@@ -1,6 +1,7 @@
 // Reading the capacitive touch controllers: AXS5106L on the
 // ESP32-C6-Touch-LCD-1.47, CST9217 on the ESP32-S3-Touch-AMOLED-1.75C, and
-// CST816 on the ESP32-S3-Touch-LCD-1.54/1.85C profiles. The coordinate
+// CST816 on the ESP32-S3-Touch-LCD-1.54/1.85C profiles, FT6336U on the
+// LilyGO T-Watch-S3. The coordinate
 // transform is in touch_map.h; this file only gets numbers off the chip, and
 // only exposes one Sample/poll() API regardless of which chip answered - the
 // caller never branches on board::TouchController.
@@ -80,6 +81,23 @@ static const uint8_t CST816_REG_GESTURE = 0x01;
 static const uint8_t CST816_REG_CHIP_ID = 0xA7;
 static const size_t CST816_REPORT_BYTES = 6;
 
+/// FT6336U (LilyGO T-Watch-S3) register map, from SensorLib's TouchDrvFT6X36,
+/// the driver LilyGO's own T-Watch-S3 code runs:
+/// https://github.com/lewisxhe/SensorLib/blob/dff98e79753dedd7ba709d1e92d71b4353c55005/src/touch/TouchDrvFT6X36.hpp#L207-L240
+/// TD_STATUS (02H) low nibble is the point count; point 1 follows as XH, XL,
+/// YH, YL, each high byte carrying the coordinate's top four bits (and the
+/// event flag in XH 7:6), as TouchDrvFT6X36::getTouchPoints reads them
+/// (src/touch/TouchDrvFT6X36.cpp#L40-L76 at that commit).
+static const uint8_t FT6336_ADDR = 0x38;
+static const uint8_t FT6336_REG_STATUS = 0x02;
+static const uint8_t FT6336_REG_INT_MODE = 0xA4;
+static const uint8_t FT6336_REG_CHIP_ID = 0xA3;
+static const uint8_t FT6336_REG_VENDOR_ID = 0xA8;
+static const uint8_t FT6336_REG_FIRMWARE = 0xA6;
+static const uint8_t FT6336_INT_TRIGGER = 0x01;
+static const uint8_t FT6336_MAX_POINTS = 2;
+static const size_t FT6336_REPORT_BYTES = 5;  // TD_STATUS + point 1
+
 static const uint8_t CST9217_ADDR = 0x5A;
 static const uint16_t CST9217_REG_TOUCH_DATA = 0xD000;
 static const uint16_t CST9217_REG_CMD_MODE = 0xD101;
@@ -128,6 +146,10 @@ inline uint32_t lastGt911PollAt = 0;
 inline uint8_t gt911Address = 0;
 static const uint32_t CST9217_POLL_FALLBACK_MS = 20;
 static const uint32_t GT911_POLL_MS = 10;
+inline uint32_t lastFt6336PollAt = 0;
+/// While a finger is down the FT6336 is also read on this period, so a lift
+/// whose report pulse was missed still ends the press.
+static const uint32_t FT6336_HELD_POLL_MS = 20;
 
 static void IRAM_ATTR onTouchInterrupt() { interruptFlag = true; }
 
@@ -430,6 +452,76 @@ inline bool pollCst9217(Sample &out) {
 /// Wire must already be running for the AXS5106L path (board_detect leaves it
 /// up on the Touch board). The CST9217 path brings Wire up itself, since
 /// nothing else has by the time this runs on that board.
+inline bool ft6336ReadReg(uint8_t reg, uint8_t *out, size_t len) {
+  Wire.beginTransmission(FT6336_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission() != 0) return false;
+  Wire.requestFrom(FT6336_ADDR, len);
+  if (Wire.available() != (int)len) return false;
+  Wire.readBytes(out, len);
+  return true;
+}
+
+/// Bring up the FT6336U the way LilyGO's T-Watch-S3 code does: no reset line
+/// (none is wired), the identity read as a liveness check, then interrupt
+/// trigger mode (A4H = 1, SensorLib interruptTrigger()), so INT pulses low
+/// once per report instead of holding low while a finger is down.
+/// LilyGoLib LilyGoWatch2022 touch bring-up:
+/// https://github.com/Xinyuan-LilyGO/LilyGoLib/blob/7afa3e36bd37184fb5d6d7d600c4ee9147e2cf5f/src/LilyGoWatchS3.cpp#L342-L355
+inline bool initFt6336(const board::Config &cfg, bool verbose) {
+  if (!Wire.begin(cfg.pinTouchSda, cfg.pinTouchScl, I2C_HZ)) {
+    if (verbose) Serial.println("touch: ERROR FT6336 bus failed");
+    return false;
+  }
+  uint8_t vendor = 0, chip = 0, firmware = 0;
+  if (!ft6336ReadReg(FT6336_REG_VENDOR_ID, &vendor, 1) ||
+      !ft6336ReadReg(FT6336_REG_CHIP_ID, &chip, 1)) {
+    if (verbose) Serial.println("touch: ERROR no FT6336 at 0x38");
+    return false;
+  }
+  ft6336ReadReg(FT6336_REG_FIRMWARE, &firmware, 1);
+  Wire.beginTransmission(FT6336_ADDR);
+  Wire.write(FT6336_REG_INT_MODE);
+  Wire.write(FT6336_INT_TRIGGER);
+  if (Wire.endTransmission() != 0) {
+    if (verbose) Serial.println("touch: ERROR FT6336 interrupt mode write failed");
+    return false;
+  }
+  pinMode(cfg.pinTouchInt, INPUT_PULLUP);
+  attachInterrupt(cfg.pinTouchInt, onTouchInterrupt, FALLING);
+  if (verbose) {
+    Serial.printf("touch: FT6336 ready (vendor=%02X chip=%02X fw=%02X, "
+                  "sda=%d scl=%d int=%d)\n",
+                  vendor, chip, firmware, cfg.pinTouchSda, cfg.pinTouchScl,
+                  cfg.pinTouchInt);
+  }
+  return true;
+}
+
+/// Decode TD_STATUS plus point 1. A count of 0, or one past the part's two
+/// points (the value an idle or settling controller can return), is a
+/// release.
+inline bool parseFt6336Report(const uint8_t *data, size_t len, Sample &out) {
+  if (data == nullptr || len != FT6336_REPORT_BYTES) return false;
+  const uint8_t points = data[0] & 0x0F;
+  if (points == 0 || points > FT6336_MAX_POINTS) {
+    out.pressed = false;
+    out.points = 0;
+    return true;
+  }
+  out.rawX = (uint16_t)(((data[1] & 0x0F) << 8) | data[2]);
+  out.rawY = (uint16_t)(((data[3] & 0x0F) << 8) | data[4]);
+  out.points = points;
+  out.pressed = true;
+  return true;
+}
+
+inline bool pollFt6336(Sample &out) {
+  uint8_t data[FT6336_REPORT_BYTES] = {0};
+  return ft6336ReadReg(FT6336_REG_STATUS, data, sizeof(data)) &&
+         parseFt6336Report(data, sizeof(data), out);
+}
+
 inline bool init(const board::Config &cfg, bool verbose = true) {
   enabled = false;
   pressed = false;
@@ -440,6 +532,7 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
   timedFallbackLogged = false;
   lastCst9217PollAt = 0;
   lastGt911PollAt = 0;
+  lastFt6336PollAt = 0;
   gt911Address = 0;
   if (!cfg.hasTouch()) {
     if (verbose) Serial.printf("touch: not present on %s\n", cfg.name);
@@ -458,6 +551,13 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
   if (cfg.touch == board::TouchController::Cst816) {
     if (!initCst816(cfg, verbose)) return false;
     activeController = board::TouchController::Cst816;
+    enabled = true;
+    return true;
+  }
+
+  if (cfg.touch == board::TouchController::Ft6336) {
+    if (!initFt6336(cfg, verbose)) return false;
+    activeController = board::TouchController::Ft6336;
     enabled = true;
     return true;
   }
@@ -536,6 +636,13 @@ inline bool readNow(Sample &out) {
     if (ok) pressed = out.pressed;
     return ok;
   }
+  // The FT6336 in trigger mode pulses per report too; its point register is
+  // current whether or not a pulse was seen.
+  if (activeController == board::TouchController::Ft6336) {
+    const bool ok = pollFt6336(out);
+    if (ok) pressed = out.pressed;
+    return ok;
+  }
   return poll(out);
 }
 
@@ -547,6 +654,21 @@ inline bool readNow(Sample &out) {
 inline bool poll(Sample &out) {
   if (!enabled) {
     return false;
+  }
+
+  if (activeController == board::TouchController::Ft6336) {
+    // A report pulse, or a finger still down: read now and then on
+    // FT6336_HELD_POLL_MS until a report says it lifted.
+    const bool flagged = interruptFlag;
+    interruptFlag = false;
+    const uint32_t now = millis();
+    const bool heldPoll =
+        pressed && (uint32_t)(now - lastFt6336PollAt) >= FT6336_HELD_POLL_MS;
+    if (!flagged && !heldPoll) return false;
+    lastFt6336PollAt = now;
+    const bool ok = pollFt6336(out);
+    if (ok) pressed = out.pressed;
+    return ok;
   }
 
   if (activeController == board::TouchController::Gt911) {

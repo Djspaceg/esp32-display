@@ -125,10 +125,30 @@ inline uint16_t axisWindowGap(uint16_t nearOffset, uint16_t visibleExtent,
 /// q = rotation + 1, because the sender streams with the landscape flag set;
 /// reading the reported rotation as the quadrant is what made the earlier attempts
 /// each fit three cable positions and miss the fourth.
+///
+/// A PANEL WHOSE WINDOW FOLLOWS THE MIRROR (`windowFollowsMirror`) is the other
+/// case, and it is a fact about that panel, not a rule for this one: the
+/// T-Watch-S3's ST7789V3, also 240x240 over 240x320, needs a row gap of 80 under
+/// MX|MY and a column gap of 80 under MV|MY, and none in the other two
+/// quadrants, which is LilyGO's own setRotation() table:
+/// https://github.com/Xinyuan-LilyGO/LilyGoLib/blob/7afa3e36bd37184fb5d6d7d600c4ee9147e2cf5f/src/display/LilyGoDispInterface.cpp#L717-L743
+/// That is
+/// the far-end rule: a memory axis addressed in reverse (MX for columns, MY for
+/// rows) starts its window memory - glass - near offset in. CASET carries the
+/// column axis and RASET the row axis until MV exchanges them.
 inline WindowGap windowGap(uint16_t width, uint16_t height,
                            uint16_t memoryWidth, uint16_t memoryHeight,
                            uint16_t colOffset, uint16_t rowOffset, uint8_t q,
-                           bool installationMirrorX = false) {
+                           bool installationMirrorX = false,
+                           bool windowFollowsMirror = false) {
+  const bool swap = swapXY(q);
+  if (windowFollowsMirror) {
+    const uint16_t colGap = axisWindowGap(
+        colOffset, width, memoryWidth, mirrorX(q, installationMirrorX));
+    const uint16_t rowGap = axisWindowGap(
+        rowOffset, height, memoryHeight, mirrorY(q, installationMirrorX));
+    return {swap ? rowGap : colGap, swap ? colGap : rowGap};
+  }
   // The visible window is top-aligned, so hand the driver the panel's own near
   // offsets and derive nothing from the memory extents. colOffset rides the x axis
   // and rowOffset the y axis, swapping with the axes exactly as the landscape path
@@ -137,8 +157,6 @@ inline WindowGap windowGap(uint16_t width, uint16_t height,
   (void)height;
   (void)memoryWidth;
   (void)memoryHeight;
-  (void)installationMirrorX;
-  const bool swap = swapXY(q);
   return {
       swap ? rowOffset : colOffset,
       swap ? colOffset : rowOffset,

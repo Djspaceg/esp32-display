@@ -88,11 +88,19 @@ inline int inputLimitMilliamps(uint8_t reg16) {
   return code < 6 ? MILLIAMPS[code] : 0;
 }
 
-/// REG 16 with the limit raised to 1500 mA when it is lower (or reserved),
-/// and the other bits kept. A 2000 mA setting is left alone.
-inline uint8_t raisedInputLimit(uint8_t reg16) {
-  if (inputLimitMilliamps(reg16) >= 1500) return reg16;
-  return (uint8_t)((reg16 & (uint8_t)~INPUT_LIMIT_MASK) | INPUT_LIMIT_1500MA);
+/// REG 16 with the limit raised to `targetMilliamps` when it is lower (or
+/// reserved), and the other bits kept; a higher setting is left alone. The
+/// target must be one of the six codes' values, and anything else leaves REG
+/// 16 unchanged. 1500 mA is the 1.75C's; the T-Watch-S3 asks for 900 mA,
+/// LilyGO's own setInputCurrentLimit(900).
+inline uint8_t raisedInputLimit(uint8_t reg16, int targetMilliamps = 1500) {
+  uint8_t target = 0xFF;
+  for (uint8_t code = 0; code < 6; ++code) {
+    if (inputLimitMilliamps(code) == targetMilliamps) target = code;
+  }
+  if (target == 0xFF) return reg16;
+  if (inputLimitMilliamps(reg16) >= targetMilliamps) return reg16;
+  return (uint8_t)((reg16 & (uint8_t)~INPUT_LIMIT_MASK) | target);
 }
 
 // REG 41H (INTEN2) and REG 49H (INTSTS2): the PWR key's interrupts. Bit 2 is

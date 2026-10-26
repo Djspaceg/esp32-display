@@ -208,6 +208,10 @@
         "invert_color": {"type": "boolean"},
         "round_display": {"type": "boolean"},
         "supports_command_rotation": {"type": "boolean"},
+        "window_follows_mirror": {
+          "type": "boolean",
+          "description": "A mirrored memory axis addresses the glass from the far end, so its window starts memory - glass - offset in. Absent means false: every quadrant uses the near offsets."
+        },
         "color_order": {"enum": ["rgb", "bgr"]},
         "data_endian": {"enum": ["big", "little"]},
         "pixel_depth": {"const": 16},
@@ -272,7 +276,7 @@
       ],
       "properties": {
         "controller": {
-          "enum": ["none", "axs5106l", "cst9217", "cst816", "gt911"]
+          "enum": ["none", "axs5106l", "cst9217", "cst816", "gt911", "ft6336"]
         },
         "sda": {"$ref": "#/$defs/pin"},
         "scl": {"$ref": "#/$defs/pin"},
@@ -428,6 +432,21 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 127
+        },
+        "sda": {
+          "$ref": "#/$defs/pin",
+          "description": "The AXP2101's own I2C bus, when it is not the touch bus. Absent means -1: the PMU shares the touch bus."
+        },
+        "scl": {"$ref": "#/$defs/pin"},
+        "panel_rails": {
+          "description": "AXP2101 ALDOs feeding the panel, backlight or touch, set to 3300 mV and switched on before panel bring-up.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["aldo1", "aldo2", "aldo3", "aldo4"]}
+        },
+        "input_limit_ma": {
+          "description": "The VBUS input current limit an AXP2101 is raised to when it holds less. Absent means 1500.",
+          "enum": [100, 500, 900, 1000, 1500, 2000]
         }
       }
     },

@@ -59,6 +59,7 @@ TOUCH_ENUMS = {
     "cst9217": "TouchController::Cst9217",
     "cst816": "TouchController::Cst816",
     "gt911": "TouchController::Gt911",
+    "ft6336": "TouchController::Ft6336",
 }
 POWER_ENUMS = {
     "none": "PowerController::None",
@@ -323,13 +324,16 @@ def _panel_initializer(descriptor: Dict[str, Any]) -> str:
         "%(hsync_back_porch)d, %(hsync_pulse_width)d, "
         "%(hsync_front_porch)d,\n"
         "    %(vsync_back_porch)d, %(vsync_pulse_width)d, "
-        "%(vsync_front_porch)d};\n"
+        "%(vsync_front_porch)d,\n"
+        "    %(window_follows_mirror)s};\n"
         % {
             **panel,
             "bus": PANEL_BUS_ENUMS[panel["bus"]],
             "invert": _bool(panel["invert_color"]),
             "round": _bool(panel["round_display"]),
             "rotation": _bool(panel["supports_command_rotation"]),
+            "window_follows_mirror": _bool(
+                board_descriptor.window_follows_mirror(descriptor)),
         }
     )
 
@@ -373,6 +377,10 @@ def _config_initializer(descriptor: Dict[str, Any]) -> str:
           for key in ("pin_panel_power", "pin_encoder_a", "pin_encoder_b")),
         _bool(descriptor["led"]["channel_order"] == "grb"),
         str(board_descriptor.backlight_floor_permille(descriptor)),
+        *(str(board_descriptor.optional_pin(descriptor, "power." + key))
+          for key in ("sda", "scl")),
+        "0x%02X" % board_descriptor.pmu_panel_aldo_mask(descriptor),
+        str(board_descriptor.pmu_input_limit_ma(descriptor)),
     ]
     rendered = []
     for index in range(0, len(values), 6):

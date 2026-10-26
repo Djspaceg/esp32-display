@@ -2422,6 +2422,38 @@ int main() {
       CHECK_EQ(squareWindow[i].y, 0);
     }
 
+    // The T-Watch-S3's ST7789V3 is the other kind: its window follows the
+    // mirror bits. LilyGO's setRotation() table, as quadrants: MADCTL 0 gap
+    // (0,0), MV|MX (0,0), MX|MY (0,80), MV|MY (80,0).
+    {
+      const board::PanelConfig &watch = *board::CONFIG_LILYGO_TWATCH_S3.panel;
+      CHECK(watch.windowFollowsMirror);
+      CHECK(!board::CONFIG_TOUCH_ST7789.panel->windowFollowsMirror);
+      CHECK_EQ(watch.orientationOffset, 2);
+      const uint16_t wantX[4] = {0, 0, 0, 80};
+      const uint16_t wantY[4] = {0, 0, 80, 0};
+      for (uint8_t q = 0; q < 4; q++) {
+        const panelorient::WindowGap gap = panelorient::windowGap(
+            watch.width, watch.height, watch.memoryWidth, watch.memoryHeight,
+            watch.colOffset, watch.rowOffset, q, false,
+            watch.windowFollowsMirror);
+        CHECK_EQ(gap.x, wantX[q]);
+        CHECK_EQ(gap.y, wantY[q]);
+      }
+      // The user's rotation 0 is LilyGO's upright, MX|MY with 80 rows.
+      const uint8_t upright = panelorient::quadrant(
+          panelorient::addressedRotation(
+              (uint8_t)(0 + watch.orientationOffset), false),
+          false);
+      CHECK_EQ(upright, 2);
+      // An installation mirror flips MX, which carries no gap on a 240-wide
+      // memory, so only the row axis ever moves.
+      const panelorient::WindowGap mirrored = panelorient::windowGap(
+          240, 240, 240, 320, 0, 0, 0, true, true);
+      CHECK_EQ(mirrored.x, 0);
+      CHECK_EQ(mirrored.y, 0);
+    }
+
     const panelorient::WindowGap centeredWindow[] = {
         panelorient::windowGap(172, 320, 240, 320, 34, 0, 0),
         panelorient::windowGap(172, 320, 240, 320, 34, 0, 1),
@@ -2866,7 +2898,7 @@ int main() {
         board::detectionPlanForPlatform(board::Platform::Esp32S3);
     CHECK(s3Plan.resolution == ResolutionPolicy::ExactlyOne);
     CHECK(board::GENERATED_MAX_PROBE_COUNT >= s3Plan.probeCount);
-    CHECK(s3Plan.probeCount == 6);
+    CHECK(s3Plan.probeCount == 7);
     // The 0.85's codec bus (ES8311 0x18, ES7210 0x40) runs only on 8 MiB
     // parts, where it is the one signal between the 0.85 and the XIAO.
     CHECK(s3Plan.probes[0].sda == 42 && s3Plan.probes[0].scl == 41);
@@ -2882,26 +2914,38 @@ int main() {
     CHECK(s3Plan.probes[1].addresses[0] == 0x15);
     CHECK(s3Plan.probes[1].addresses[1] == 0x20);
     CHECK(!s3Plan.probes[1].quietAfterMatch);
-    CHECK(s3Plan.probes[2].sda == 15 && s3Plan.probes[2].scl == 14);
-    CHECK(s3Plan.probes[2].addresses[0] == 0x5A);
-    CHECK(s3Plan.probes[2].addresses[1] == 0x34);
-    CHECK(s3Plan.probes[2].addresses[2] == 0x6A);
-    CHECK(s3Plan.probes[2].addresses[3] == 0x6B);
-    CHECK(s3Plan.probes[2].quietAfterMatch);
-    CHECK(s3Plan.probes[3].sda == 42 && s3Plan.probes[3].scl == 41);
-    CHECK(s3Plan.probes[3].addresses[0] == 0x15);
-    CHECK(s3Plan.probes[3].addresses[1] == 0x6A);
-    CHECK(s3Plan.probes[3].addresses[2] == 0x6B);
-    CHECK(s3Plan.probes[4].sda == 47 && s3Plan.probes[4].scl == 48);
-    CHECK(s3Plan.probes[4].addresses[0] == 0x6B);
+    // The T-Watch-S3's always-powered main bus, SDA GPIO10 / SCL GPIO11 (the
+    // 1.85C's pins the other way round): AXP2101, BMA4xx, PCF8563. Ahead of
+    // the 1.75C's and the knob's quiet probes, so a watch that answers never
+    // has its GPIO14/15 pulled up or its GPIO1 pulsed.
+    CHECK(s3Plan.probes[2].sda == 10 && s3Plan.probes[2].scl == 11);
+    CHECK(s3Plan.probes[2].addressCount == 3);
+    CHECK(s3Plan.probes[2].addresses[0] == 0x34);
+    CHECK(s3Plan.probes[2].addresses[1] == 0x19);
+    CHECK(s3Plan.probes[2].addresses[2] == 0x51);
+    CHECK(s3Plan.probes[2].flashMinExclusive == 8u * 1024u * 1024u);
+    CHECK(s3Plan.probes[2].resetPin == -1);
+    CHECK(!s3Plan.probes[2].quietAfterMatch);
+    CHECK(s3Plan.probes[3].sda == 15 && s3Plan.probes[3].scl == 14);
+    CHECK(s3Plan.probes[3].addresses[0] == 0x5A);
+    CHECK(s3Plan.probes[3].addresses[1] == 0x34);
+    CHECK(s3Plan.probes[3].addresses[2] == 0x6A);
+    CHECK(s3Plan.probes[3].addresses[3] == 0x6B);
+    CHECK(s3Plan.probes[3].quietAfterMatch);
+    CHECK(s3Plan.probes[4].sda == 42 && s3Plan.probes[4].scl == 41);
+    CHECK(s3Plan.probes[4].addresses[0] == 0x15);
+    CHECK(s3Plan.probes[4].addresses[1] == 0x6A);
+    CHECK(s3Plan.probes[4].addresses[2] == 0x6B);
+    CHECK(s3Plan.probes[5].sda == 47 && s3Plan.probes[5].scl == 48);
+    CHECK(s3Plan.probes[5].addresses[0] == 0x6B);
     // The knob's CST816D sits on the GPIO1-switched rail, so its probe "reset"
     // is a power cycle of that rail before addressing 0x15.
-    CHECK(s3Plan.probes[5].sda == 6 && s3Plan.probes[5].scl == 7);
-    CHECK(s3Plan.probes[5].addressCount == 1);
-    CHECK(s3Plan.probes[5].addresses[0] == 0x15);
-    CHECK(s3Plan.probes[5].resetPin == 1);
-    CHECK(s3Plan.probes[5].resetLowMs == 20);
-    CHECK(s3Plan.probes[5].resetReleaseWaitMs == 300);
+    CHECK(s3Plan.probes[6].sda == 6 && s3Plan.probes[6].scl == 7);
+    CHECK(s3Plan.probes[6].addressCount == 1);
+    CHECK(s3Plan.probes[6].addresses[0] == 0x15);
+    CHECK(s3Plan.probes[6].resetPin == 1);
+    CHECK(s3Plan.probes[6].resetLowMs == 20);
+    CHECK(s3Plan.probes[6].resetReleaseWaitMs == 300);
     {
       // A bus that acknowledges the reserved canary address is held low (the
       // knob's unpowered GC9A01 clamps GPIO11, which is the 1.85C's SDA), so
@@ -2932,35 +2976,64 @@ int main() {
             });
         CHECK(genuine.ackCount == 2);
       }
-      ProbeEvidence knobBoard[6] = {};
+      ProbeEvidence knobBoard[7] = {};
       knobBoard[1] = clamped;
-      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 5, knobBoard));
-      knobBoard[5] = {ProbeStatus::Started, 1};
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 6, knobBoard));
+      knobBoard[6] = {ProbeStatus::Started, 1};
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, knobBoard, 6)
+                                      16u * 1024u * 1024u, knobBoard, 7)
                 .variant == Variant::ElecrowKnob128);
     }
     {
       // The rail-pulsing knob probe runs only while nothing has answered, so
       // the other S3 boards never have their GPIO1 driven by it.
-      ProbeEvidence seen[6] = {};
-      for (uint8_t i = 0; i < 5; ++i) {
+      ProbeEvidence seen[7] = {};
+      for (uint8_t i = 0; i < 6; ++i) {
         CHECK(boarddetectmodel::shouldRunProbe(s3Plan, i, seen));
       }
-      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 5, seen));
-      seen[2] = {ProbeStatus::Started, 0};
-      seen[4] = {ProbeStatus::StartFailed, 0};
-      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 5, seen));
-      seen[3] = {ProbeStatus::Started, 1};
-      CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 5, seen));
-      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 4, seen));
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 6, seen));
+      seen[3] = {ProbeStatus::Started, 0};
+      seen[5] = {ProbeStatus::StartFailed, 0};
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 6, seen));
+      seen[4] = {ProbeStatus::Started, 1};
       CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 6, seen));
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 5, seen));
+      CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 7, seen));
       // Skipped evidence stays NotRun, so the knob candidate cannot match and
       // the board that answered still resolves on its own.
-      seen[5] = {};
+      seen[6] = {};
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, seen, 6)
+                                      16u * 1024u * 1024u, seen, 7)
                 .variant == Variant::TouchSt7789);
+    }
+    {
+      // The watch's own bus answering quiets the two probes that would drive
+      // its other pins: the 1.75C's (GPIO15 is its I2S word clock, GPIO14 its
+      // IMU interrupt) and the knob's (GPIO1 is its radio MOSI).
+      ProbeEvidence watch[7] = {};
+      watch[1] = {ProbeStatus::Started, 0};
+      watch[2] = {ProbeStatus::Started, 3};
+      CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 3, watch));
+      CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 6, watch));
+      watch[4] = {ProbeStatus::Started, 0};
+      watch[5] = {ProbeStatus::Started, 0};
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
+                                      16u * 1024u * 1024u, watch, 7)
+                .variant == Variant::LilygoTwatchS3);
+      // The boot log the watch printed on 2.0.0: both quiet probes timed out
+      // and were discarded, and with no probe of its own nothing matched.
+      CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
+                                      false, false, false, -1, true,
+                                      /*twatch*/ true) ==
+            Variant::LilygoTwatchS3);
+      // Not on 8 MiB parts, where its probe never runs.
+      CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, false, false,
+                                      false, false, false, -1, false,
+                                      /*twatch*/ true) == Variant::XiaoSt7735);
+      // Beside another board's own bus it is an ambiguity, never a guess.
+      CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, true,
+                                      false, false, false, -1, true,
+                                      /*twatch*/ true) == Variant::Unknown);
     }
     {
       // Detection runs before audio identification, and an address probe
@@ -2982,7 +3055,7 @@ int main() {
         const board::AudioConfig *audio =
             board::generatedAudioConfig(simulated.variant);
         CHECK(audio != nullptr && audio->pinAmpEnable != board::NO_PIN);
-        ProbeEvidence evidence[6] = {};
+        ProbeEvidence evidence[7] = {};
         bool touchedAmp = false;
         boarddetectmodel::runI2cProbes(
             s3Plan, 16u * 1024u * 1024u, evidence,
@@ -2999,7 +3072,7 @@ int main() {
             [](uint8_t) {});
         CHECK(!touchedAmp);
         CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                        16u * 1024u * 1024u, evidence, 6)
+                                        16u * 1024u * 1024u, evidence, 7)
                   .variant == simulated.variant);
       }
     }
@@ -3016,24 +3089,24 @@ int main() {
       // A guarded candidate never matches without a reading, and the
       // evaluator never reads past the sense array it was given.
       const board::SenseEvidence unread[1] = {};
-      ProbeEvidence shared[5] = {};
-      shared[4] = {ProbeStatus::Started, 1};
+      ProbeEvidence shared[6] = {};
+      shared[5] = {ProbeStatus::Started, 1};
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, shared, 5,
+                                      16u * 1024u * 1024u, shared, 6,
                                       unread, 1)
                 .matchedCandidates == 0);
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, shared, 5)
+                                      16u * 1024u * 1024u, shared, 6)
                 .matchedCandidates == 0);
       // A sense index beyond the supplied array is refused, not read.
       const board::SenseEvidence noSenses[1] = {{true, 600}};
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, shared, 5,
+                                      16u * 1024u * 1024u, shared, 6,
                                       noSenses, 0)
                 .matchedCandidates == 0);
       const board::SenseEvidence railSense[1] = {{true, 600}};
       const board::DetectionResult rail = board::detectFromEvidence(
-          board::Platform::Esp32S3, 16u * 1024u * 1024u, shared, 5,
+          board::Platform::Esp32S3, 16u * 1024u * 1024u, shared, 6,
           railSense, 1);
       CHECK(rail.variant == Variant::LcdSt7789_190);
       CHECK(rail.matchedCandidates == 1);
@@ -3043,15 +3116,15 @@ int main() {
       // from raw counts, so the 1.3 keeps auto-detecting on such silicon and
       // the 1.9 still separates from it. Nominal 12 dB scale: about 0.757 mV
       // per count, so 20 counts is ~15 mV and 700 counts ~530 mV.
-      ProbeEvidence shared[5] = {};
-      shared[4] = {ProbeStatus::Started, 1};
+      ProbeEvidence shared[6] = {};
+      shared[5] = {ProbeStatus::Started, 1};
       const int bareHeader[5] = {18, 20, 22, 19, 21};
       const board::SenseEvidence low =
           board::senseEvidenceFromSamples(bareHeader, nullptr, 5);
       CHECK(low.read);
       CHECK(low.millivolts <= 150);
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, shared, 5, &low, 1)
+                                      16u * 1024u * 1024u, shared, 6, &low, 1)
                 .variant == Variant::LcdSt7789_130);
       const int railDivider[5] = {690, 705, 700, 698, 702};
       const board::SenseEvidence high =
@@ -3059,7 +3132,7 @@ int main() {
       CHECK(high.read);
       CHECK(high.millivolts >= 250 && high.millivolts <= 700);
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      16u * 1024u * 1024u, shared, 5, &high, 1)
+                                      16u * 1024u * 1024u, shared, 6, &high, 1)
                 .variant == Variant::LcdSt7789_190);
       // Calibrated conversions win when present; a failed raw read or no
       // samples still leaves the evidence unread.
@@ -3109,20 +3182,20 @@ int main() {
       CHECK(geometry.valid());
     }
 
-    ProbeEvidence s3Evidence[6] = {};
+    ProbeEvidence s3Evidence[7] = {};
     // An 8 MiB part whose codec probe never ran is neither 8 MiB carrier.
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 6);
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 7);
     CHECK(detected.variant == Variant::Unknown);
     CHECK(detected.matchedCandidates == 0);
     s3Evidence[0] = {ProbeStatus::Started, 2};
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 6);
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 7);
     CHECK(detected.variant == Variant::LcdGc9107);
     CHECK(detected.matchedCandidates == 1);
     s3Evidence[0] = {ProbeStatus::Started, 0};
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 6);
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 7);
     CHECK(detected.variant == Variant::XiaoSt7735);
     CHECK(detected.matchedCandidates == 1);
     // A codec bus that answered the reserved canary is held low or
@@ -3130,7 +3203,7 @@ int main() {
     // whichever end of the address list the canary answered at.
     s3Evidence[0] = boarddetectmodel::addressProbeEvidence(true, 0, true);
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 6);
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 7);
     CHECK(detected.variant == Variant::Unknown);
     CHECK(detected.matchedCandidates == 0);
     {
@@ -3140,14 +3213,14 @@ int main() {
           });
       s3Evidence[0] = leading;
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      8u * 1024u * 1024u, s3Evidence, 6)
+                                      8u * 1024u * 1024u, s3Evidence, 7)
                 .variant == Variant::Unknown);
       unsigned transactions = 0;
       const ProbeEvidence trailing = boarddetectmodel::addressListEvidence(
           s3Plan.probes[0], [&](uint8_t) { return ++transactions >= 2; });
       s3Evidence[0] = trailing;
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      8u * 1024u * 1024u, s3Evidence, 6)
+                                      8u * 1024u * 1024u, s3Evidence, 7)
                 .variant == Variant::Unknown);
     }
     // A codec bus whose SCL is held low times out on every address, so the
@@ -3159,7 +3232,7 @@ int main() {
           s3Plan.probes[0], [](uint8_t) { return AddressReply::BusError; });
       CHECK(s3Evidence[0].status == ProbeStatus::Discarded);
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      8u * 1024u * 1024u, s3Evidence, 6)
+                                      8u * 1024u * 1024u, s3Evidence, 7)
                 .variant == Variant::Unknown);
       // One errored transaction anywhere in the list is enough.
       s3Evidence[0] = boarddetectmodel::addressReplyEvidence(
@@ -3172,7 +3245,7 @@ int main() {
       // stretches past the timeout must not hide its TCA9554 at 0x20, or the
       // 1.75C probe on its amp-enable GPIO15 would run.
       {
-        ProbeEvidence busy[6] = {};
+        ProbeEvidence busy[7] = {};
         busy[1] = boarddetectmodel::addressReplyEvidence(
             s3Plan.probes[1], [](uint8_t address) {
               return address == 0x15 ? AddressReply::BusError
@@ -3180,9 +3253,9 @@ int main() {
                                                        : AddressReply::Nack;
             });
         CHECK(busy[1].status == ProbeStatus::Started && busy[1].ackCount == 1);
-        CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 2, busy));
+        CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 3, busy));
         CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                        16u * 1024u * 1024u, busy, 6)
+                                        16u * 1024u * 1024u, busy, 7)
                   .variant == Variant::LcdSt77916);
         // An error on the canary itself still discards the whole bus.
         busy[1] = boarddetectmodel::addressReplyEvidence(
@@ -3210,39 +3283,39 @@ int main() {
       s3Evidence[0] = boarddetectmodel::addressReplyEvidence(
           s3Plan.probes[0], [](uint8_t) { return AddressReply::Nack; });
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      8u * 1024u * 1024u, s3Evidence, 6)
+                                      8u * 1024u * 1024u, s3Evidence, 7)
                 .variant == Variant::XiaoSt7735);
       s3Evidence[0] = boarddetectmodel::addressReplyEvidence(
           s3Plan.probes[0], [](uint8_t address) {
             return address == 0x18 ? AddressReply::Ack : AddressReply::Nack;
           });
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      8u * 1024u * 1024u, s3Evidence, 6)
+                                      8u * 1024u * 1024u, s3Evidence, 7)
                 .variant == Variant::LcdGc9107);
     }
     // A codec bus that would not start is no evidence for either.
     s3Evidence[0] = {ProbeStatus::StartFailed, 0};
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 6);
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 7);
     CHECK(detected.variant == Variant::Unknown);
     s3Evidence[0] = {};
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 6);
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 7);
     CHECK(detected.variant == Variant::Unknown);
     CHECK(detected.matchedCandidates == 0);
     // A silent codec bus on a 16 MiB part never makes it a XIAO.
     s3Evidence[0] = {ProbeStatus::Started, 0};
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 6);
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 7);
     CHECK(detected.variant == Variant::Unknown);
     s3Evidence[0] = {};
-    s3Evidence[2] = {ProbeStatus::Started, 1};
+    s3Evidence[3] = {ProbeStatus::Started, 1};
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 6);
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 7);
     CHECK(detected.variant == Variant::AmoledCo5300);
     s3Evidence[1] = {ProbeStatus::Started, 1};
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 6);
+        board::Platform::Esp32S3, 16u * 1024u * 1024u, s3Evidence, 7);
     CHECK(detected.variant == Variant::Unknown);
     CHECK(detected.matchedCandidates == 2);
 
@@ -3523,21 +3596,56 @@ int main() {
 
     const auto &generatedS3Plan =
         board::detectionPlanForPlatform(board::Platform::Esp32S3);
-    CHECK(generatedS3Plan.probes[2].addressCount == 4);
-    CHECK(generatedS3Plan.probes[2].addresses[0] == 0x5A);
-    CHECK(generatedS3Plan.probes[2].addresses[1] == 0x34);
-    CHECK(generatedS3Plan.probes[2].addresses[2] == 0x6A);
-    CHECK(generatedS3Plan.probes[2].addresses[3] == 0x6B);
+    CHECK(generatedS3Plan.probes[3].addressCount == 4);
+    CHECK(generatedS3Plan.probes[3].addresses[0] == 0x5A);
+    CHECK(generatedS3Plan.probes[3].addresses[1] == 0x34);
+    CHECK(generatedS3Plan.probes[3].addresses[2] == 0x6A);
+    CHECK(generatedS3Plan.probes[3].addresses[3] == 0x6B);
     CHECK(generatedS3Plan.probes[1].addressCount == 2);
     CHECK(generatedS3Plan.probes[1].addresses[0] == 0x15);
     CHECK(generatedS3Plan.probes[1].addresses[1] == 0x20);
-    CHECK(generatedS3Plan.probes[3].addressCount == 3);
-    CHECK(generatedS3Plan.probes[3].addresses[0] == 0x15);
-    CHECK(generatedS3Plan.probes[3].addresses[1] == 0x6A);
-    CHECK(generatedS3Plan.probes[3].addresses[2] == 0x6B);
+    CHECK(generatedS3Plan.probes[4].addressCount == 3);
+    CHECK(generatedS3Plan.probes[4].addresses[0] == 0x15);
+    CHECK(generatedS3Plan.probes[4].addresses[1] == 0x6A);
+    CHECK(generatedS3Plan.probes[4].addresses[2] == 0x6B);
 
     // AXP2101 PMU: shares the touch I2C bus. The touch C6 also has battery
     // telemetry, but through its GPIO0 divider rather than this PMU path.
+    {
+      // The T-Watch-S3: touch alone on GPIO39/40 with no reset line, the
+      // AXP2101 on its own GPIO10/11 bus (Wire1), ALDO2 and ALDO3 raised
+      // before the panel, and LilyGO's 900 mA input limit.
+      const board::Config &watch =
+          board::configFor(board::Variant::LilygoTwatchS3);
+      CHECK(&watch == &board::CONFIG_LILYGO_TWATCH_S3);
+      CHECK(watch.touch == board::TouchController::Ft6336);
+      CHECK(watch.pinTouchSda == 39 && watch.pinTouchScl == 40);
+      CHECK(watch.pinTouchRst == board::NO_PIN && watch.pinTouchInt == 16);
+      CHECK(watch.hasTouch());
+      CHECK(watch.hasPmuBus());
+      CHECK(watch.pmuSda() == 10 && watch.pmuScl() == 11);
+      CHECK(watch.power == board::PowerController::Axp2101);
+      CHECK(watch.hasBattery());
+      CHECK_EQ(watch.pmuPanelAldoMask, 0x06);
+      CHECK_EQ(watch.pmuInputLimitMilliamps, 900);
+      CHECK(watch.pinRst == board::NO_PIN);
+      CHECK(watch.pinBl == 45 && !watch.backlightInverted);
+      CHECK(watch.pinBootButton == 0);
+      CHECK(!watch.hasMotion());
+      // An FT6336 with no interrupt has nothing to wake it.
+      board::Config noInt = watch;
+      noInt.pinTouchInt = board::NO_PIN;
+      CHECK(!noInt.hasTouch());
+      // A PMU bus with no pins is the touch bus again.
+      board::Config shared = watch;
+      shared.pinPmuSda = board::NO_PIN;
+      CHECK(!shared.hasPmuBus());
+      CHECK(shared.pmuSda() == 39);
+    }
+    CHECK(!am.hasPmuBus());
+    CHECK(am.pmuSda() == am.pinTouchSda && am.pmuScl() == am.pinTouchScl);
+    CHECK(am.pmuPanelAldoMask == 0);
+    CHECK(am.pmuInputLimitMilliamps == 1500);
     CHECK(am.power == board::PowerController::Axp2101);
     CHECK(am.pinBatteryAdc == board::NO_PIN);
     CHECK(am.batteryAdcScale == 0);
@@ -4042,6 +4150,15 @@ int main() {
     CHECK_EQ((int)axp2101::raisedInputLimit(0x04), 0x04);
     CHECK_EQ((int)axp2101::raisedInputLimit(0x05), 0x05);  // 2000 mA kept
     CHECK_EQ((int)axp2101::raisedInputLimit(0x07), 0x04);  // reserved -> 1500
+    // The T-Watch-S3 asks for LilyGO's 900 mA: raised from 100 or 500 mA,
+    // never lowered from above it, never raised past it.
+    CHECK_EQ((int)axp2101::raisedInputLimit(0x00, 900), 0x02);
+    CHECK_EQ((int)axp2101::raisedInputLimit(0xA9, 900), 0xAA);
+    CHECK_EQ((int)axp2101::raisedInputLimit(0x02, 900), 0x02);
+    CHECK_EQ((int)axp2101::raisedInputLimit(0x04, 900), 0x04);
+    CHECK_EQ((int)axp2101::raisedInputLimit(0x07, 900), 0x02);
+    // A target that is not one of the six codes changes nothing.
+    CHECK_EQ((int)axp2101::raisedInputLimit(0x00, 1200), 0x00);
 
     // REG 41H/49H, the PWR key's interrupts (XPowersLib XPowersParams.hpp,
     // "IRQ2 REG 41H": bit 0 positive edge (up), bit 1 negative edge (down),
@@ -7139,7 +7256,7 @@ int main() {
                                    sizeof(hint)));
     CHECK(strcmp(hint,
                  "st7735-042|gc9107|st7789-130|st7789-154|st7789-190|co5300|"
-                 "st77916|gc9a01-knob-128|auto") == 0);
+                 "st77916|gc9a01-knob-128|st7789-twatch|auto") == 0);
     CHECK(board::formatProfileHint(board::Platform::Esp32C6, hint,
                                    sizeof(hint)));
     CHECK(strcmp(hint, "st7789|jd9853|auto") == 0);
@@ -7157,6 +7274,8 @@ int main() {
     CHECK(board::supportsDoom(board::Variant::LcdSt7789_130));
     CHECK(board::supportsDoom(board::Variant::LcdSt7789_190));
     CHECK(board::supportsDoom(board::Variant::ElecrowKnob128));
+    CHECK(board::supportsDoom(board::Variant::LilygoTwatchS3));
+    CHECK(!board::supportsAudio(board::Variant::LilygoTwatchS3));
     CHECK(!board::supportsAudio(board::Variant::ElecrowKnob128));
     CHECK(!board::supportsDoom(board::Variant::C3_2424S012));
     CHECK(!board::supportsDoom(board::Variant::TouchJd9853));

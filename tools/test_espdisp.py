@@ -4334,7 +4334,7 @@ def test_board_descriptor_validator():
         },
         "schema requires every descriptor section",
     )
-    check_equal(len(descriptors), 14, "all current boards have descriptors")
+    check_equal(len(descriptors), 15, "all current boards have descriptors")
     check_equal(
         sorted(
             descriptor["identity"]["profile"]
@@ -5215,7 +5215,7 @@ def test_universal_family_catalog_and_cli():
     check_equal(
         espdisp.FAMILIES["s3"].profiles,
         ("st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190",
-         "co5300", "st77916", "gc9a01-knob-128"),
+         "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"),
         "S3 maps all runtime profiles into one family")
     check_equal(espdisp.FAMILIES["p4"].profiles,
                 ("st7703-4b", "jd9365-4c", "jd9365-34c"),
@@ -8131,7 +8131,7 @@ def test_bootstrap_refusals_and_color_controls():
         {
             "s3-lcd-130", "s3-touch-lcd-154", "s3-lcd-190",
             "s3-touch-amoled-175c", "s3-touch-lcd-185c",
-            "s3-elecrow-knob-128",
+            "s3-elecrow-knob-128", "s3-lilygo-twatch-s3",
         },
         "a requested candidate retains every still-plausible S3 descriptor",
     )

@@ -289,6 +289,8 @@ extern "C" void doom_touch_init(void) {
         ? touchmap::GT911_ON_JD9365_4C
         : bcfg->variant == board::Variant::P4_34C
         ? touchmap::GT911_ON_JD9365_34C
+        : bcfg->variant == board::Variant::LilygoTwatchS3
+        ? touchmap::FT6336_ON_TWATCH_S3
         : touchmap::CST9217_ON_CO5300;
     bool available = boardtouch::init(*bcfg);
     if (!available) {

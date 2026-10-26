@@ -1,7 +1,7 @@
 // Which supported board this binary is running on, and every board fact that
 // follows from that.
 //
-// Fourteen board profiles are supported across the c3, c6, s3, and p4 release
+// Fifteen board profiles are supported across the c3, c6, s3, and p4 release
 // families. Each family has one artifact; runtime profile selection keeps the
 // physical panel/controller token independent from that family identity:
 //
@@ -29,6 +29,9 @@
 //   CrowPanel 1.28 Rotary Knob GC9A01 240x240 round LCD over SPI, CST816D
 //                              touch on I2C GPIO6/7, rotary encoder on
 //                              GPIO45/42 and knob press on GPIO41
+//   LilyGO T-Watch-S3          ST7789V3 240x240 over SPI, FT6336U touch on
+//                              I2C GPIO39/40, AXP2101 PMU on its own I2C
+//                              GPIO10/11 powering the panel (ALDO2/ALDO3)
 //   ESP32-P4-WIFI6-Touch-LCD-4B  ST7703 720x720 over MIPI-DSI, GT911 touch on
 //                              I2C GPIO7/8
 //   ESP32-P4-WIFI6-Touch-LCD-4C  JD9365 720x720 round LCD over MIPI-DSI, GT911
@@ -77,7 +80,14 @@ static const int8_t NO_PIN = -1;
 
 /// Which capacitive touch controller the board carries, so the sketch knows
 /// which register protocol to speak. The pins alone cannot tell these apart.
-enum class TouchController : uint8_t { None, Axs5106l, Cst9217, Cst816, Gt911 };
+enum class TouchController : uint8_t {
+  None,
+  Axs5106l,
+  Cst9217,
+  Cst816,
+  Gt911,
+  Ft6336,
+};
 
 /// How battery telemetry is obtained. The S3's AXP2101 reports voltage,
 /// percentage, external power, and charge state. The C6 touch board exposes
@@ -286,6 +296,32 @@ struct Config {
   /// lit level is black; level 0 still turns it off.
   uint16_t backlightFloorPermille = 0;
 
+  /// The PMU's own I2C bus, when it is not the touch bus. Both NO_PIN means
+  /// the AXP2101 shares the touch bus, as on the 1.75C. A carrier that
+  /// declares one (the T-Watch-S3: AXP2101 on GPIO10/11, touch alone on
+  /// GPIO39/40) gets the PMU on the chip's second I2C controller, Wire1, so
+  /// neither bus is ever re-pinned while the other is in use.
+  int8_t pinPmuSda = NO_PIN;
+  int8_t pinPmuScl = NO_PIN;
+
+  /// The AXP2101 ALDOs that feed the panel, its backlight or its touch
+  /// controller, as LDO_ONOFF_CTRL0 (90H) bits: bit 0 ALDO1 .. bit 3 ALDO4.
+  /// Panel bring-up sets each to PMU_PANEL_RAIL_MILLIVOLTS and switches it on
+  /// before the panel bus starts. Zero: no PMU-switched panel rail.
+  uint8_t pmuPanelAldoMask = 0;
+
+  /// The VBUS input current limit an AXP2101 board is raised to when its PMU
+  /// holds less (boardpower::init). 1500 mA from the 1.75C's brown-out; a
+  /// carrier whose vendor sets a lower one keeps the vendor's.
+  uint16_t pmuInputLimitMilliamps = 1500;
+
+  bool hasPmuBus() const {
+    return pinPmuSda != NO_PIN && pinPmuScl != NO_PIN;
+  }
+  /// The bus the PMU answers on: its own, or else the touch bus.
+  int8_t pmuSda() const { return hasPmuBus() ? pinPmuSda : pinTouchSda; }
+  int8_t pmuScl() const { return hasPmuBus() ? pinPmuScl : pinTouchScl; }
+
   SerialTransport serialTransport() const {
     return pinSerialRx != NO_PIN && pinSerialTx != NO_PIN
                ? SerialTransport::UartBridge
@@ -303,16 +339,20 @@ struct Config {
       return false;
     }
     if (touch == TouchController::Gt911) return true;  // polling profile
+    // The T-Watch-S3's FT6336U has no reset line (LilyGO: "Not Connected");
+    // its interrupt is all it needs.
+    if (touch == TouchController::Ft6336) return pinTouchInt != NO_PIN;
     return (pinTouchRst != NO_PIN || touchResetExio != 0) &&
            pinTouchInt != NO_PIN;
   }
   /// Whether a battery reading is possible at all on this board. The bus pins
-  /// are part of the test because the PMU is read over the touch I2C bus: a
-  /// controller with nowhere to talk cannot be read, and claiming otherwise
-  /// would make the firmware advertise a battery it can never sample.
+  /// are part of the test because the PMU is read over I2C (its own bus or
+  /// the touch bus): a controller with nowhere to talk cannot be read, and
+  /// claiming otherwise would make the firmware advertise a battery it can
+  /// never sample.
   bool hasBattery() const {
     if (power == PowerController::Axp2101) {
-      return pinTouchSda != NO_PIN && pinTouchScl != NO_PIN;
+      return pmuSda() != NO_PIN && pmuScl() != NO_PIN;
     }
     if (power == PowerController::BatteryAdc) {
       return pinBatteryAdc != NO_PIN && batteryAdcScale > 0;
@@ -691,6 +731,62 @@ static const Config CONFIG_ELECROW_KNOB_128 = {
     /* encoderB */ 42,
 };
 
+/// LilyGO T-Watch-S3: ST7789V3 240x240 IPS over 4-wire SPI (SCLK GPIO18, MOSI
+/// GPIO13, CS GPIO12, DC GPIO38; reset is an RC network, no GPIO), backlight
+/// PWM GPIO45 into an NPN low-side switch (active high). FT6336U touch alone
+/// on I2C GPIO39/40, INT GPIO16, no reset line. The AXP2101 (0x34) sits on
+/// the main bus GPIO10/11 beside the BMA423 IMU, PCF8563 RTC and DRV2605
+/// haptic driver, and its ALDO2 (backlight anode) and ALDO3 (panel logic,
+/// touch and touch pull-ups) must be on before the glass shows anything. The
+/// crown is the AXP2101 PWR key; BOOT is GPIO0. No IMU driver, speaker,
+/// microphone, radio, IR or haptics are driven here. Every fact is from
+/// LilyGO's code and schematic; boards/s3-lilygo-twatch-s3.toml cites each.
+static const Config CONFIG_LILYGO_TWATCH_S3 = {
+    Variant::LilygoTwatchS3,
+    "LilyGO T-Watch-S3 (ST7789V3)",
+    &PLATFORM_ESP32_S3,
+    &PANEL_ST7789V3_240X240,
+    /* sclk  */ 18,
+    /* mosi  */ 13,
+    /* data1 */ NO_PIN,
+    /* data2 */ NO_PIN,
+    /* data3 */ NO_PIN,
+    /* cs    */ 12,
+    /* dc    */ 38,
+    /* rst   */ NO_PIN,
+    /* bl    */ 45,
+    /* boot  */ 0,
+    /* led   */ NO_PIN,
+    TouchController::Ft6336,
+    /* touchSda */ 39,
+    /* touchScl */ 40,
+    /* touchRst */ NO_PIN,
+    /* touchInt */ 16,
+    PowerController::Axp2101,
+    /* batteryAdc */ NO_PIN,
+    /* adcScale */ 0,
+    /* batteryEnable */ NO_PIN,
+    /* chargeStatus */ NO_PIN,
+    MotionController::None,
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
+    /* pinBlEnable */ NO_PIN,
+    /* backlightInverted */ false,
+    /* serialRx */ NO_PIN,
+    /* serialTx */ NO_PIN,
+    /* panelPower */ NO_PIN,
+    /* encoderA */ NO_PIN,
+    /* encoderB */ NO_PIN,
+    /* rgbLedGrb */ false,
+    /* backlightFloorPermille */ 0,
+    /* pmuSda */ 10,
+    /* pmuScl */ 11,
+    /* pmuPanelAldoMask */ 0x06,  // ALDO2 | ALDO3
+    /* pmuInputLimitMilliamps */ 900,
+};
+
 /// Waveshare ESP32-P4-WIFI6-Touch-LCD-4C: JD9365 720x720 round IPS over
 /// two-lane MIPI-DSI, on the "XC" carrier it shares with the 3.4-inch 3.4C.
 /// Panel reset GPIO27; backlight PWM GPIO26 into the AP3032 boost feedback, so
@@ -885,7 +981,7 @@ inline DetectionResult detectFromEvidence(
 /// Resolve the S3 detector's independent profile signals. On 8 MiB flash an
 /// answer from the 0.85's codec bus is the GC9107 carrier and silence there is
 /// the XIAO's ST7735 (`codec085Bus`); each larger-flash profile has a distinct I2C
-/// bus, except that the 1.3-inch and 1.9-inch carriers share GPIO47/48 and are
+/// bus (the T-Watch-S3's is GPIO10/11, `twatchBus`), except that the 1.3-inch and 1.9-inch carriers share GPIO47/48 and are
 /// separated by the GPIO4 sense: the 1.9's system-rail divider versus the
 /// 1.3's bare header pin. A negative gpio4Millivolts means no reading. Exactly
 /// one candidate is required. No match and conflicting matches both remain
@@ -896,13 +992,15 @@ inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
                                   bool qmi8658Bus47_48,
                                   bool knob128Bus = false,
                                   int gpio4Millivolts = -1,
-                                  bool codec085Bus = true) {
+                                  bool codec085Bus = true,
+                                  bool twatchBus = false) {
   // Generated probe order: the 0.85's 8 MiB codec bus first, then the 1.85C
   // bus before the 1.75C's, because the 1.75C's SDA is the 1.85C V2's
-  // amplifier enable. The answers go through the same probe loop the device
-  // runs, so its skip rules apply here too.
-  const bool answers[] = {codec085Bus, st77916Bus, co5300Bus, st7789Bus,
-                          qmi8658Bus47_48, knob128Bus};
+  // amplifier enable, with the T-Watch-S3's main bus between them so its own
+  // answer quiets the later probes on its pins. The answers go through the
+  // same probe loop the device runs, so its skip rules apply here too.
+  const bool answers[] = {codec085Bus, st77916Bus, twatchBus, co5300Bus,
+                          st7789Bus, qmi8658Bus47_48, knob128Bus};
   const auto &plan = detectionPlanForPlatform(Platform::Esp32S3);
   boarddetectmodel::ProbeEvidence evidence[GENERATED_MAX_PROBE_COUNT] = {};
   boarddetectmodel::runI2cProbes(

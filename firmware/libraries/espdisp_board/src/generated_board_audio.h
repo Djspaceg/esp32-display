@@ -16,6 +16,7 @@ static constexpr AudioConfig GENERATED_BOARD_AUDIO[] = {
     {Variant::P4_4C, AudioAmp::Ns4150b, AudioCodec::Es8311, AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, 13, 12, 10, 9, 13, 12, 10, 11, -1, 53, 24, 64, 16000, 2, 16000, 2, -1, -1, 60},
     {Variant::P4_34C, AudioAmp::Ns4150b, AudioCodec::Es8311, AudioMic::Es7210, AudioSpeakerBus::I2s, AudioMicBus::I2s, 13, 12, 10, 9, 13, 12, 10, 11, -1, 53, 24, 64, 16000, 2, 16000, 2, -1, -1, 60},
     {Variant::XiaoSt7735, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, -1, -1, 0},
+    {Variant::LilygoTwatchS3, AudioAmp::None, AudioCodec::None, AudioMic::None, AudioSpeakerBus::None, AudioMicBus::None, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, -1, -1, 0},
 };
 
 inline const AudioConfig *generatedAudioConfig(Variant variant) {

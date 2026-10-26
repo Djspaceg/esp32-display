@@ -65,6 +65,8 @@ struct PinField {
 };
 static const PinField PIN_FIELDS[] = {
     {"pinPanelPower", &board::Config::pinPanelPower},
+    {"pinPmuSda", &board::Config::pinPmuSda},
+    {"pinPmuScl", &board::Config::pinPmuScl},
     {"pinSclk", &board::Config::pinSclk},
     {"pinMosi", &board::Config::pinMosi},
     {"pinData1", &board::Config::pinData1},
@@ -163,7 +165,7 @@ int main() {
       }
       ++profiles;
     }
-    CHECK(profiles == 14);
+    CHECK(profiles == 15);
 
     board::Config onUsb = board::CONFIG_TOUCH_ST7789;
     onUsb.pinSclk = 19;
@@ -175,6 +177,14 @@ int main() {
     board::Config rail = board::CONFIG_ELECROW_KNOB_128;
     rail.pinPanelPower = 20;
     CHECK(!rescuemodel::planPins(rail).panel);
+
+    // The watch raises its panel ALDOs over the PMU bus during bring-up; a
+    // PMU bus with no panel rail is not a panel pin.
+    board::Config pmuRail = board::CONFIG_LILYGO_TWATCH_S3;
+    pmuRail.pinPmuScl = 19;
+    CHECK(!rescuemodel::planPins(pmuRail).panel);
+    pmuRail.pmuPanelAldoMask = 0;
+    CHECK(rescuemodel::planPins(pmuRail).panel);
 
     board::Config bridge = board::CONFIG_LCD_ST7789_130;
     bridge.pinSerialTx = 19;
@@ -266,9 +276,12 @@ int main() {
                            strcmp(name, "pinBlEnable") == 0;
       const bool expanderOnly = strcmp(name, "pinTouchSda") == 0 ||
                                 strcmp(name, "pinTouchScl") == 0;
+      const bool pmuRailOnly = strcmp(name, "pinPmuSda") == 0 ||
+                               strcmp(name, "pinPmuScl") == 0;
       board::Config cfg = dsiOnly ? board::CONFIG_P4_4B
                           : expanderOnly ? board::CONFIG_LCD_ST77916
-                                         : board::CONFIG_TOUCH_ST7789;
+                          : pmuRailOnly ? board::CONFIG_LILYGO_TWATCH_S3
+                                        : board::CONFIG_TOUCH_ST7789;
       CHECK(PinField_lookup(cfg, name) != -2);
       for (const auto &field : PIN_FIELDS) {
         if (strcmp(field.name, name) == 0) {

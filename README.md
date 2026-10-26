@@ -24,7 +24,7 @@ and internal build-target keys are not release names.
 | Family | Chip | Runtime profiles | Canonical partition |
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
-| `s3` | `esp32s3` | `st7735-042`, `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-saves-ota` |
+| `s3` | `esp32s3` | `st7735-042`, `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128`, `st7789-twatch` | `universal-8m-doom-saves-ota` |
 | `p4` | `esp32p4` | `st7703-4b`, `jd9365-4c`, `jd9365-34c` | `p4-32m-saves-ota` |
 
 The S3 image uses an 8 MiB common-denominator dual-OTA layout and contains all
@@ -63,6 +63,7 @@ orientations or only a 180-degree flip.
 | `co5300` | [ESP32-S3-Touch-AMOLED-1.75C](https://www.waveshare.com/esp32-s3-touch-amoled-1.75c.htm) | `esp32s3` | CO5300 (AMOLED) | 466x466 | 1.75" | Yes | Yes | Four-way | 0/90/180/270 | Speaker + 2 mics |
 | `st77916` | [ESP32-S3-Touch-LCD-1.85C](https://www.waveshare.com/esp32-s3-touch-lcd-1.85c.htm) | `esp32s3` | ST77916 (round) | 360x360 | 1.85" | Yes | No | None | 0/90/180/270 | Speaker + 2 mics (V2; V1 stays off) |
 | `gc9a01-knob-128` | [ELECROW CrowPanel 1.28" Rotary Display](https://github.com/Elecrow-RD/CrowPanel-1.28inch-HMI-ESP32-Rotary-Display-240-240-IPS-Round-Touch-Knob-Screen) | `esp32s3` | GC9A01 (round) | 240x240 | 1.28" | Yes | No | None | 0/90/180/270 | None |
+| `st7789-twatch` | [LilyGO T-Watch-S3](https://wiki.lilygo.cc/products/t-watch-series/t-watch-s3/) | `esp32s3` | ST7789V3 | 240x240 | 1.54" | Yes | BMA4xx, no driver here | None | 0/90/180/270 | Speaker + PDM mic, not driven here |
 | `st7703-4b` | [ESP32-P4-WIFI6-Touch-LCD-4B](https://www.waveshare.com/esp32-p4-wifi6-touch-lcd-4b.htm) | `esp32p4` | ST7703 (MIPI-DSI) | 720x720 | 4" | Yes | No | None | 0/90/180/270 | Speaker + 2 mics |
 | `jd9365-4c` | [ESP32-P4-WIFI6-Touch-LCD-4C](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-4C) | `esp32p4` | JD9365 (MIPI-DSI, round) | 720x720 | 4" | Yes | No | None | 0/90/180/270 | Speaker + 2 mics |
 | `jd9365-34c` | [ESP32-P4-WIFI6-Touch-LCD-3.4C](https://www.waveshare.com/wiki/ESP32-P4-WIFI6-Touch-LCD-3.4C) | `esp32p4` | JD9365 (MIPI-DSI, round) | 800x800 | 3.4" | Yes | No | None | 0/90/180/270 | Speaker + 2 mics |
@@ -119,8 +120,12 @@ Profile selection occurs before panel GPIO initialization.
   with the pull-down enabled: the 1.9's system-rail divider reads at least
   250 mV and the 1.3's bare header pin at most 150 mV. The
   `gc9a01-knob-128` profile powers its GPIO1-switched panel rail for the probe
-  and looks for its CST816D at `0x15` on GPIO6/7. Exactly one compatible
-  candidate is required.
+  and looks for its CST816D at `0x15` on GPIO6/7. The `st7789-twatch` watch
+  answers on its always-powered main bus, SDA GPIO10 / SCL GPIO11 (AXP2101
+  `0x34`, BMA4xx `0x19`, PCF8563 `0x51`), probed before the 1.75C's and the
+  knob's buses. Its panel, backlight and touch run from AXP2101 ALDO2/ALDO3,
+  which panel bring-up sets to LilyGO's 3300 mV and switches on. Exactly one
+  compatible candidate is required.
 - P4's carriers wire identical I2C buses, so P4 needs signals that agree
   before choosing. It reads GPIO52 with the pull-down enabled (the 4B's
   Ethernet PHY pulls that MDIO line up with 1.5K; on the XC carrier of the 4C

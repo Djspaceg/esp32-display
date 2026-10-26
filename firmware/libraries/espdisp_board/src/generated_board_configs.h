@@ -7,91 +7,112 @@ static constexpr PanelConfig PANEL_GC9107_240X240 = {
     40000000, 0, 0, 0, 0,
     true, true, true,
     0, 0, 0, 0, 0,
-    0, 0, 0};
+    0, 0, 0,
+    false};
 static constexpr PanelConfig PANEL_ST7789_172X320 = {
     PanelProfile::St7789_172x320, PanelDriver::St7789, PanelBus::Spi,
     172, 320, 240, 320,
     80000000, 0, 34, 0, 0,
     true, false, true,
     0, 0, 0, 0, 0,
-    0, 0, 0};
+    0, 0, 0,
+    false};
 static constexpr PanelConfig PANEL_JD9853_172X320 = {
     PanelProfile::Jd9853_172x320, PanelDriver::Jd9853, PanelBus::Spi,
     172, 320, 240, 320,
     80000000, 0, 34, 0, 0,
     true, false, true,
     0, 0, 0, 0, 0,
-    0, 0, 0};
+    0, 0, 0,
+    false};
 static constexpr PanelConfig PANEL_JD9365_800X800 = {
     PanelProfile::Jd9365_800x800, PanelDriver::Jd9365, PanelBus::MipiDsi,
     800, 800, 0, 0,
     80000000, 0, 0, 0, 0,
     false, true, true,
     2, 1500, 20, 20, 40,
-    12, 4, 24};
+    12, 4, 24,
+    false};
 static constexpr PanelConfig PANEL_ST7703_720X720 = {
     PanelProfile::St7703_720x720, PanelDriver::St7703, PanelBus::MipiDsi,
     720, 720, 0, 0,
     38000000, 0, 0, 0, 0,
     false, false, true,
     2, 480, 50, 20, 50,
-    20, 4, 20};
+    20, 4, 20,
+    false};
 static constexpr PanelConfig PANEL_JD9365_720X720 = {
     PanelProfile::Jd9365_720x720, PanelDriver::Jd9365, PanelBus::MipiDsi,
     720, 720, 0, 0,
     80000000, 0, 0, 0, 0,
     false, true, true,
     2, 1500, 20, 20, 40,
-    12, 4, 24};
+    12, 4, 24,
+    false};
 static constexpr PanelConfig PANEL_GC9107_128X128 = {
     PanelProfile::Gc9107_128x128, PanelDriver::Gc9107, PanelBus::Spi,
     128, 128, 0, 0,
     40000000, 0, 2, 1, 2,
     true, false, true,
     0, 0, 0, 0, 0,
-    0, 0, 0};
+    0, 0, 0,
+    false};
 static constexpr PanelConfig PANEL_ST7789V2_240X240 = {
     PanelProfile::St7789V2_240x240, PanelDriver::St7789, PanelBus::Spi,
     240, 240, 0, 0,
     40000000, 0, 0, 0, 0,
     true, false, true,
     0, 0, 0, 0, 0,
-    0, 0, 0};
+    0, 0, 0,
+    false};
 static constexpr PanelConfig PANEL_ST7789V2_170X320 = {
     PanelProfile::St7789V2_170x320, PanelDriver::St7789, PanelBus::Spi,
     170, 320, 240, 320,
     40000000, 0, 35, 0, 0,
     true, false, true,
     0, 0, 0, 0, 0,
-    0, 0, 0};
+    0, 0, 0,
+    false};
+static constexpr PanelConfig PANEL_ST7789V3_240X240 = {
+    PanelProfile::St7789V3_240x240, PanelDriver::St7789, PanelBus::Spi,
+    240, 240, 240, 320,
+    40000000, 0, 0, 0, 2,
+    true, false, true,
+    0, 0, 0, 0, 0,
+    0, 0, 0,
+    true};
 static constexpr PanelConfig PANEL_CO5300_466X466 = {
     PanelProfile::Co5300_466x466, PanelDriver::Co5300, PanelBus::Qspi,
     466, 466, 0, 0,
     40000000, 0, 6, 0, 0,
     false, true, true,
     0, 0, 0, 0, 0,
-    0, 0, 0};
+    0, 0, 0,
+    false};
 static constexpr PanelConfig PANEL_ST7789_240X240 = {
     PanelProfile::St7789_240x240, PanelDriver::St7789, PanelBus::Spi,
     240, 240, 240, 320,
     40000000, 3, 0, 0, 0,
     true, false, true,
     0, 0, 0, 0, 0,
-    0, 0, 0};
+    0, 0, 0,
+    false};
 static constexpr PanelConfig PANEL_ST77916_360X360 = {
     PanelProfile::St77916_360x360, PanelDriver::St77916, PanelBus::Qspi,
     360, 360, 0, 0,
     80000000, 0, 0, 0, 0,
     true, true, true,
     0, 0, 0, 0, 0,
-    0, 0, 0};
+    0, 0, 0,
+    false};
 static constexpr PanelConfig PANEL_ST7735_96X54 = {
     PanelProfile::St7735_96x54, PanelDriver::St7735, PanelBus::Spi,
     96, 54, 0, 0,
     4000000, 0, 16, 0, 2,
     false, false, true,
     0, 0, 0, 0, 0,
-    0, 0, 0};
+    0, 0, 0,
+    false};
 
 static constexpr Config CONFIG_C3_2424S012 = {
     Variant::C3_2424S012, "ESP32-2424S012C-Y(B) (GC9A01A)", &PLATFORM_ESP32_C3, &PANEL_GC9107_240X240, 6, 7,
@@ -100,7 +121,8 @@ static constexpr Config CONFIG_C3_2424S012 = {
     1, 0, PowerController::None, -1, 0, -1,
     -1, MotionController::None, 0, 1, 1, 1,
     0, 0, -1, false, -1, -1,
-    -1, -1, -1, false, 0
+    -1, -1, -1, false, 0, -1,
+    -1, 0x00, 1500
 };
 static constexpr Config CONFIG_TOUCH_JD9853 = {
     Variant::TouchJd9853, "ESP32-C6-Touch-LCD-1.47 (JD9853)", &PLATFORM_ESP32_C6, &PANEL_JD9853_172X320, 1, 2,
@@ -109,7 +131,8 @@ static constexpr Config CONFIG_TOUCH_JD9853 = {
     20, 21, PowerController::BatteryAdc, 0, 3, -1,
     -1, MotionController::Qmi8658, 0, 1, 1, 1,
     0, 0, -1, false, -1, -1,
-    -1, -1, -1, false, 0
+    -1, -1, -1, false, 0, -1,
+    -1, 0x00, 1500
 };
 static constexpr Config CONFIG_P4_4B = {
     Variant::P4_4B, "ESP32-P4-WIFI6-Touch-LCD-4B (ST7703)", &PLATFORM_ESP32_P4, &PANEL_ST7703_720X720, -1, -1,
@@ -118,7 +141,8 @@ static constexpr Config CONFIG_P4_4B = {
     -1, -1, PowerController::None, -1, 0, -1,
     -1, MotionController::None, 0, 1, 1, 1,
     0, 0, 33, true, -1, -1,
-    -1, -1, -1, false, 510
+    -1, -1, -1, false, 510, -1,
+    -1, 0x00, 1500
 };
 static constexpr Config CONFIG_AMOLED_CO5300 = {
     Variant::AmoledCo5300, "ESP32-S3-Touch-AMOLED-1.75C (CO5300)", &PLATFORM_ESP32_S3, &PANEL_CO5300_466X466, 38, 4,
@@ -127,5 +151,6 @@ static constexpr Config CONFIG_AMOLED_CO5300 = {
     2, 11, PowerController::Axp2101, -1, 0, -1,
     -1, MotionController::Qmi8658, 1, 1, 0, 1,
     0, 0, -1, false, -1, -1,
-    -1, -1, -1, false, 0
+    -1, -1, -1, false, 0, -1,
+    -1, 0x00, 1500
 };

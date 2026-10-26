@@ -25,6 +25,7 @@
 
 #include <board_config.h>
 #include <board_io.h>
+#include <board_power.h>
 #if defined(ESPDISP_PANEL_S3_RUNTIME) || defined(ESPDISP_PANEL_C3_RUNTIME)
 #include <esp_lcd_gc9107.h>
 #if defined(ESPDISP_PANEL_S3_RUNTIME)
@@ -181,6 +182,9 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
     digitalWrite(cfg.pinPanelPower, HIGH);
     delay(20);
   }
+  // A PMU-switched panel rail (the T-Watch-S3's ALDO2/ALDO3), likewise up
+  // before the controller sees its first command.
+  if (!boardpower::enablePanelRails(cfg)) return false;
   if (!boardio::begin(cfg) || !boardio::pulseReset(cfg.panelResetExio)) {
     return false;
   }
@@ -394,7 +398,7 @@ inline void applyOrientation(esp_lcd_panel_handle_t panel,
   const panelorient::WindowGap gap = panelorient::windowGap(
       cfg.panel->width, cfg.panel->height, cfg.panel->memoryWidth,
       cfg.panel->memoryHeight, cfg.panel->colOffset, cfg.panel->rowOffset, q,
-      installationMirrorX);
+      installationMirrorX, cfg.panel->windowFollowsMirror);
   esp_lcd_panel_set_gap(panel, gap.x, gap.y);
   // Report what was actually programmed, because nothing else could: the panel
   // has no readback and the driver is told no resolution, so which quadrant got

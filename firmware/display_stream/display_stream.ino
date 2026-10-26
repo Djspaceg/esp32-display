@@ -561,6 +561,8 @@ void setup() {
               ? touchmap::CST816_ON_C3_2424S012
           : bcfg->variant == board::Variant::ElecrowKnob128
               ? touchmap::CST816_ON_ELECROW_KNOB_128
+          : bcfg->variant == board::Variant::LilygoTwatchS3
+              ? touchmap::FT6336_ON_TWATCH_S3
           : bcfg->variant == board::Variant::TouchSt7789
               ? touchmap::CST816_ON_ST7789_240
               : touchmap::AXS5106L_ON_C6;

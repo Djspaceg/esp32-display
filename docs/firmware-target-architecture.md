@@ -33,7 +33,7 @@ ST7703 or JD9365 timing, GT911 behavior, or carrier GPIOs.
 | Family | Chip | Runtime profiles | Partition compatibility |
 | --- | --- | --- | --- |
 | `c6` | `esp32c6` | `st7789`, `jd9853` | `default-8m` |
-| `s3` | `esp32s3` | `st7735-042`, `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128` | `universal-8m-doom-saves-ota` |
+| `s3` | `esp32s3` | `st7735-042`, `gc9107`, `st7789-130`, `st7789-154`, `st7789-190`, `co5300`, `st77916`, `gc9a01-knob-128`, `st7789-twatch` | `universal-8m-doom-saves-ota` |
 | `p4` | `esp32p4` | `st7703-4b`, `jd9365-4c`, `jd9365-34c` | `p4-32m-saves-ota` |
 
 C6 probes its shared I2C bus before panel GPIO initialization. S3 uses 8 MiB
@@ -166,6 +166,7 @@ under motion, and odd-orientation touch corners remain unverified.
 | `st7789-154` | Family compile and host profile tests | No attached carrier for current runtime testing |
 | `st77916` | Family compile and host profile tests | No attached carrier for current runtime testing |
 | `gc9a01-knob-128` | Family compile, host profile and encoder decoder tests | On-glass colour, orientation, touch corners and encoder direction unverified |
+| `st7789-twatch` | Family compile, host profile tests; detection, ALDO2/ALDO3 bring-up and FT6336 identity on an attached T-Watch-S3 | On-glass orientation, window gap, colour and touch corners need a person looking at the watch |
 
 ## Extension rules
 

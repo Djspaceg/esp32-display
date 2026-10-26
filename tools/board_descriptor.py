@@ -196,7 +196,8 @@ DSI_DETECTION_KINDS = {"dsi_panel_id", "dsi_panel_id_other"}
 DETECTION_RESOLUTIONS = {"first_match", "exactly_one"}
 PROBE_RELEASES = {"never", "always", "on_success_no_ack"}
 PANEL_BUSES = {"spi", "qspi", "mipi_dsi"}
-TOUCH_CONTROLLERS = {"none", "axs5106l", "cst9217", "cst816", "gt911"}
+TOUCH_CONTROLLERS = {
+    "none", "axs5106l", "cst9217", "cst816", "gt911", "ft6336"}
 POWER_CONTROLLERS = {"none", "axp2101", "battery_adc"}
 MOTION_CONTROLLERS = {"none", "qmi8658"}
 AUDIO_AMPS = {"none", "unknown", "ns4150b", "ns8002"}
@@ -227,6 +228,14 @@ OPTIONAL_FIELDS = {
     # The lowest PWM duty, in thousandths, at which the glass shows anything.
     # Absent (0) means it lights at any duty; see Config::backlightFloorPermille.
     "backlight.floor_permille": 0,
+    # A mirrored memory axis addresses the glass from the far end (the
+    # T-Watch-S3's ST7789V3); absent keeps the near offsets in every quadrant.
+    "panel.window_follows_mirror": False,
+    # AXP2101 ALDOs the panel, backlight or touch hang off, raised to 3300 mV
+    # and switched on before panel bring-up; see Config::pmuPanelAldoMask.
+    "power.panel_rails": [],
+    # The VBUS input current limit an AXP2101 is raised to when it holds less.
+    "power.input_limit_ma": 1500,
 }
 # Carrier wiring only some boards have. Absent means -1 (no such line), so a
 # descriptor written before a field existed stays valid without restating it.
@@ -237,7 +246,12 @@ OPTIONAL_PIN_DEFAULTS = {
     # The codec control bus, declared only when it is not the touch bus.
     "audio.pin_control_sda": -1,
     "audio.pin_control_scl": -1,
+    # The AXP2101's own I2C bus, declared only when it is not the touch bus.
+    "power.sda": -1,
+    "power.scl": -1,
 }
+PMU_PANEL_RAILS = ("aldo1", "aldo2", "aldo3", "aldo4")
+PMU_INPUT_LIMITS = (100, 500, 900, 1000, 1500, 2000)
 ALLOWED_TOP_LEVEL = {path.split(".", 1)[0] for path in REQUIRED_FIELDS}
 ALLOWED_SECTION_FIELDS: Dict[str, set[str]] = {}
 for required_path in (tuple(REQUIRED_FIELDS) + tuple(OPTIONAL_FIELDS)
@@ -269,6 +283,78 @@ def _validate_backlight_floor(descriptor: Dict[str, Any]) -> None:
     if floor != 0 and descriptor["backlight"]["kind"] not in ("pwm", "dsi_pwm"):
         raise DescriptorError(
             "%s: backlight.floor_permille is only for a PWM backlight" % source)
+
+
+def window_follows_mirror(descriptor: Dict[str, Any]) -> bool:
+    """Whether a mirrored axis windows from the far end of panel memory."""
+    return descriptor["panel"].get(
+        "window_follows_mirror",
+        OPTIONAL_FIELDS["panel.window_follows_mirror"])
+
+
+def pmu_panel_rails(descriptor: Dict[str, Any]) -> Tuple[str, ...]:
+    """The AXP2101 ALDOs panel bring-up switches on; () when none."""
+    value = descriptor["power"].get(
+        "panel_rails", OPTIONAL_FIELDS["power.panel_rails"])
+    return tuple(value) if isinstance(value, list) else value
+
+
+def pmu_panel_aldo_mask(descriptor: Dict[str, Any]) -> int:
+    """pmu_panel_rails as LDO_ONOFF_CTRL0 bits (ALDO1 = bit 0)."""
+    return sum(1 << PMU_PANEL_RAILS.index(rail)
+               for rail in pmu_panel_rails(descriptor))
+
+
+def pmu_input_limit_ma(descriptor: Dict[str, Any]) -> int:
+    """The VBUS input limit an AXP2101 is raised to; 1500 when absent."""
+    return descriptor["power"].get(
+        "input_limit_ma", OPTIONAL_FIELDS["power.input_limit_ma"])
+
+
+def _validate_pmu(descriptor: Dict[str, Any]) -> None:
+    source = _source_name(descriptor)
+    controller = descriptor["power"]["controller"]
+    sda = optional_pin(descriptor, "power.sda")
+    scl = optional_pin(descriptor, "power.scl")
+    if (sda == -1) != (scl == -1):
+        raise DescriptorError(
+            "%s: power.sda and power.scl must both be declared or both be -1"
+            % source)
+    rails = pmu_panel_rails(descriptor)
+    if not isinstance(rails, tuple) or any(
+            rail not in PMU_PANEL_RAILS for rail in rails):
+        raise DescriptorError(
+            "%s: power.panel_rails must list ALDOs from %s"
+            % (source, ", ".join(PMU_PANEL_RAILS)))
+    if len(set(rails)) != len(rails):
+        raise DescriptorError(
+            "%s: power.panel_rails contains a duplicate" % source)
+    limit = pmu_input_limit_ma(descriptor)
+    if (not isinstance(limit, int) or isinstance(limit, bool)
+            or limit not in PMU_INPUT_LIMITS):
+        raise DescriptorError(
+            "%s: power.input_limit_ma must be one of %s"
+            % (source, ", ".join(str(value) for value in PMU_INPUT_LIMITS)))
+    follows = window_follows_mirror(descriptor)
+    if not isinstance(follows, bool):
+        raise DescriptorError(
+            "%s: panel.window_follows_mirror must be bool" % source)
+    if controller != "axp2101" and (
+            sda != -1 or rails or
+            limit != OPTIONAL_FIELDS["power.input_limit_ma"]):
+        raise DescriptorError(
+            "%s: power.sda/scl, panel_rails and input_limit_ma are only for "
+            "an axp2101" % source)
+    if sda != -1 and descriptor["identity"]["target"] not in ("s3", "p4"):
+        # The PMU's own bus is the chip's second I2C controller (Wire1).
+        raise DescriptorError(
+            "%s: a separate power.sda/scl bus needs a second I2C controller "
+            "(s3 or p4)" % source)
+    if (sda != -1 and
+            (sda, scl) == (descriptor["touch"]["sda"],
+                           descriptor["touch"]["scl"])):
+        raise DescriptorError(
+            "%s: power.sda/scl repeat the touch bus; leave them -1" % source)
 
 
 def detection_sense(descriptor: Dict[str, Any]) -> Tuple[int, int, int]:
@@ -1299,6 +1385,7 @@ def validate_descriptors(
             descriptor, "motion.controller", MOTION_CONTROLLERS)
         _validate_audio(descriptor)
         _validate_optional_pins(descriptor)
+        _validate_pmu(descriptor)
         _validate_backlight_floor(descriptor)
         panel_symbol = descriptor["panel"]["symbol"]
         if panel_symbol in panels:

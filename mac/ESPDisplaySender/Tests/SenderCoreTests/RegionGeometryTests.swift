@@ -89,6 +89,7 @@ final class RegionPresetTests: XCTestCase {
             ("s3 co5300", PanelGeometry(width: 466, height: 466)),
             ("s3 st77916", PanelGeometry(width: 360, height: 360)),
             ("s3 gc9a01-knob-128", PanelGeometry(width: 240, height: 240)),
+            ("s3 st7789-twatch", PanelGeometry(width: 240, height: 240)),
             ("p4 st7703-4b", PanelGeometry(width: 720, height: 720)),
         ]
 

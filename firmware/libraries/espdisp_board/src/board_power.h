@@ -1,5 +1,8 @@
-// Battery telemetry for the four battery-capable boards:
-// - AXP2101 PMU on the ESP32-S3-Touch-AMOLED-1.75C.
+// Battery telemetry for the battery-capable boards:
+// - AXP2101 PMU on the ESP32-S3-Touch-AMOLED-1.75C (on the touch bus) and the
+//   LilyGO T-Watch-S3 (on its own bus, Wire1; see beginBus). The watch's
+//   panel, backlight and touch also run from AXP2101 ALDOs, which
+//   enablePanelRails() switches on before panel bring-up.
 // - A 3:1 resistor-divider ADC on the ESP32-C6-Touch-LCD-1.47.
 // - A shared 3:1 divider design on the ESP32-S3-LCD-0.85 and
 //   ESP32-S3-Touch-LCD-1.54, with an ADC enable and charger-status input.
@@ -134,6 +137,8 @@ inline int8_t activeAdcPin = board::NO_PIN;
 inline uint8_t activeAdcScale = 0;
 inline int8_t activeBatteryEnable = board::NO_PIN;
 inline int8_t activeChargeStatus = board::NO_PIN;
+/// The bus the AXP2101 register helpers talk on; beginBus() sets it.
+inline TwoWire *activeBus = &Wire;
 
 /// Read one register.
 ///
@@ -147,20 +152,122 @@ inline int8_t activeChargeStatus = board::NO_PIN;
 /// this register map came from drives it, and a STOP between the two phases is
 /// not the thing to suspect when a reading looks wrong.
 inline bool readRegister(uint8_t reg, uint8_t &value) {
-  Wire.beginTransmission(I2C_ADDR);
-  Wire.write(reg);
-  if (Wire.endTransmission() != 0) return false;
-  Wire.requestFrom(I2C_ADDR, (size_t)1);
-  if (Wire.available() != 1) return false;
-  value = (uint8_t)Wire.read();
+  TwoWire &wire = *activeBus;
+  wire.beginTransmission(I2C_ADDR);
+  wire.write(reg);
+  if (wire.endTransmission() != 0) return false;
+  wire.requestFrom(I2C_ADDR, (size_t)1);
+  if (wire.available() != 1) return false;
+  value = (uint8_t)wire.read();
   return true;
 }
 
 inline bool writeRegister(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(I2C_ADDR);
-  Wire.write(reg);
-  Wire.write(value);
-  return Wire.endTransmission() == 0;
+  TwoWire &wire = *activeBus;
+  wire.beginTransmission(I2C_ADDR);
+  wire.write(reg);
+  wire.write(value);
+  return wire.endTransmission() == 0;
+}
+
+/// Start the bus this board's PMU answers on and point the register helpers at
+/// it: Wire on the touch bus (GPIO15/14 on the 1.75C, where Wire.begin is
+/// idempotent enough to call from whichever of touch and power comes up
+/// first), or Wire1 on the PMU's own bus (GPIO10/11 on the T-Watch-S3), so the
+/// touch bus on Wire is never re-pinned under the touch driver. False when the
+/// bus will not start, or the board names its own PMU bus on a chip without a
+/// second I2C controller.
+inline bool beginBus(const board::Config &cfg) {
+  activeBus = &Wire;
+  if (cfg.hasPmuBus()) {
+#if SOC_HP_I2C_NUM > 1
+    activeBus = &Wire1;
+#else
+    return false;
+#endif
+  }
+  return activeBus->begin(cfg.pmuSda(), cfg.pmuScl(), I2C_HZ);
+}
+
+/// What LilyGO's T-Watch-S3 code programs every panel ALDO to before
+/// enabling it (LilyGoWatch2022::initPMU, setVoltage(CH_ALDO2/CH_ALDO3,
+/// 3300)); this firmware never sets another value.
+static const uint16_t PMU_PANEL_RAIL_MILLIVOLTS = 3300;
+// LDO_ONOFF_CTRL0: bits 0-3 switch ALDO1-ALDO4. ALDO1-ALDO4 voltage live in
+// 92H-95H, bits 4:0 = (millivolts - 500) / 100, bits 7:5 reserved and kept.
+// XPowersLib AXP2101Constants.h (LDO_ONOFF_CTRL0, LDO_VOL0..3_CTRL) and
+// setALDO2Voltage/enableALDO2:
+// https://github.com/lewisxhe/XPowersLib/blob/d6997586e68f65afd51baa775903df930db39821/src/REG/AXP2101Constants.h#L117-L122
+// https://github.com/lewisxhe/XPowersLib/blob/d6997586e68f65afd51baa775903df930db39821/src/XPowersAXP2101.hpp#L1810-L1892
+static const uint8_t REG_LDO_ONOFF_CTRL0 = 0x90;
+static const uint8_t REG_ALDO1_VOLTAGE = 0x92;
+static const uint8_t ALDO_COUNT = 4;
+static const uint8_t ALDO_VOLTAGE_MASK = 0x1F;
+
+constexpr uint8_t aldoVoltageCode(uint16_t millivolts) {
+  return (uint8_t)((millivolts - 500) / 100);
+}
+
+/// Raise the AXP2101 ALDOs a carrier's panel hangs off (cfg.pmuPanelAldoMask)
+/// before the panel bus starts: each is set to PMU_PANEL_RAIL_MILLIVOLTS when
+/// it holds another value, then switched on. On the T-Watch-S3 that is ALDO2
+/// (backlight LED anode) and ALDO3 (panel logic, touch controller and its
+/// pull-ups), which nothing else switches on after a full power loss. No
+/// other rail is touched, read-modify-write keeps every other bit, and true
+/// with nothing done when the carrier names no rail.
+///
+/// A rail that was off gets 120 ms before the caller goes on. The panel has
+/// no reset GPIO on this carrier (an RC network on its supply resets it), so
+/// nothing else orders its first command after that reset; 120 ms is a
+/// conservative choice, the wait ST7789 drivers give the panel after a reset
+/// or SLPOUT, not a measured figure. LilyGO's own code waits for nothing.
+inline bool enablePanelRails(const board::Config &cfg, bool verbose = true) {
+  if (cfg.power != board::PowerController::Axp2101 ||
+      cfg.pmuPanelAldoMask == 0) {
+    return true;
+  }
+  if (!beginBus(cfg)) {
+    if (verbose) {
+      Serial.printf("power: ERROR PMU bus would not start (sda=%d scl=%d)\n",
+                    cfg.pmuSda(), cfg.pmuScl());
+    }
+    return false;
+  }
+  const uint8_t mask = (uint8_t)(cfg.pmuPanelAldoMask & 0x0F);
+  const uint8_t code = aldoVoltageCode(PMU_PANEL_RAIL_MILLIVOLTS);
+  uint8_t onoff = 0;
+  if (!readRegister(REG_LDO_ONOFF_CTRL0, onoff)) {
+    if (verbose) {
+      Serial.printf("power: ERROR no AXP2101 at 0x%02X for the panel rails\n",
+                    I2C_ADDR);
+    }
+    return false;
+  }
+  for (uint8_t i = 0; i < ALDO_COUNT; ++i) {
+    if ((mask & (1u << i)) == 0) continue;
+    uint8_t voltage = 0;
+    if (!readRegister((uint8_t)(REG_ALDO1_VOLTAGE + i), voltage)) return false;
+    if ((voltage & ALDO_VOLTAGE_MASK) == code) continue;
+    const uint8_t set = (uint8_t)((voltage & ~ALDO_VOLTAGE_MASK) | code);
+    if (!writeRegister((uint8_t)(REG_ALDO1_VOLTAGE + i), set)) return false;
+    if (verbose) {
+      Serial.printf("power: AXP2101 ALDO%u %u mV -> %u mV\n", i + 1,
+                    (unsigned)((voltage & ALDO_VOLTAGE_MASK) * 100 + 500),
+                    (unsigned)PMU_PANEL_RAIL_MILLIVOLTS);
+    }
+  }
+  const bool wereOn = (onoff & mask) == mask;
+  if (!wereOn &&
+      !writeRegister(REG_LDO_ONOFF_CTRL0, (uint8_t)(onoff | mask))) {
+    return false;
+  }
+  if (verbose) {
+    Serial.printf("power: AXP2101 panel ALDOs 0x%X at %u mV, %s (90H=0x%02X)\n",
+                  mask, (unsigned)PMU_PANEL_RAIL_MILLIVOLTS,
+                  wereOn ? "already on" : "switched on", onoff);
+  }
+  if (!wereOn) delay(120);
+  return true;
 }
 
 /// Set bits in a register without disturbing the rest of it. The ADC and
@@ -233,9 +340,8 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     return false;
   }
 
-  // Shared with touch (GPIO15/14 on the 1.75C). Wire.begin is idempotent
-  // enough to call from whichever of the two comes up first.
-  if (!Wire.begin(cfg.pinTouchSda, cfg.pinTouchScl, I2C_HZ)) {
+  // The touch bus (GPIO15/14 on the 1.75C) or the PMU's own; see beginBus.
+  if (!beginBus(cfg)) {
     if (verbose) Serial.println("power: ERROR I2C bus would not start");
     return false;
   }
@@ -244,7 +350,7 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
   if (!readRegister(REG_STATUS1, status1)) {
     if (verbose) {
       Serial.printf("power: ERROR no AXP2101 at 0x%02X (sda=%d scl=%d)\n",
-                    I2C_ADDR, cfg.pinTouchSda, cfg.pinTouchScl);
+                    I2C_ADDR, cfg.pmuSda(), cfg.pmuScl());
     }
     return false;
   }
@@ -274,7 +380,7 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
     Serial.printf("power: AXP2101 ready (status1=0x%02X, battery %s, sda=%d scl=%d)\n",
                   status1,
                   axp2101::batteryPresent(status1) ? "present" : "absent",
-                  cfg.pinTouchSda, cfg.pinTouchScl);
+                  cfg.pmuSda(), cfg.pmuScl());
     // What the part last switched on and off for: a board that powers itself
     // off under load shows the cause here on its next boot.
     uint8_t pwron = 0, pwroff = 0;
@@ -294,12 +400,14 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
                     axp2101::powerKeyHoldAction(pwroffEn), pwroffEn, offOnLevel);
     }
   }
-  // The VBUS input current limit, raised to 1500 mA when lower. A 1.75C on
+  // The VBUS input current limit, raised to cfg.pmuInputLimitMilliamps
+  // (1500 mA unless the carrier's vendor sets less) when lower. A 1.75C on
   // USB ran its battery from 60% to 0% while reporting "charging" and then
   // lost power under load: the board drew more than the PMU let in.
   uint8_t inputLimit = 0;
   if (readRegister(REG_INPUT_CURRENT_LIMIT, inputLimit)) {
-    const uint8_t raised = axp2101::raisedInputLimit(inputLimit);
+    const uint8_t raised =
+        axp2101::raisedInputLimit(inputLimit, cfg.pmuInputLimitMilliamps);
     const bool wrote =
         raised != inputLimit && writeRegister(REG_INPUT_CURRENT_LIMIT, raised);
     uint8_t now = inputLimit;

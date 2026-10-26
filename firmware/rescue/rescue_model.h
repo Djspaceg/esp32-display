@@ -57,6 +57,9 @@ inline PinPlan planPins(const board::Config &cfg) {
   };
   const bool expander = cfg.hasExpanderReset();
   const bool dsi = cfg.isDsi();
+  // A PMU-switched panel rail is raised over the PMU's own bus during panel
+  // bring-up (boardpower::enablePanelRails), so those are panel pins too.
+  const bool pmuRail = cfg.pmuPanelAldoMask != 0;
   // The DSI backend configures its backlight PWM and enable line inside panel
   // bring-up, so on DSI they are panel pins.
   const int8_t panelPins[] = {
@@ -66,6 +69,8 @@ inline PinPlan planPins(const board::Config &cfg) {
       expander ? cfg.pinTouchScl : board::NO_PIN,
       dsi ? cfg.pinBl : board::NO_PIN,
       dsi ? cfg.pinBlEnable : board::NO_PIN,
+      pmuRail ? cfg.pinPmuSda : board::NO_PIN,
+      pmuRail ? cfg.pinPmuScl : board::NO_PIN,
   };
   const int8_t backlightPins[] = {dsi ? board::NO_PIN : cfg.pinBl};
   const int8_t bridgePins[] = {cfg.pinSerialRx, cfg.pinSerialTx};
@@ -85,7 +90,7 @@ inline PinPlan planPins(const board::Config &cfg) {
 static const char *const PANEL_PIN_FIELDS[] = {
     "pinPanelPower", "pinSclk", "pinMosi", "pinData1", "pinData2",
     "pinData3", "pinCs", "pinDc", "pinRst", "pinTouchSda", "pinTouchScl",
-    "pinBl", "pinBlEnable",
+    "pinBl", "pinBlEnable", "pinPmuSda", "pinPmuScl",
 };
 static const char *const BACKLIGHT_PIN_FIELDS[] = {"pinBl"};
 static const char *const BRIDGE_PIN_FIELDS[] = {"pinSerialRx", "pinSerialTx"};
@@ -348,10 +353,16 @@ inline Screen layout(int width, int height, bool round, const char *name,
   for (; titleScale >= 1; --titleScale) {
     int nameScale = titleScale / 2 > 1 ? titleScale / 2 : 1;
     uint8_t nameCount = MAX_NAME_LINES + 1;
+    // The profile token shares the name's scale and is never wrapped, so the
+    // scale must fit it on one line too (st7789-twatch at 3x is wider than
+    // 240-pixel glass).
     for (; nameScale >= 1; --nameScale) {
       nameCount = wrap(name, (uint8_t)((boxW + nameScale) / (6 * nameScale)),
                        nameLines);
-      if (nameCount <= MAX_NAME_LINES) break;
+      if (nameCount <= MAX_NAME_LINES &&
+          (nameScale == 1 || textWidth(strlen(profile), nameScale) <= boxW)) {
+        break;
+      }
     }
     if (nameScale < 1) nameScale = 1;
     if (nameCount > MAX_NAME_LINES) continue;

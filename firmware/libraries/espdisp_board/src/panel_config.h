@@ -33,6 +33,7 @@ enum class PanelProfile : uint8_t {
   Jd9365_720x720,
   Jd9365_800x800,
   St7735_96x54,
+  St7789V3_240x240,
 };
 
 struct PanelConfig {
@@ -59,5 +60,10 @@ struct PanelConfig {
   uint16_t vsyncBackPorch;
   uint16_t vsyncPulseWidth;
   uint16_t vsyncFrontPorch;
+  /// Whether a mirrored axis addresses the glass from the far end of the
+  /// controller's memory, so the window there starts memory - glass - offset
+  /// in (panelorient::windowGap). False keeps every quadrant on the panel's
+  /// own near offsets, as measured on the Waveshare 1.54-inch ST7789.
+  bool windowFollowsMirror = false;
 };
 }  // namespace board

@@ -17,10 +17,11 @@ enum class Variant : uint8_t {
   P4_4C = 12,
   P4_34C = 13,
   XiaoSt7735 = 14,
+  LilygoTwatchS3 = 15,
 };
 
 constexpr bool supportsDoom(Variant variant) {
-  return variant == Variant::AmoledCo5300 || variant == Variant::LcdSt77916 || variant == Variant::LcdGc9107 || variant == Variant::TouchSt7789 || variant == Variant::P4_4B || variant == Variant::LcdSt7789_130 || variant == Variant::LcdSt7789_190 || variant == Variant::ElecrowKnob128 || variant == Variant::P4_4C || variant == Variant::P4_34C || variant == Variant::XiaoSt7735;
+  return variant == Variant::AmoledCo5300 || variant == Variant::LcdSt77916 || variant == Variant::LcdGc9107 || variant == Variant::TouchSt7789 || variant == Variant::P4_4B || variant == Variant::LcdSt7789_130 || variant == Variant::LcdSt7789_190 || variant == Variant::ElecrowKnob128 || variant == Variant::P4_4C || variant == Variant::P4_34C || variant == Variant::XiaoSt7735 || variant == Variant::LilygoTwatchS3;
 }
 
 constexpr bool supportsAudio(Variant variant) {
