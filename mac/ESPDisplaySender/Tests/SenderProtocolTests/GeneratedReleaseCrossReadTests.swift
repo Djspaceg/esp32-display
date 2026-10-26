@@ -25,8 +25,9 @@ final class GeneratedReleaseCrossReadTests: XCTestCase {
                 XCTAssertNil(bundle.firmwareBuild)
                 XCTAssertFalse(revision.artifact.contains("+"))
                 // Each shipping version carries its own release-notes.md
-                // section: ten items for 1.5.0, five for 2.0.0.
-                let noteCounts = ["1.5.0": 10, "2.0.0": 5]
+                // section: ten items for 1.5.0, five for 2.0.0, one for
+                // 2.1.0.
+                let noteCounts = ["1.5.0": 10, "2.0.0": 5, "2.1.0": 1]
                 XCTAssertEqual(
                     bundle.releaseNotes?.count, noteCounts[revision.version],
                     revision.version)

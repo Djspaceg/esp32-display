@@ -35,8 +35,9 @@ final class FirmwareSourceIdentityTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("firmware-releases")
-        // S3 rolled forward past 1.5.0 when the XIAO joined its family.
-        for (family, version) in [("c3", "1.5.0"), ("c6", "1.5.0"), ("s3", "2.0.0"),
+        // S3 rolled forward past 1.5.0 when the XIAO joined its family, and
+        // past 2.0.0 when the T-Watch-S3 did.
+        for (family, version) in [("c3", "1.5.0"), ("c6", "1.5.0"), ("s3", "2.1.0"),
                                   ("p4", "1.5.0")] {
             let bundle = try FirmwareBundle.read(Data(contentsOf: root
                 .appendingPathComponent("\(family)/espdisp-\(family)-\(version).espdispfw")))

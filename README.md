@@ -201,7 +201,7 @@ Inspect each artifact independently:
 
 ```sh
 python3 tools/espdisp.py bundle-info firmware-releases/c6/espdisp-c6-1.5.0.espdispfw
-python3 tools/espdisp.py bundle-info firmware-releases/s3/espdisp-s3-2.0.0.espdispfw
+python3 tools/espdisp.py bundle-info firmware-releases/s3/espdisp-s3-2.1.0.espdispfw
 python3 tools/espdisp.py bundle-info firmware-releases/p4/espdisp-p4-1.5.0.espdispfw
 ```
 

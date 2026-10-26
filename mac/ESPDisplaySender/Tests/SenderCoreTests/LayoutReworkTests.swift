@@ -87,7 +87,7 @@ final class LayoutReworkTests: XCTestCase {
         }
         XCTAssertEqual(Set(cases.map(\.0.matchText)).count, cases.count)
         // An unrecognised build names the newest bundled release.
-        XCTAssertTrue(cases[0].0.matchText.contains("Bundled: c6 2.0.0"), cases[0].0.matchText)
+        XCTAssertTrue(cases[0].0.matchText.contains("Bundled: c6 2.1.0"), cases[0].0.matchText)
         XCTAssertEqual(cases[2].0.runningText, "1.5.0")
         XCTAssertEqual(cases[4].0.runningText, "Legacy firmware")
     }

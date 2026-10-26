@@ -58,13 +58,15 @@ final class BundledFirmwareSelectionTests: XCTestCase {
             }
 
             XCTAssertEqual(rows.count, entry.revisions.count, family)
-            // Newest first: to a panel on 1.5.0, 2.0.0 is an upgrade and its
-            // own build a reinstall. S3 rolled forward past 1.5.0 when the
-            // XIAO joined its family.
+            // Newest first: to a panel on 1.5.0, 2.1.0 and 2.0.0 are
+            // upgrades and its own build a reinstall. S3 rolled forward past
+            // 1.5.0 when the XIAO joined its family and past 2.0.0 when the
+            // T-Watch-S3 did.
             XCTAssertEqual(
                 rows,
                 family == "s3"
-                    ? ["2.0.0 - Upgrade"] : ["2.0.0 - Upgrade", "1.5.0 - Reinstall"],
+                    ? ["2.1.0 - Upgrade"]
+                    : ["2.1.0 - Upgrade", "2.0.0 - Upgrade", "1.5.0 - Reinstall"],
                 family)
         }
     }
