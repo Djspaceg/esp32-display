@@ -185,9 +185,11 @@ def render_variants(descriptors: Sequence[Dict[str, Any]]) -> str:
             % (identity["variant"], identity["variant_value"])
         )
     lines.append("};\n\n")
+    # Doom is the family's: the validator has required capabilities.doom to
+    # equal family.requires_doom_wad, and this reads the family fact.
     doom = [
         "variant == Variant::%s" % item["identity"]["variant"]
-        for item in ordered if item["capabilities"]["doom"]
+        for item in ordered if item["family"]["requires_doom_wad"]
     ]
     lines.append("constexpr bool supportsDoom(Variant variant) {\n")
     lines.append("  return %s;\n" % (" || ".join(doom) if doom else "false"))
@@ -199,6 +201,42 @@ def render_variants(descriptors: Sequence[Dict[str, Any]]) -> str:
     lines.append("\nconstexpr bool supportsAudio(Variant variant) {\n")
     lines.append("  return %s;\n" % (" || ".join(audio) if audio else "false"))
     lines.append("}\n")
+    return "".join(lines)
+
+
+def render_touch_calibrations(descriptors: Sequence[Dict[str, Any]]) -> str:
+    ordered = sorted(
+        descriptors, key=lambda item: item["identity"]["variant_value"])
+    lines = [
+        HEADER,
+        "#pragma once\n\n",
+        "struct GeneratedTouchCalibration {\n",
+        "  Variant variant;\n",
+        "  int16_t panelShort;\n",
+        "  int16_t panelLong;\n",
+        "  bool rawXMirrored;\n",
+        "  bool rawYMirrored;\n",
+        "  bool rotateClockwise;\n",
+        "};\n\n",
+        "static constexpr GeneratedTouchCalibration "
+        "GENERATED_TOUCH_CALIBRATIONS[] = {\n",
+    ]
+    for item in ordered:
+        touch = item["touch"]
+        lines.append("    {Variant::%s, %d, %d, %s, %s, %s},\n" % (
+            item["identity"]["variant"], touch["panel_short"],
+            touch["panel_long"], _bool(touch["raw_x_mirrored"]),
+            _bool(touch["raw_y_mirrored"]), _bool(touch["rotate_clockwise"])))
+    lines.extend([
+        "};\n\n",
+        "inline const GeneratedTouchCalibration *generatedTouchCalibration(\n",
+        "    Variant variant) {\n",
+        "  for (const auto &calibration : GENERATED_TOUCH_CALIBRATIONS) {\n",
+        "    if (calibration.variant == variant) return &calibration;\n",
+        "  }\n",
+        "  return nullptr;\n",
+        "}\n",
+    ])
     return "".join(lines)
 
 
@@ -872,6 +910,8 @@ def expected_outputs(repo_root: str) -> Dict[str, str]:
             render_identity(descriptors),
         "firmware/libraries/espdisp_board/src/generated_board_audio.h":
             render_audio(descriptors),
+        "firmware/libraries/espdisp_board/src/generated_board_touch.h":
+            render_touch_calibrations(descriptors),
         "firmware/libraries/espdisp_board/src/generated_board_configs.h":
             render_configs(descriptors),
         "firmware/libraries/espdisp_board/src/generated_board_config_lookup.h":

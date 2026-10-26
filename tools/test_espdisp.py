@@ -4977,6 +4977,24 @@ def test_board_descriptor_validator():
             [int(value) for value in written],
             [board_descriptor.backlight_floor_permille(item)],
             "%s's hand-written floor matches its descriptor" % symbol)
+    # Doom is a family capability, never a per-board opt-in: a board has it
+    # exactly when its family image carries the Doom runtime and WAD.
+    for item in descriptors:
+        check_equal(item["capabilities"]["doom"],
+                    item["family"]["requires_doom_wad"],
+                    "%s's Doom capability follows its family" % item["key"])
+    opted_out = copy.deepcopy(
+        next(item for item in descriptors if item["key"] == "s3-lcd-130"))
+    opted_out["capabilities"]["doom"] = False
+    check_descriptor_fails(
+        [opted_out], "capabilities.doom must equal family.requires_doom_wad",
+        "a board cannot opt out of a feature its family runs")
+    opted_in = copy.deepcopy(
+        next(item for item in descriptors if item["key"] == "c6-lcd-147"))
+    opted_in["capabilities"]["doom"] = True
+    check_descriptor_fails(
+        [opted_in], "capabilities.doom must equal family.requires_doom_wad",
+        "nor opt into one its family image does not carry")
     watch = next(item for item in descriptors
                  if item["key"] == "s3-lilygo-twatch-s3")
     check_equal(board_descriptor.boot_button_optional(watch), True,

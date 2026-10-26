@@ -28,6 +28,11 @@
 #include "quake_input_model.h"
 #include "quake_platform.h"
 #include "../quake_mode.h"  // the render size's NVS keys
+#include <board_touch_calibration.h>
+
+static_assert(QUAKE_MIN_PANEL_WIDTH == quakeinput::RENDER_WIDTH &&
+                  QUAKE_MIN_PANEL_HEIGHT == quakeinput::RENDER_HEIGHT,
+              "quakeSupportsConfig states frameLayout's own limit");
 
 // Doom's USB host glue (firmware/doom/src/platform/doom_usb_input.h). Polled in
 // its menu context it hands every key over as Doom key codes through Doom's
@@ -391,15 +396,7 @@ extern "C" bool quake_input_setup(void) {
   void* io = heap_caps_calloc(1, sizeof(QuakeIo), MALLOC_CAP_SPIRAM);
   if (io == nullptr) return false;
   s_io = new (io) QuakeIo();
-  s_calibration = bcfg->variant == board::Variant::P4_4C
-                      ? touchmap::GT911_ON_JD9365_4C
-                  : bcfg->variant == board::Variant::P4_34C
-                      ? touchmap::GT911_ON_JD9365_34C
-                  : bcfg->variant == board::Variant::AmoledCo5300
-                      ? touchmap::CST9217_ON_CO5300
-                  : bcfg->variant == board::Variant::LcdSt77916
-                      ? touchmap::CST816_ON_ST77916
-                      : touchmap::GT911_ON_ST7703_4B;
+  s_calibration = board::touchCalibrationFor(bcfg->variant);
   s_touch_ready = boardtouch::init(*bcfg);
   s_tracker.reset();
   quake_log(s_touch_ready ? "touch ready" : "touch unavailable; BOOT and USB only");

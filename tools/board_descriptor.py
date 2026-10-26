@@ -321,6 +321,16 @@ def boot_button_optional(descriptor: Dict[str, Any]) -> bool:
         OPTIONAL_FIELDS["carrier.boot_button_optional"])
 
 
+def _validate_doom_capability(descriptor: Dict[str, Any]) -> None:
+    """Doom is a family capability, never a per-board opt-in."""
+    if descriptor["capabilities"]["doom"] != \
+            descriptor["family"]["requires_doom_wad"]:
+        raise DescriptorError(
+            "%s: capabilities.doom must equal family.requires_doom_wad: a "
+            "board runs Doom exactly when its family image carries it"
+            % _source_name(descriptor))
+
+
 def _validate_boot_optional(descriptor: Dict[str, Any]) -> None:
     source = _source_name(descriptor)
     optional = boot_button_optional(descriptor)
@@ -1413,6 +1423,7 @@ def validate_descriptors(
         _validate_optional_pins(descriptor)
         _validate_pmu(descriptor)
         _validate_boot_optional(descriptor)
+        _validate_doom_capability(descriptor)
         _validate_backlight_floor(descriptor)
         panel_symbol = descriptor["panel"]["symbol"]
         if panel_symbol in panels:

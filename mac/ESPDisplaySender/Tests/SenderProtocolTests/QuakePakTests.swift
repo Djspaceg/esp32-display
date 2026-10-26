@@ -131,4 +131,30 @@ final class QuakePakTests: XCTestCase {
         XCTAssertFalse(QuakePak.supports(chip: "esp32c3", profile: nil))
         XCTAssertFalse(QuakePak.supports(chip: nil))
     }
+
+    /// Which boards get Quake is a capability of the board, never a list of
+    /// profiles: every S3 and P4 profile in the board catalog is offered it
+    /// exactly when its panel holds the engine's 320x240 frame.
+    func testQuakeIsOfferedByCapabilityNotByProfileList() {
+        var offered: Set<String> = []
+        for family in ["s3", "p4"] {
+            let chip = family == "s3" ? QuakePak.s3Chip : QuakePak.p4Chip
+            for profile in GeneratedBoardCatalog.profilesByTarget[family] ?? [] {
+                let geometry = try! XCTUnwrap(GeneratedBoardCatalog.geometryByProfile[profile])
+                let holds = geometry.width >= 320 && geometry.height >= 240
+                XCTAssertEqual(QuakePak.supports(chip: chip, profile: profile), holds, profile)
+                if holds { offered.insert(profile) }
+            }
+        }
+        XCTAssertEqual(offered, ["co5300", "st77916", "st7703-4b", "jd9365-4c", "jd9365-34c"])
+        // The rule itself, for a panel no board has yet.
+        XCTAssertTrue(QuakePak.panelHoldsFrame(PanelGeometry(width: 480, height: 320)))
+        XCTAssertFalse(QuakePak.panelHoldsFrame(PanelGeometry(width: 240, height: 320)))
+        XCTAssertFalse(QuakePak.panelHoldsFrame(PanelGeometry(width: 240, height: 240)))
+        // A profile this app does not know yet (newer firmware): offered, and
+        // the board and the write decide.
+        XCTAssertTrue(QuakePak.supports(chip: QuakePak.s3Chip, profile: "future-panel"))
+        // A profile of a family without Quake, on any chip, is not offered.
+        XCTAssertFalse(QuakePak.supports(chip: QuakePak.s3Chip, profile: "jd9853"))
+    }
 }

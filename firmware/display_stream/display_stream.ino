@@ -52,6 +52,7 @@
 #include <panel_init.h>
 #include <touch_gesture.h>
 #include <touch_map.h>
+#include <board_touch_calibration.h>
 
 #include "wifi_config.h"  // compile-time fallback WIFI_SSID / WIFI_PASSWORD (gitignored)
 
@@ -547,25 +548,8 @@ void setup() {
   bootscreen::advance(bootscreen::Stage::Sensors);
   // Touch, before WiFi: the capability bits mDNS advertises depend on whether
   // the controller answered, so this has to be settled before we announce.
-  touchCalibration = bcfg->variant == board::Variant::P4_4B
-      ? touchmap::GT911_ON_ST7703_4B
-      : bcfg->variant == board::Variant::P4_4C
-      ? touchmap::GT911_ON_JD9365_4C
-      : bcfg->variant == board::Variant::P4_34C
-      ? touchmap::GT911_ON_JD9365_34C
-      : bcfg->variant == board::Variant::AmoledCo5300
-      ? touchmap::CST9217_ON_CO5300
-      : bcfg->variant == board::Variant::LcdSt77916
-          ? touchmap::CST816_ON_ST77916
-          : bcfg->variant == board::Variant::C3_2424S012
-              ? touchmap::CST816_ON_C3_2424S012
-          : bcfg->variant == board::Variant::ElecrowKnob128
-              ? touchmap::CST816_ON_ELECROW_KNOB_128
-          : bcfg->variant == board::Variant::LilygoTwatchS3
-              ? touchmap::FT6336_ON_TWATCH_S3
-          : bcfg->variant == board::Variant::TouchSt7789
-              ? touchmap::CST816_ON_ST7789_240
-              : touchmap::AXS5106L_ON_C6;
+  // Each board's own descriptor touch calibration (board_touch_calibration.h).
+  touchCalibration = board::touchCalibrationFor(bcfg->variant);
   touchAvailable = boardtouch::init(*bcfg);
   // Battery telemetry, for the same reason and before announce: CAP_BATTERY
   // depends on either the AXP2101 PMU or a configured ADC divider being usable.

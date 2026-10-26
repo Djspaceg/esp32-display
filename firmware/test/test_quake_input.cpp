@@ -4,6 +4,8 @@
 #include <vector>
 
 #include "../quake/src/platform/quake_input_model.h"
+#include "../quake/src/quake_mode.h"
+#include <board_touch_calibration.h>
 
 static int failures = 0;
 #define CHECK(cond)                                                   \
@@ -297,6 +299,84 @@ int main() {
     while (q.pop(e)) ++popped;
     CHECK(popped == pushed);
     CHECK(q.push(K_ENTER, false) && q.pop(e) && e.key == K_ENTER && !e.down);
+  }
+
+  // --- which boards run Quake: capability, never a profile list -----------
+  {
+    // Every board in the catalog runs Quake exactly when it has the Doom
+    // runtime Quake rides on, PSRAM for its heap and frames, and a panel that
+    // holds the 320x240 base frame in its own orientation.
+    int quakeBoards = 0;
+    for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+      const board::Config &cfg = board::configFor(identity.variant);
+      const bool want = board::supportsDoom(identity.variant) &&
+                        cfg.platform->usePsramFrameBuffers &&
+                        cfg.panel->width >= RENDER_WIDTH &&
+                        cfg.panel->height >= RENDER_HEIGHT;
+      CHECK(quakeSupportsBoard(identity.variant) == want);
+      CHECK(quakeSupportsConfig(cfg) == want);
+      if (want) ++quakeBoards;
+    }
+    // Today that is the three P4 carriers, the 1.75C and the 1.85C.
+    CHECK(quakeBoards == 5);
+    CHECK(quakeSupportsBoard(board::Variant::P4_4B));
+    CHECK(quakeSupportsBoard(board::Variant::AmoledCo5300));
+    CHECK(quakeSupportsBoard(board::Variant::LcdSt77916));
+    CHECK(!quakeSupportsBoard(board::Variant::LilygoTwatchS3));  // 240x240
+    CHECK(!quakeSupportsBoard(board::Variant::LcdSt7789_190));   // 170x320
+    CHECK(!quakeSupportsBoard(board::Variant::Unknown));
+    // A board nobody listed gets Quake from its facts alone: an S3 carrier
+    // with a 480x320 panel would run it, the same one with 240x240 would not.
+    board::Config wide = board::configFor(board::Variant::TouchSt7789);
+    board::PanelConfig widePanel = *wide.panel;
+    widePanel.width = 480;
+    widePanel.height = 320;
+    wide.panel = &widePanel;
+    CHECK(quakeSupportsConfig(wide));
+    // Portrait glass narrower than the frame cannot take it.
+    widePanel.width = 240;
+    widePanel.height = 320;
+    CHECK(!quakeSupportsConfig(wide));
+    // No PSRAM, no Quake.
+    board::PlatformConfig noPsram = *wide.platform;
+    noPsram.usePsramFrameBuffers = false;
+    widePanel.width = 480;
+    wide.platform = &noPsram;
+    CHECK(!quakeSupportsConfig(wide));
+    // The renderer's limit is the one frameLayout states.
+    CHECK(QUAKE_MIN_PANEL_WIDTH == RENDER_WIDTH);
+    CHECK(QUAKE_MIN_PANEL_HEIGHT == RENDER_HEIGHT);
+  }
+
+  // --- touch calibration comes from each board's descriptor ---------------
+  {
+    struct Expect {
+      board::Variant variant;
+      touchmap::Calibration cal;
+    } expect[] = {
+        {board::Variant::TouchJd9853, touchmap::AXS5106L_ON_C6},
+        {board::Variant::AmoledCo5300, touchmap::CST9217_ON_CO5300},
+        {board::Variant::LcdSt77916, touchmap::CST816_ON_ST77916},
+        {board::Variant::TouchSt7789, touchmap::CST816_ON_ST7789_240},
+        {board::Variant::C3_2424S012, touchmap::CST816_ON_C3_2424S012},
+        {board::Variant::ElecrowKnob128, touchmap::CST816_ON_ELECROW_KNOB_128},
+        {board::Variant::LilygoTwatchS3, touchmap::FT6336_ON_TWATCH_S3},
+        {board::Variant::P4_4B, touchmap::GT911_ON_ST7703_4B},
+        {board::Variant::P4_4C, touchmap::GT911_ON_JD9365_4C},
+        {board::Variant::P4_34C, touchmap::GT911_ON_JD9365_34C},
+    };
+    for (const Expect &e : expect) {
+      const touchmap::Calibration got = board::touchCalibrationFor(e.variant);
+      CHECK(got.panelShort == e.cal.panelShort);
+      CHECK(got.panelLong == e.cal.panelLong);
+      CHECK(got.rawXMirrored == e.cal.rawXMirrored);
+      CHECK(got.rawYMirrored == e.cal.rawYMirrored);
+      CHECK(got.rotateClockwise == e.cal.rotateClockwise);
+    }
+    // Every board has one, so no caller falls back to another board's.
+    for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+      CHECK(board::touchCalibrationFor(identity.variant).panelShort > 0);
+    }
   }
 
   if (failures != 0) {

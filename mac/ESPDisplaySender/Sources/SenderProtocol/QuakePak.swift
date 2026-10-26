@@ -30,22 +30,42 @@ public enum QuakePak {
     public static let p4Chip = "esp32p4"
     public static let s3Chip = "esp32s3"
 
-    /// The S3 profiles whose panel holds Quake's frame (firmware/quake/src/
-    /// quake_mode.h quakeSupportsBoard): the AMOLED 1.75C and the LCD 1.85C.
-    public static let s3Profiles: Set<String> = ["co5300", "st77916"]
+    /// The engine's base frame. Quake renders it unscaled or at a whole-pixel
+    /// scale and never shrinks it, so a panel must hold it in its own
+    /// orientation (firmware/quake/src/quake_mode.h QUAKE_MIN_PANEL_WIDTH,
+    /// HEIGHT; quake_input_model.h frameLayout).
+    public static let minPanelWidth = 320
+    public static let minPanelHeight = 240
+    /// The release families whose image carries the Quake runtime.
+    public static let families: Set<String> = ["s3", "p4"]
 
     /// Whether Quake runs on this chip at all.
     public static func supports(chip: String?) -> Bool {
         chip == p4Chip || chip == s3Chip
     }
 
-    /// Whether Quake can run on this board: any P4, and an S3 whose profile
-    /// is one of `s3Profiles` (or not reported yet; the write itself then
-    /// decides). Flash size is the write's to check.
+    /// The renderer's one limit: the panel holds the 320x240 frame.
+    public static func panelHoldsFrame(_ geometry: PanelGeometry) -> Bool {
+        geometry.width >= minPanelWidth && geometry.height >= minPanelHeight
+    }
+
+    /// Whether Quake can run on this board, from what the board is and never
+    /// from a list of boards: a chip whose family image carries Quake, and a
+    /// panel that holds its frame. A profile not reported yet, or one this app
+    /// does not know (newer firmware), is offered; the board's own boot menu
+    /// and the write then decide. Whether the pak fits the board's game data
+    /// area is the write's to check (GameStore.area).
     public static func supports(chip: String?, profile: String?) -> Bool {
         guard supports(chip: chip) else { return false }
-        guard chip == s3Chip, let profile else { return true }
-        return s3Profiles.contains(profile)
+        guard let profile else { return true }
+        let family = GeneratedBoardCatalog.requiredFamilies.first {
+            GeneratedBoardCatalog.profilesByTarget[$0]?.contains(profile) == true
+        }
+        guard let family else { return true }
+        guard families.contains(family),
+              let geometry = GeneratedBoardCatalog.geometryByProfile[profile]
+        else { return false }
+        return panelHoldsFrame(geometry)
     }
 
     // MARK: - the file

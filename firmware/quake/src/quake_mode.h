@@ -1,4 +1,4 @@
-// Quake mode for the P4 carriers and the S3 boards with 32 MiB of flash.
+// Quake mode for every P4 and S3 board that can run it (quakeSupportsBoard).
 //
 // Chosen from the boot-mode menu (display_stream/boot_menu.h) like Doom: the
 // choice saves a one-shot request and restarts, and the next boot consumes it
@@ -33,17 +33,29 @@ const char* quake_pak_preflight(void);
 
 #include <board_config.h>
 
-/// The carriers Quake runs on: the three P4 boards, whose 32 MB of PSRAM
-/// holds its 16 MB heap and whose flash layout has the quake_pak partition,
-/// and the S3 boards whose panel holds a 320x240 frame (the 1.75C's 466x466,
-/// the 1.85C's 360x360). An S3 also needs a pak0.pak that fits its game data
-/// area, which quake_pak_preflight() checks: the shareware one needs a 32 MiB
-/// chip, and a 16 MiB chip's 8 MiB area holds only a small one.
-constexpr bool quakeSupportsBoard(board::Variant variant) {
-  return variant == board::Variant::P4_4B || variant == board::Variant::P4_4C ||
-         variant == board::Variant::P4_34C ||
-         variant == board::Variant::AmoledCo5300 ||
-         variant == board::Variant::LcdSt77916;
+// The renderer's one hard limit: it draws the engine's 320x240 base frame
+// unscaled or at a whole-pixel scale and never shrinks it, so the panel must
+// hold that frame in its own orientation (quake_input_model.h frameLayout,
+// whose RENDER_WIDTH and RENDER_HEIGHT these must equal).
+#define QUAKE_MIN_PANEL_WIDTH 320
+#define QUAKE_MIN_PANEL_HEIGHT 240
+
+/// Whether a board can run Quake, from what it is and never from a list of
+/// boards: the Doom runtime Quake rides on (its USB input, game store and
+/// boot menu), PSRAM for the engine heap and frames, and a panel that holds
+/// the base frame. Whether a pak0.pak fits the chip's game data area is
+/// quake_pak_preflight()'s, at boot: the shareware pak needs 32 MiB of flash.
+inline bool quakeSupportsConfig(const board::Config &cfg) {
+  return cfg.platform != nullptr && cfg.panel != nullptr &&
+         cfg.platform->usePsramFrameBuffers &&
+         cfg.panel->width >= QUAKE_MIN_PANEL_WIDTH &&
+         cfg.panel->height >= QUAKE_MIN_PANEL_HEIGHT;
+}
+
+inline bool quakeSupportsBoard(board::Variant variant) {
+  const board::Config *cfg = board::generatedConfigFor(variant);
+  return cfg != nullptr && board::supportsDoom(variant) &&
+         quakeSupportsConfig(*cfg);
 }
 #endif
 

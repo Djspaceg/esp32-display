@@ -20,6 +20,7 @@
 #include <board_touch.h>
 #include <touch_gesture.h>
 #include <touch_map.h>
+#include <board_touch_calibration.h>
 
 #include "doom_mode.h"
 #include "doom_log.h"
@@ -294,15 +295,7 @@ extern "C" void doom_touch_init(void) {
     if (bcfg == nullptr) {
         doom_fail_restart("board profile unavailable", false);
     }
-    s_touch_calibration = bcfg->variant == board::Variant::P4_4B
-        ? touchmap::GT911_ON_ST7703_4B
-        : bcfg->variant == board::Variant::P4_4C
-        ? touchmap::GT911_ON_JD9365_4C
-        : bcfg->variant == board::Variant::P4_34C
-        ? touchmap::GT911_ON_JD9365_34C
-        : bcfg->variant == board::Variant::LilygoTwatchS3
-        ? touchmap::FT6336_ON_TWATCH_S3
-        : touchmap::CST9217_ON_CO5300;
+    s_touch_calibration = board::touchCalibrationFor(bcfg->variant);
     bool available = boardtouch::init(*bcfg);
     if (!available) {
         doom_fail_restart("touch unavailable", true);

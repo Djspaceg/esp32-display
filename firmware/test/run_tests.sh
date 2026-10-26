@@ -250,6 +250,7 @@ clang++ "${CXXFLAGS[@]}" \
 # Quake's touch, BOOT and USB key meanings and its frame placement.
 clang++ "${CXXFLAGS[@]}" \
   -I"$HERE/../doom/src" \
+  -I"$HERE/../libraries/espdisp_board/src" \
   -o "$QUAKE_INPUT_OUT" "$HERE/test_quake_input.cpp"
 "$QUAKE_INPUT_OUT"
 

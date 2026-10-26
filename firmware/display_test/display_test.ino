@@ -20,6 +20,7 @@
 #include <display_backend.h>
 #include <panel_transfer_plan.h>
 #include <touch_map.h>
+#include <board_touch_calibration.h>
 
 static int16_t PANEL_W = 0;
 static int16_t PANEL_H = 0;
@@ -368,25 +369,7 @@ void setup() {
       ? board::COMPILED_VARIANT
       : boarddetect::probe();
   cfg = &board::configFor(variant);
-  touchCalibration = variant == board::Variant::P4_4B
-      ? touchmap::GT911_ON_ST7703_4B
-      : variant == board::Variant::P4_4C
-      ? touchmap::GT911_ON_JD9365_4C
-      : variant == board::Variant::P4_34C
-      ? touchmap::GT911_ON_JD9365_34C
-      : variant == board::Variant::AmoledCo5300
-      ? touchmap::CST9217_ON_CO5300
-      : variant == board::Variant::LcdSt77916
-          ? touchmap::CST816_ON_ST77916
-          : variant == board::Variant::C3_2424S012
-              ? touchmap::CST816_ON_C3_2424S012
-          : variant == board::Variant::ElecrowKnob128
-              ? touchmap::CST816_ON_ELECROW_KNOB_128
-          : variant == board::Variant::LilygoTwatchS3
-              ? touchmap::FT6336_ON_TWATCH_S3
-          : variant == board::Variant::TouchSt7789
-              ? touchmap::CST816_ON_ST7789_240
-              : touchmap::AXS5106L_ON_C6;
+  touchCalibration = board::touchCalibrationFor(variant);
   PANEL_W = (int16_t)cfg->panel->width;
   PANEL_H = (int16_t)cfg->panel->height;
   SPI_HZ = cfg->panel->pixelClockHz;
