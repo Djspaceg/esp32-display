@@ -507,13 +507,16 @@ extension PanelManager {
         refreshUSBPorts()
 
         let answered: UsbOnboarder.SettledBoard
+        // Game data is not firmware: a board whose firmware does not recognise
+        // it is told so without saying this run installed any.
         switch await UsbOnboarder.settle(
             flashedPort: board.path, expectedHardwareID: board.expectedID,
-            onProgress: progress)
+            wroteFirmware: false, onProgress: progress)
         {
         case .success(let settled):
             answered = settled
-        case .failure(let failure) where failure.title == "Stopped":
+        case .failure(let failure)
+            where failure.title == "Stopped" || failure.boardNotRecognised:
             return .failure(failure)
         case .failure:
             var outcome = OperationOutcome.failure(

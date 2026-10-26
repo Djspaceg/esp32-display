@@ -263,7 +263,10 @@ final class SerialSettlePolicyTests: XCTestCase {
         let message = SerialSettlePolicy.explain(step, flashedPort: flashed) ?? ""
         // The distinction that matters after a flash: the firmware IS on the board.
         XCTAssertTrue(message.contains("firmware was written"))
-        XCTAssertTrue(message.contains("only the WiFi credentials are missing"))
+        XCTAssertTrue(message.contains("its WiFi network was not sent"), message)
+        // The way back is the app's own restart, never a replug or a tool.
+        let next = SerialSettlePolicy.nextAction(afterGivingUp: true, sentName: false) ?? ""
+        XCTAssertTrue(next.contains("the app restarts it over USB"), next)
         XCTAssertTrue(message.contains("\(Int(SerialSettlePolicy.budgetSeconds.rounded()))"))
     }
 

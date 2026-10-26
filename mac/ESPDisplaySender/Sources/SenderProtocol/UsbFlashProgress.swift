@@ -385,9 +385,11 @@ public struct UsbFlashSession: Equatable, Sendable {
         }
     }
 
-    /// Record the run's failure against whatever phase was running.
+    /// Record the run's failure against whatever phase was running. `lastSeen`
+    /// replaces the lines the run last saw, `[]` showing none.
     public mutating func fail(
-        title: String, message: String, nextAction: String? = nil, at elapsed: Double
+        title: String, message: String, nextAction: String? = nil,
+        lastSeen: [String]? = nil, at elapsed: Double
     ) {
         // Everything that can fail while the board is being found is a check
         // made before anything is written - a name in use, a missing esptool, a
@@ -400,7 +402,7 @@ public struct UsbFlashSession: Equatable, Sendable {
         }
         failure = UsbFlashFailure(
             title: title, message: message, step: step,
-            lastSeen: lastSeen,
+            lastSeen: lastSeen ?? self.lastSeen,
             nextAction: nextAction ?? defaultNextAction)
         transcript.append(.app, "FAILED during \(step): \(title) - \(message)", at: elapsed)
     }
@@ -436,27 +438,26 @@ public struct UsbFlashSession: Equatable, Sendable {
                 + "use another cable or a USB port directly on the Mac, not a hub."
         case .restarting, .waitingForBoard:
             switch flow {
+            // Never a replug: a board on a battery keeps running when
+            // unplugged. A WiFi-only run restarts a quiet board itself.
             case .onboarding:
-                return "The firmware is written. Unplug the board, plug it back in, "
-                    + "then run this again with Set Up WiFi only."
+                return "The firmware is written. " + SerialSettlePolicy.restartAndResend
             case .configureOnly:
-                return "Unplug the board, plug it back in, and run Set Up WiFi "
-                    + "only again."
+                return SerialSettlePolicy.resendWifiOnly
             case .update, .repair:
                 return "The write is done. Restart the board with its power or reset "
                     + "button; it should answer within a minute."
             }
-        case .rescue(.rescued), .rescue(.readingBoard):
-            return "The rescue firmware is on the board and keeps its USB up. "
-                + "Unplug it, press Start Over, and plug it in when asked; it is "
-                + "caught at once."
         case .rescue:
-            return "Check the chip family, use a data cable on a USB port directly "
-                + "on the Mac, and start the repair again. Anything already "
-                + "written is the rescue image, which is safe to write again."
+            // Only a repair has these phases, and its advice never asks for
+            // a replug.
+            return repairNextAction
+        case .configuring where flow == .configureOnly:
+            return SerialSettlePolicy.resendWifiOnly
         case .configuring:
-            return "Unplug the board, plug it back in, then run this again with "
-                + "Set Up WiFi only to resend the settings."
+            return "To resend the settings, choose \"Set up WiFi only\" and press "
+                + "Set Up WiFi: if the board is not answering, the app restarts it "
+                + "over USB before sending anything."
         }
     }
 

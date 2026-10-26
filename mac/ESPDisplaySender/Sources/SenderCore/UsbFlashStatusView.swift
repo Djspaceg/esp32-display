@@ -57,7 +57,8 @@ final class UsbFlashMonitor: ObservableObject, @unchecked Sendable {
         lock.withLock {
             pending.fail(
                 title: outcome.title, message: outcome.message,
-                nextAction: outcome.nextAction, at: elapsed)
+                nextAction: outcome.nextAction,
+                lastSeen: outcome.showsLastSeen ? nil : [], at: elapsed)
         }
         publishNow()
     }

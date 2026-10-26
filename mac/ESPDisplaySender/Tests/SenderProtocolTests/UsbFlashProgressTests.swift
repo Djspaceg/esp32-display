@@ -212,7 +212,7 @@ final class UsbFlashProgressTests: XCTestCase {
         onboarding.fail(title: "The board did not come back", message: "m", at: 45)
         XCTAssertEqual(onboarding.failure?.step, "Waiting for the board to answer")
         XCTAssertEqual(onboarding.failure?.lastSeen, ["no answer from /dev/x within 3 s"])
-        XCTAssertTrue(onboarding.failure?.nextAction.contains("Set Up WiFi only") ?? false)
+        XCTAssertTrue(onboarding.failure?.nextAction.contains("Set up WiFi only") ?? false)
 
         var update = UsbFlashSession(flow: .update)
         update.apply(.phase(.waitingForBoard(wait)), at: 0)

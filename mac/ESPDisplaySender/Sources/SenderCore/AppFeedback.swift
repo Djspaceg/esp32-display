@@ -18,9 +18,21 @@ struct OperationOutcome: Equatable, Sendable {
     /// The port of a board found in flashing mode, which the sheet offers to
     /// restart into its firmware (`PanelManager.restartBoardFromFlashingMode`).
     var restartPort: String? = nil
+    /// Whether a USB run's failure shows the raw lines it last saw. Off when
+    /// the message already says what they mean in words; the transcript
+    /// behind Details still has them.
+    var showsLastSeen = true
 
     static func failure(_ failure: WifiConfigUI.ConfigFailure) -> OperationOutcome {
-        OperationOutcome(kind: .failure, title: failure.title, message: failure.message)
+        OperationOutcome(
+            kind: .failure, title: failure.title, message: failure.message,
+            nextAction: failure.nextAction, showsLastSeen: failure.showsLastSeen)
+    }
+
+    /// The message and what to do next, as an alert shows them when the sheet
+    /// that ran the operation is no longer there to.
+    var alertText: String {
+        nextAction.map { message + "\n\nNext: " + $0 } ?? message
     }
 
     static func failure(_ title: String, _ message: String) -> OperationOutcome {

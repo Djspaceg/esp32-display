@@ -134,8 +134,18 @@ struct ManagerView: View {
             )
         ) {
             Button("OK") { manager.clearOperationOutcome() }
+            // An alert's text cannot be selected, so a failure offers its
+            // text to copy instead.
+            if let outcome = manager.operationOutcome, outcome.kind == .failure {
+                Button("Copy Message") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        outcome.title + "\n\n" + outcome.alertText, forType: .string)
+                    manager.clearOperationOutcome()
+                }
+            }
         } message: {
-            Text(manager.operationOutcome?.message ?? "")
+            Text(manager.operationOutcome?.alertText ?? "")
         }
     }
 

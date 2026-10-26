@@ -266,7 +266,8 @@ final class PortSelectionTests: XCTestCase {
         XCTAssertEqual(
             failure?.message,
             "No connected USB device reports the name \"studio-display\". Assign its "
-                + "port under Connection, or reconnect the board and try again.")
+                + "port under Connection, or check that the board is connected by USB and "
+                + "turned on, then try again.")
     }
 
     // MARK: probe timeouts

@@ -32,6 +32,20 @@ enum UsbBoardCheck {
         return outcome
     }
 
+    /// The board answered, but its firmware does not recognise the board it
+    /// is on, so it refuses to say who it is. Not silence, and not fixed by a
+    /// restart; its own refusal names firmware commands, so it is not shown.
+    static func unrecognised(nothingDone: String) -> OperationOutcome {
+        let explanation = SerialSettlePolicy.unrecognisedBoard(wroteFirmware: false)
+        var outcome = OperationOutcome.failure(
+            explanation.title,
+            "The firmware on this board doesn't recognise it, so its screen, WiFi and "
+                + "streaming are off. It could not be checked, so \(nothingDone).")
+        outcome.nextAction = explanation.nextAction
+        outcome.showsLastSeen = false
+        return outcome
+    }
+
     /// The probe's reason without the firmware's command and sketch names:
     /// a parenthetical naming one is dropped, and a reason still naming one
     /// is left out altogether.
@@ -66,6 +80,9 @@ extension PanelManager {
     func explainUnansweredBoard(
         path: String, expectedID: String, reason: String, nothingDone: String
     ) async -> OperationOutcome {
+        if SerialSettlePolicy.isUnrecognisedBoard(reason) {
+            return UsbBoardCheck.unrecognised(nothingDone: nothingDone)
+        }
         guard case .installed(let toolPath) = EsptoolInstallation.locate(),
               let command = try? EsptoolCommand.chipID(
                   tool: EsptoolCommand.Tool(path: toolPath), port: path, connectAttempts: 1,

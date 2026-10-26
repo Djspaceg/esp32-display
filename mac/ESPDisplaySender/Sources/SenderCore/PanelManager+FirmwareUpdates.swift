@@ -673,7 +673,8 @@ extension PanelManager {
         {
         case .success(let board):
             answered = board
-        case .failure(let failure) where failure.title == "Stopped":
+        case .failure(let failure)
+            where failure.title == "Stopped" || failure.boardNotRecognised:
             return .failure(failure)
         case .failure:
             return .failure(

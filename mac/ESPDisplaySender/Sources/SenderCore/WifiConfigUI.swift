@@ -150,6 +150,17 @@ enum WifiConfigUI {
     struct ConfigFailure: Error, Equatable, Sendable {
         var title: String
         var message: String
+        /// What to do next, when the default for the step that failed is wrong.
+        var nextAction: String? = nil
+        /// The board answered that its firmware does not recognise it
+        /// (`SerialSettlePolicy.isUnrecognisedBoard`). Callers that reword a
+        /// failed wait pass this one through as it is: waiting, restarting
+        /// and installing the same firmware again all end the same way.
+        var boardNotRecognised = false
+        /// Whether a USB run shows the raw lines it last saw beside this.
+        /// Off when those lines are the firmware's own refusal, which names
+        /// its commands; the transcript behind Details still has them.
+        var showsLastSeen = true
     }
 
     /// Live facts returned by one current CFGSHOW probe. None are persisted.
@@ -559,11 +570,11 @@ enum WifiConfigUI {
         if let expectedHardwareID {
             return .failure(ConfigFailure(
                 title: "Board not found",
-                message: "No connected USB device reports hardware ID \"\(expectedHardwareID)\". Reconnect the board and try again."))
+                message: "No connected USB device reports hardware ID \"\(expectedHardwareID)\". Check that the board is connected by USB and turned on, then try again."))
         }
         return .failure(ConfigFailure(
             title: "Board not found",
-            message: "No connected USB device reports the name \"\(expectedName ?? "")\". Assign its port under Connection, or reconnect the board and try again."))
+            message: "No connected USB device reports the name \"\(expectedName ?? "")\". Assign its port under Connection, or check that the board is connected by USB and turned on, then try again."))
     }
 
     // MARK: direct manager actions

@@ -308,7 +308,24 @@ enum UsbOnboarder {
         var announcedMove = false
         /// Nodes that answered as some other board: not asked again.
         var otherBoards: Set<String> = []
-        let log: WifiConfigUI.SerialLog = { source, text in onProgress(.log(source, text)) }
+        /// Nodes whose firmware said it does not recognise its board. Such a
+        /// board cannot report its ID, so it is this one only on the node it
+        /// was written on or on a node that appeared since the wait began. A
+        /// node that was already there is another board, plugged in before,
+        /// and is not asked again.
+        var unrecognised: Set<String> = []
+        let connectedBefore = Set(io.ports()).subtracting([flashedPort])
+        func isThisBoardUnrecognised(_ port: String) -> Bool {
+            unrecognised.contains(port)
+                && (port == flashedPort || !connectedBefore.contains(port))
+        }
+        let saidUnrecognised = UnrecognisedLine()
+        let log: WifiConfigUI.SerialLog = { source, text in
+            if source == .received, SerialSettlePolicy.isUnrecognisedBoard(text) {
+                saidUnrecognised.set()
+            }
+            onProgress(.log(source, text))
+        }
 
         func report(_ target: SettleWait.Target, attempt: Int) {
             onProgress(.phase(.waitingForBoard(SettleWait(
@@ -318,13 +335,17 @@ enum UsbOnboarder {
 
         /// Ask one port; the board if it answers as the expected one.
         func ask(_ port: String) -> SettledBoard? {
+            saidUnrecognised.clear()
             let answer = io.probe(port, log)
             if matchesExpectedHardwareID(answer.existing, expectedHardwareID: expectedHardwareID) {
                 return SettledBoard(
                     port: port, firmwareVersion: answer.firmwareVersion,
                     firmwareSource: answer.firmwareSource)
             }
-            if case .answered(_, let reported) = answer.existing {
+            if saidUnrecognised.value, case .silent = answer.existing {
+                // Said in the give-up when the wait goes on past it.
+                unrecognised.insert(port)
+            } else if case .answered(_, let reported) = answer.existing {
                 otherBoards.insert(port)
                 lastSeen = "a different board (ID \(reported ?? "unknown")) answered on \(port)"
             } else {
@@ -332,6 +353,28 @@ enum UsbOnboarder {
                     ?? "no answer from \(port) within 3 s"
             }
             return nil
+        }
+
+        /// The wait is over without this board. Another board that said its
+        /// firmware does not recognise it is named in words, and the raw lines
+        /// last seen - its refusal among them - are left to the transcript.
+        func gaveUp(_ step: SerialSettlePolicy.Step, lastSeen: String?) -> WifiConfigUI.ConfigFailure {
+            WifiConfigUI.ConfigFailure(
+                title: "The board did not come back",
+                message: (SerialSettlePolicy.explain(
+                    step, flashedPort: flashedPort, wroteFirmware: wroteFirmware,
+                    sentName: sentName)
+                    ?? "The board did not answer after restarting.")
+                    + unrecognised.sorted().map {
+                        " The board on \($0), which was already connected, answered that "
+                            + "its firmware doesn't recognise it."
+                    }.joined()
+                    + (lastSeen.map { " Last seen: \($0)." } ?? ""),
+                nextAction: step == .giveUp
+                    ? SerialSettlePolicy.nextAction(
+                        afterGivingUp: wroteFirmware, sentName: sentName)
+                    : nil,
+                showsLastSeen: unrecognised.isEmpty)
         }
 
         for attempt in 0...SerialSettlePolicy.attempts {
@@ -352,40 +395,57 @@ enum UsbOnboarder {
                     onProgress(.log(.app, "The board moved from \(flashedPort) to \(port)."))
                 }
                 if let board = ask(port) { return .success(board) }
+                if isThisBoardUnrecognised(port) {
+                    return .failure(unrecognisedBoardFailure(wroteFirmware: wroteFirmware))
+                }
                 await io.sleep(SerialSettlePolicy.retryWait)
             case .identify(let candidates):
                 report(.identify(ports: candidates), attempt: attempt + 1)
                 // Each silent node costs three seconds, so the budget and Stop
                 // are checked per node, not per look.
-                for port in candidates where !otherBoards.contains(port) {
+                for port in candidates
+                where !otherBoards.contains(port) && !unrecognised.contains(port) {
                     if io.isCancelled() || io.now() - started >= budget { break }
                     if let board = ask(port) {
                         onProgress(.log(.app, "\(port) reported this board's ID."))
                         return .success(board)
                     }
+                    if isThisBoardUnrecognised(port) {
+                        return .failure(unrecognisedBoardFailure(wroteFirmware: wroteFirmware))
+                    }
                 }
                 await io.sleep(SerialSettlePolicy.retryWait)
             case .ambiguous, .giveUp:
-                return .failure(WifiConfigUI.ConfigFailure(
-                    title: "The board did not come back",
-                    message: SerialSettlePolicy.explain(
-                        step, flashedPort: flashedPort, wroteFirmware: wroteFirmware,
-                        sentName: sentName)
-                        ?? "The board did not answer after restarting."))
+                return .failure(gaveUp(step, lastSeen: nil))
             }
         }
         if io.isCancelled() {
             return .failure(WifiConfigUI.ConfigFailure(
                 title: "Stopped", message: "Waiting for the board was stopped."))
         }
-        return .failure(WifiConfigUI.ConfigFailure(
-            title: "The board did not come back",
-            message: (SerialSettlePolicy.explain(
-                .giveUp, flashedPort: flashedPort, wroteFirmware: wroteFirmware,
-                sentName: sentName)
-                ?? "The board did not answer after restarting.")
-                + (lastSeen.map { " Last seen: \($0)." } ?? "")))
+        return .failure(gaveUp(.giveUp, lastSeen: lastSeen))
     }
+
+    /// The board answered, and what it said is that its firmware does not
+    /// know which board it is on. Final: that firmware keeps its screen, WiFi
+    /// and streaming off until told, and the app does not tell it.
+    static func unrecognisedBoardFailure(wroteFirmware: Bool) -> WifiConfigUI.ConfigFailure {
+        let explanation = SerialSettlePolicy.unrecognisedBoard(wroteFirmware: wroteFirmware)
+        return WifiConfigUI.ConfigFailure(
+            title: explanation.title, message: explanation.message,
+            nextAction: explanation.nextAction, boardNotRecognised: true,
+            showsLastSeen: false)
+    }
+}
+
+/// Whether the probe under way heard the board say its firmware does not
+/// recognise it, set from the serial log callback.
+private final class UnrecognisedLine: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen = false
+    func set() { lock.withLock { seen = true } }
+    func clear() { lock.withLock { seen = false } }
+    var value: Bool { lock.withLock { seen } }
 }
 
 /// The tracker, shared with esptool's line callback, which runs on another queue.

@@ -23,6 +23,8 @@ final class UsbSettleTests: XCTestCase {
             UsbOnboarder.PortAnswer(existing: .silent, lastLine: nil)
         }
         var reply: (String, Int) -> WifiConfigUI.CommandResult = { _, _ in .success("CFGOK") }
+        /// Lines the port prints during a probe, before its answer.
+        var received: (String, Double) -> [String] = { _, _ in [] }
         var cancelAfter: Double = .infinity
 
         var now: Double { lock.withLock { clock } }
@@ -39,9 +41,14 @@ final class UsbSettleTests: XCTestCase {
         var io: UsbOnboarder.SettleIO {
             UsbOnboarder.SettleIO(
                 ports: { [self] in ports(now) },
-                probe: { [self] port, _ in
+                probe: { [self] port, log in
                     lock.withLock { probes.append(port) }
-                    let result = answer(port, now)
+                    let lines = received(port, now)
+                    for line in lines { log?(.received, line) }
+                    var result = answer(port, now)
+                    if result.existing == .silent, result.lastLine == nil, let last = lines.last {
+                        result.lastLine = last
+                    }
                     advance(result.existing == .silent ? 3 : 0.05)
                     return result
                 },

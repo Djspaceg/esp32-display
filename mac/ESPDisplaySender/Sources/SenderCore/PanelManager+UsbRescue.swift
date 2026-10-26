@@ -435,6 +435,9 @@ extension PanelManager {
             progress(.log(.app, "The board answered on \(settled.port) running "
                 + "\(settled.firmwareVersion ?? bundle.firmwareVersion)."))
             return .success(settled.port)
+        case .failure(let failure) where failure.boardNotRecognised:
+            // Installing the same firmware again ends the same way.
+            return .failure(failure)
         case .failure(let failure):
             // Settle's own advice is to replug; a recovery's is Install Again,
             // which finds the board on USB and resets it there.

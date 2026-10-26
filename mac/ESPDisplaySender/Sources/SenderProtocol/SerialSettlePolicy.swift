@@ -106,9 +106,7 @@ public enum SerialSettlePolicy {
         case .giveUp where !wroteFirmware && sentName:
             return "The board did not answer within "
                 + "\(Int(budgetSeconds.rounded())) seconds of the restart. Its "
-                + "name was saved; only the WiFi credentials are missing. "
-                + "Unplug and reconnect the board and use Set Up WiFi only, or "
-                + "send them with tools/espdisp.py config."
+                + "name was saved, but its WiFi network was not sent."
         case .giveUp where !wroteFirmware:
             return "The board did not answer as this firmware within "
                 + "\(Int(budgetSeconds.rounded())) seconds, so nothing was sent "
@@ -118,9 +116,71 @@ public enum SerialSettlePolicy {
             return "The board did not answer within "
                 + "\(Int(budgetSeconds.rounded())) seconds of the restart. The "
                 + "firmware was written\(sentName ? " and the name was saved" : "")"
-                + "; only the WiFi credentials are missing. "
-                + "Unplug and reconnect the board and use Set Up WiFi only, or "
-                + "send them with tools/espdisp.py config."
+                + ", but its WiFi network was not sent."
         }
+    }
+
+    /// What to do after a give-up that `explain` does not already say: the way
+    /// back to sending the WiFi network. Never a replug, because a board on a
+    /// battery keeps running when unplugged. A WiFi-only run that does not
+    /// hear the board reads its chip with esptool before sending anything,
+    /// and esptool restarts it after that read. The run needs esptool for a
+    /// board that does not answer, and says so when it is missing.
+    public static func nextAction(
+        afterGivingUp wroteFirmware: Bool, sentName: Bool
+    ) -> String? {
+        if wroteFirmware { return restartAndResend }
+        return sentName ? resendWifiOnly : nil
+    }
+
+    /// From a run that flashed: switch to the WiFi-only run.
+    public static let restartAndResend =
+        "Choose \"Set up WiFi only\" and press Set Up WiFi: if the board is "
+        + "still not answering, the app restarts it over USB before sending "
+        + "anything."
+
+    /// From a WiFi-only run: the same run again.
+    public static let resendWifiOnly =
+        "Press Set Up WiFi again: if the board is still not answering, the app "
+        + "restarts it over USB before sending anything."
+
+    // MARK: - a board its firmware does not recognise
+
+    /// Whether a line from the board says its firmware found no profile for
+    /// the board it is running on. Such a board keeps its panel, network and
+    /// streaming off and refuses every configuration command until told which
+    /// board it is, so the wait for it to answer is over: it has answered.
+    ///
+    /// Two lines say it: the refusal every command gets
+    /// (serial_config.cpp, `CFGERR profile unresolved; ...`), and the boot
+    /// line before it (display_stream.ino, `board: FATAL no unique compatible
+    /// profile; ...`). Searched for rather than matched at the start, for the
+    /// truncated-backlog reason `ConfigCommands.reply(in:)` gives.
+    public static func isUnrecognisedBoard(_ line: String) -> Bool {
+        line.contains("CFGERR profile unresolved")
+            || line.contains("board: profile unresolved")
+            || line.contains("board: FATAL no unique compatible profile")
+    }
+
+    /// What to tell the person about a board its firmware does not recognise,
+    /// in words: no command, sketch or setting names. `wroteFirmware` is false
+    /// when this run installed nothing, where "installed fine" would be false.
+    public struct Explanation: Equatable, Sendable {
+        public var title: String
+        public var message: String
+        public var nextAction: String
+    }
+
+    public static func unrecognisedBoard(wroteFirmware: Bool) -> Explanation {
+        Explanation(
+            title: "This firmware doesn't recognise this board",
+            message: wroteFirmware
+                ? "The firmware installed fine, but this firmware version doesn't "
+                    + "recognise this board, so its screen, WiFi and streaming stay off."
+                : "The firmware on it doesn't recognise this board, so its screen, "
+                    + "WiFi and streaming are off.",
+            nextAction: "Install a firmware version that supports this board. Until "
+                + "then it stays as it is; it is not harmed, and it can be written "
+                + "again at any time.")
     }
 }
