@@ -117,9 +117,10 @@ window_follows_mirror = true
 # version with BOOT button and RST on the back cover", [L]
 # LilyGoWatchS3.cpp#L507-L513); on an earlier one GPIO0 just reads high
 # through the pull-up, so declaring it drives nothing, but the BOOT actions
-# have no key there (boot_button_optional): Doom then opens its menu from the
-# crown, the AXP2101 PWR key, and fires from touch, and its menu's Quit Game
-# returns to streaming. The streaming firmware reads the crown as the PWR key
+# have no key there (boot_button_optional): Doom then gives the crown, the
+# AXP2101 PWR key, BOOT's tiers (a press opens or closes the menu, 0.6-3 s
+# goes back a menu, a 3 s hold exits Doom) and fires from touch. Doom's own
+# Quit Game prompt answers only 'y', so the hold is the way out. The streaming firmware reads the crown as the PWR key
 # input, assignable in the input map. No addressable LED.
 [carrier]
 pin_sclk = 18

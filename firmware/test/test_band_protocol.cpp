@@ -7167,6 +7167,38 @@ int main() {
       CHECK_EQ(escapes, 5);
       poll(none);
       CHECK_EQ(escapes, 5);
+      // The likeliest real release: its up edge and short-press bit in one
+      // poll. One.
+      poll(down);
+      poll({false, true, true, false});
+      CHECK_EQ(escapes, 6);
+      poll(none);
+      CHECK_EQ(escapes, 6);
+      // Reversed polarity: the press reads as an up edge, the release as a
+      // down edge with the short bit. Still exactly one.
+      doom_power_key_t rev = {};
+      int revEscapes = 0;
+      auto revPoll = [&](B bits) {
+        const bool wasHeld = rev.held;
+        const bool missed = doom_power_key_step(&rev, bits);
+        if (doom_power_key_press_ended(wasHeld, &rev, missed)) ++revEscapes;
+      };
+      revPoll(up);
+      revPoll({true, false, true, false});
+      CHECK_EQ(revEscapes, 1);
+
+      // BOOT's tiers on release: under 0.6 s Escape, to 3 s previous menu;
+      // at 3 s the hold has already left Doom, so its release does nothing.
+      CHECK(doom_menu_key_release_action(0, false) == DOOM_MENU_KEY_ESCAPE);
+      CHECK(doom_menu_key_release_action(599, false) == DOOM_MENU_KEY_ESCAPE);
+      CHECK(doom_menu_key_release_action(600, false) == DOOM_MENU_KEY_BACK);
+      CHECK(doom_menu_key_release_action(2999, false) == DOOM_MENU_KEY_BACK);
+      CHECK(doom_menu_key_release_action(3000, false) == DOOM_MENU_KEY_NONE);
+      CHECK(doom_menu_key_release_action(100, true) == DOOM_MENU_KEY_NONE);
+      CHECK(!doom_menu_key_exit_due(2999));
+      CHECK(doom_menu_key_exit_due(3000));
+      // Exit lands before the PMU's own hold-to-power-off (4 s on the watch).
+      CHECK(DOOM_MENU_KEY_EXIT_MS < 4000u);
     }
 
     // The PWR key fires while held: its down edge holds Fire, its up edge

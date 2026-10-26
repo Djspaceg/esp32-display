@@ -168,8 +168,8 @@ extern "C" bool doom_power_key_present(void) {
 }
 
 // On a carrier some of whose units have no BOOT key (the T-Watch-S3), the PWR
-// key is the only key there is, so it opens and closes the menu as BOOT's
-// short press does, and touch alone fires.
+// key is the only key there is, so it takes BOOT's three tiers (menu, previous
+// menu, exit Doom) and touch alone fires.
 extern "C" bool doom_power_key_is_menu(void) {
     return doom_power_key_present() && bcfg->bootButtonOptional;
 }
@@ -186,9 +186,11 @@ extern "C" bool doom_power_key_init(void) {
         // is this board's real hold time rather than a remembered default.
         int offSeconds = 0;
         const char* action = nullptr;
-        const char* role = doom_power_key_is_menu()
-                               ? "PWR key press  = Escape (open/close menu)"
-                               : "PWR key held   = Shoot";
+        const char* role =
+            doom_power_key_is_menu()
+                ? "PWR key        = BOOT's tiers: press Escape, 0.6-3 s "
+                  "previous menu, 3 s exit Doom"
+                : "PWR key held   = Shoot";
         if (boardpower::powerKeyHold(offSeconds, action)) {
             doom_log("  %s (a %d s hold: %s)", role, offSeconds, action);
         } else {

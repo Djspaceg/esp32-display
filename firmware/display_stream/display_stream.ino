@@ -606,12 +606,16 @@ void setup() {
           // wifi_err_reason_t); anything else is logged by number.
           const uint16_t reason = info.wifi_sta_disconnected.reason;
           const char *name = reason == 2     ? "auth expired"
+                             : reason == 8   ? "left (asked to)"
                              : reason == 15  ? "4-way handshake timeout"
                              : reason == 201 ? "no AP found"
                              : reason == 202 ? "auth failed"
                              : reason == 203 ? "assoc failed"
                              : reason == 204 ? "handshake timeout"
                              : reason == 205 ? "connection failed"
+                             : reason == 210 ? "no AP with compatible security"
+                             : reason == 211 ? "no AP in auth-mode threshold"
+                             : reason == 212 ? "no AP in RSSI threshold"
                                              : "other";
           Serial.printf("WiFi: disconnected, reason %u (%s), rssi %d\n",
                         (unsigned)reason, name,

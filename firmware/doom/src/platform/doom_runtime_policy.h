@@ -177,3 +177,29 @@ static inline bool doom_power_key_press_ended(bool was_held,
                                               bool missed_press) {
     return (was_held && !key->held) || missed_press;
 }
+
+// BOOT's three tiers (doom_mode.cpp), for a menu key that stands in for it:
+// a release under DOOM_MENU_KEY_BACK_MS is Escape (open/close the menu), one
+// up to DOOM_MENU_KEY_EXIT_MS is Backspace (previous menu), and a hold that
+// reaches DOOM_MENU_KEY_EXIT_MS leaves Doom while still held, so a release
+// after it does nothing more. Doom's own Quit Game prompt answers only 'y',
+// which no touch gesture or key here sends, so the hold is the way out.
+#define DOOM_MENU_KEY_BACK_MS 600u
+#define DOOM_MENU_KEY_EXIT_MS 3000u
+
+typedef enum {
+    DOOM_MENU_KEY_NONE,
+    DOOM_MENU_KEY_ESCAPE,
+    DOOM_MENU_KEY_BACK,
+} doom_menu_key_action_t;
+
+static inline bool doom_menu_key_exit_due(uint32_t held_ms) {
+    return held_ms >= DOOM_MENU_KEY_EXIT_MS;
+}
+
+static inline doom_menu_key_action_t doom_menu_key_release_action(
+    uint32_t held_ms, bool exit_fired) {
+    if (exit_fired || doom_menu_key_exit_due(held_ms)) return DOOM_MENU_KEY_NONE;
+    return held_ms >= DOOM_MENU_KEY_BACK_MS ? DOOM_MENU_KEY_BACK
+                                            : DOOM_MENU_KEY_ESCAPE;
+}

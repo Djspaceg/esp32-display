@@ -24,7 +24,8 @@
 //
 // The 1.75C's large side button (the AXP2101 PWR key): fire while held.
 // On a carrier that may have no BOOT key (the T-Watch-S3's crown) the PWR
-// key is Escape instead: each press opens or closes the menu.
+// key takes BOOT's place instead: a press is Escape (open/close the menu),
+// 0.6-3 s is Backspace (previous menu), and a 3 s hold exits Doom.
 //
 // USB keyboard and mouse (carriers whose USB port can host a device):
 //   W/A/S/D or arrows move and turn, Ctrl fires, Space uses, Shift runs,
@@ -134,6 +135,8 @@ static uint32_t dg_fire_due_at = 0;
 // touch Fire pulse ending under it must not let go of Fire.
 static bool dg_power_key_available = false;
 static bool dg_power_key_menu = false;
+static uint32_t dg_power_key_down_at = 0;
+static bool dg_power_key_exit_fired = false;
 static doom_power_key_t dg_power_key = {false, false};
 static bool dg_power_fire_held = false;
 static bool dg_power_shot_pending = false;
@@ -442,6 +445,7 @@ static void process_power_key_input(void) {
 
     doom_power_key_bits_t bits = {false, false, false, false};
     const bool was_held = dg_power_key.held;
+    bool missed_press = false;
     if (!doom_power_key_read(&bits)) {
         if (dg_power_read_failures < POWER_KEY_READ_FAILURE_LIMIT &&
             ++dg_power_read_failures == POWER_KEY_READ_FAILURE_LIMIT &&
@@ -451,7 +455,7 @@ static void process_power_key_input(void) {
         }
     } else {
         dg_power_read_failures = 0;
-        const bool missed_press = doom_power_key_step(&dg_power_key, bits);
+        missed_press = doom_power_key_step(&dg_power_key, bits);
         if (bits.down || bits.up || bits.short_press || bits.long_press) {
             // The raw bits as well as the outcome: the edge polarity is read
             // off this line on the bench.
@@ -462,20 +466,50 @@ static void process_power_key_input(void) {
                      : missed_press    ? "shot"
                                        : "released");
         }
-        if (dg_power_key_menu) {
-            // A press ends on its release (or came and went between two
-            // polls): one Escape, in any context, like BOOT's short press.
-            if (doom_power_key_press_ended(was_held, &dg_power_key,
-                                           missed_press)) {
-                doom_log("pwr key: press -> escape");
-                push_key(KEY_ESCAPE, 1);
-                push_key(KEY_ESCAPE, 0);
-            }
-            return;
+        if (missed_press && gameplay && !dg_power_key_menu) {
+            dg_power_shot_pending = true;
         }
-        if (missed_press && gameplay) dg_power_shot_pending = true;
     }
-    if (dg_power_key_menu) return;
+    if (dg_power_key_menu) {
+        // BOOT's tiers, timed from the poll that saw the key go down. A press
+        // that came and went between two polls is a short one. A hold taken
+        // as up after failed reads ends without a key, as nothing measured it.
+        const uint32_t now = DG_GetTicksMs();
+        if (!was_held && dg_power_key.held) {
+            dg_power_key_down_at = now;
+            dg_power_key_exit_fired = false;
+        }
+        if (dg_power_key.held && !dg_power_key_exit_fired &&
+            doom_menu_key_exit_due(now - dg_power_key_down_at)) {
+            dg_power_key_exit_fired = true;
+            doom_log("pwr key: 3 s hold -- exiting Doom");
+            doom_request_exit();
+        }
+        if (doom_power_key_press_ended(was_held, &dg_power_key,
+                                       missed_press) &&
+            dg_power_read_failures < POWER_KEY_READ_FAILURE_LIMIT) {
+            const uint32_t held_ms =
+                was_held ? now - dg_power_key_down_at : 0;
+            switch (doom_menu_key_release_action(held_ms,
+                                                 dg_power_key_exit_fired)) {
+                case DOOM_MENU_KEY_ESCAPE:
+                    doom_log("pwr key: press -> escape");
+                    push_key(KEY_ESCAPE, 1);
+                    push_key(KEY_ESCAPE, 0);
+                    break;
+                case DOOM_MENU_KEY_BACK:
+                    doom_log("pwr key: %lu ms -> previous menu",
+                             (unsigned long)held_ms);
+                    push_key(KEY_BACKSPACE, 1);
+                    push_key(KEY_BACKSPACE, 0);
+                    break;
+                case DOOM_MENU_KEY_NONE:
+                    break;
+            }
+            if (!was_held) dg_power_key_exit_fired = false;
+        }
+        return;
+    }
 
     const bool want_fire = gameplay && dg_power_key.held;
     if (want_fire != dg_power_fire_held) {

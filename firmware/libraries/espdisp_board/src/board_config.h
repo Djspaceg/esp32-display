@@ -317,9 +317,10 @@ struct Config {
 
   /// Whether some units of this carrier have no BOOT key to press although
   /// pinBootButton is wired (the T-Watch-S3's earlier batches: the switch
-  /// pad is there, the key on the back cover is not). Doom then takes its
-  /// menu key from the PWR key instead of firing with it, since nothing else
-  /// can open the menu mid-game; touch still fires.
+  /// pad is there, the key on the back cover is not). Doom then gives the
+  /// PWR key BOOT's tiers (menu, previous menu, 3 s exit) instead of firing
+  /// with it, since nothing else can open the menu or leave mid-game; touch
+  /// still fires.
   bool bootButtonOptional = false;
 
   bool hasPmuBus() const {
