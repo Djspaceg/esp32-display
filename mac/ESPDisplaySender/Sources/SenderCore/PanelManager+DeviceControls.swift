@@ -291,8 +291,11 @@ extension PanelManager {
         case .usbBootloader:
             // A bootloader write needs the device's own reported identity, not
             // the live CFGSHOW status a runtime control needs: everything it is
-            // checked against is read again right before esptool writes.
+            // checked against is read again right before esptool writes. A
+            // board whose firmware does not identify it is read in download
+            // mode instead, so it is never left without an update.
             guard let device = usbFlashDevice(for: serviceName)
+                ?? usbDownloadModeDevice(for: serviceName)
             else { return [] }
             return [.usbBootloaderCandidate(device.path)]
         case .either(let requirements):
@@ -356,13 +359,6 @@ extension PanelManager {
            case .verified = usbSerialState(for: serviceName) {
             return "Brightness over USB needs firmware support that this "
                 + "device does not report."
-        }
-
-        if operation == .firmwareUpdate,
-           let device = usbUpdateDevice(for: serviceName),
-           !Self.usbDeviceIdentifiesItselfForFlashing(device) {
-            return "USB is connected, but the app cannot verify the board "
-                + "family, chip, profile, and partition safely."
         }
 
         if Self.includesUSB(requirement) {

@@ -312,7 +312,8 @@ public struct EsptoolCommand: Equatable, Sendable {
     /// refusals included: a tool, a chip that is never `auto`, a port that is
     /// never empty, and a usable speed.
     private static func pinnedArguments(
-        tool: Tool, chip: String, port: String, baud: Int, after: String = afterReset
+        tool: Tool, chip: String, port: String, baud: Int, after: String = afterReset,
+        before: String = beforeReset
     ) throws -> [String] {
         let chip = chip.trimmingCharacters(in: .whitespacesAndNewlines)
         let port = port.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -324,7 +325,7 @@ public struct EsptoolCommand: Equatable, Sendable {
             "--chip", chip,
             "--port", port,
             "--baud", String(baud),
-            "--before", beforeReset,
+            "--before", before,
             "--after", after,
         ]
     }
@@ -365,11 +366,13 @@ public struct EsptoolCommand: Equatable, Sendable {
         chip: String,
         port: String,
         baud: Int = defaultBaud,
-        after: String = afterReset
+        after: String = afterReset,
+        before: String = beforeReset
     ) throws -> EsptoolCommand {
         var arguments = try pinnedArguments(
             tool: tool, chip: chip, port: port, baud: baud,
-            after: after == afterReset ? after : tool.resetMode(after))
+            after: after == afterReset ? after : tool.resetMode(after),
+            before: before == beforeReset ? before : tool.resetMode(before))
         arguments.append(tool.flashIDSubcommand)
         return EsptoolCommand(executable: tool.executable, arguments: arguments)
     }

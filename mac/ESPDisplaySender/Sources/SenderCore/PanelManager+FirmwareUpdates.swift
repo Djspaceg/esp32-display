@@ -60,6 +60,20 @@ extension PanelManager {
         /// ID may pass the read-only preflight in this case, but esptool's MAC
         /// must still equal `hardwareID` before any write.
         var usbAllowsLegacyIdentity: Bool
+        /// The USB device is this record's board, but its firmware has not
+        /// identified it (`usbDownloadModeDevice`): the write reads the board
+        /// in download mode instead, and esptool's MAC is the proof.
+        var usbIdentityFromEsptool = false
+        /// The family, and for a carrier family the board, the person chose
+        /// in the sheet because the record names none.
+        var chosenFamily: String? = nil
+        var chosenProfile: String? = nil
+        /// The chip that family runs on, which esptool must then read.
+        var chosenChip: String? = nil
+
+        /// What the record says, or else what was chosen.
+        var familyForUpdate: String? { target ?? chosenFamily }
+        var profileForUpdate: String? { profile ?? chosenProfile }
 
         init(
             serviceName: String, displayName: String, hardwareID: String,
@@ -69,7 +83,8 @@ extension PanelManager {
             firmwareSource: FirmwareSourceIdentity? = nil,
             usbDevice: WifiConfigUI.USBDeviceOption? = nil,
             usbPathGeneration: Int? = nil,
-            usbAllowsLegacyIdentity: Bool = false
+            usbAllowsLegacyIdentity: Bool = false,
+            usbIdentityFromEsptool: Bool = false
         ) {
             self.serviceName = serviceName
             self.displayName = displayName
@@ -84,6 +99,7 @@ extension PanelManager {
             self.usbDevice = usbDevice
             self.usbPathGeneration = usbPathGeneration
             self.usbAllowsLegacyIdentity = usbAllowsLegacyIdentity
+            self.usbIdentityFromEsptool = usbIdentityFromEsptool
         }
 
         var transports: [FirmwareUpdateTransport] {
@@ -126,17 +142,24 @@ extension PanelManager {
     /// name its family, chip, profile, partition and hardware ID itself, and a
     /// record with no identity of its own borrows the device's, because that
     /// reported identity is exactly what esptool is checked against before a
-    /// write. A remembered IP or serial path is never enough.
+    /// write. A remembered IP or serial path is never enough. A board whose
+    /// firmware does not identify it at all is still offered over USB, matched
+    /// by `usbDownloadModeDevice` and proven by esptool's MAC at write time.
     func firmwareUpdateReadiness(_ serviceName: String) -> FirmwareUpdateReadiness {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
             return .notReady("This device is not known yet.")
         }
         let usbCandidate = usbUpdateDevice(for: serviceName)
-        let usbDevice = usbCandidate.flatMap {
+        let identifiedDevice = usbCandidate.flatMap {
             Self.usbDeviceIdentifiesItselfForFlashing($0) ? $0 : nil
         }
+        // A board on USB is never left without an update: when its firmware
+        // does not identify it, the write reads it in download mode instead.
+        let downloadModeDevice = identifiedDevice == nil
+            ? usbDownloadModeDevice(for: serviceName) : nil
+        let usbDevice = identifiedDevice ?? downloadModeDevice
         guard let hardwareID = stableHardwareID(of: panel)
-                ?? usbDevice?.hardwareID
+                ?? identifiedDevice?.hardwareID
         else {
             return .notReady(
                 "This device has not reported its hardware ID yet, so an update "
@@ -193,7 +216,8 @@ extension PanelManager {
                 : usbCandidate?.serialStatus?.firmwareSource,
             usbDevice: usbDevice,
             usbPathGeneration: usbGeneration,
-            usbAllowsLegacyIdentity: false))
+            usbAllowsLegacyIdentity: false,
+            usbIdentityFromEsptool: identifiedDevice == nil && downloadModeDevice != nil))
     }
 
     func rememberedOTAPassword(for hardwareID: String) -> String? {
@@ -351,6 +375,9 @@ extension PanelManager {
     enum USBPartitionCompatibility: Equatable, Sendable {
         case exact
         case fullFlashMigration(from: String, to: String)
+        /// The board was read in download mode and its firmware never said
+        /// which layout it boots with; the whole layout is written anyway.
+        case layoutNotRead
     }
 
     enum USBCompatibilityIdentityIssue: Equatable, Sendable {
@@ -458,7 +485,8 @@ extension PanelManager {
         }
         let currentID = ConfigCommands.canonicalHardwareID(current.hardwareID)
         guard currentID == expectedID
-                || (currentID == nil && target.usbAllowsLegacyIdentity)
+                || (currentID == nil
+                    && (target.usbAllowsLegacyIdentity || target.usbIdentityFromEsptool))
         else {
             return .failure(
                 "USB device mismatch",
@@ -473,9 +501,57 @@ extension PanelManager {
         var cfgPartition: String?
         switch await probeUSBDevice(path, timeout: 3) {
         case .unavailable(let reason):
-            return await explainUnansweredBoard(
-                path: path, expectedID: expectedID, reason: reason,
-                nothingDone: "nothing was written")
+            // Not a dead end: a board whose firmware does not answer - one it
+            // does not recognise, a silent one, one in flashing mode - is read
+            // in download mode, and esptool's MAC is the proof. A port that
+            // changed meanwhile is not read at all: esptool would reset
+            // whatever is on it now.
+            guard usbPathGeneration(path) == expectedGeneration else {
+                return .failure(
+                    "USB device changed",
+                    "The serial device changed while it was being checked, so "
+                        + "nothing was written.")
+            }
+            progress(.log(.app, "The board's firmware did not identify it ("
+                + (UsbBoardCheck.plainReason(reason) ?? "no usable answer")
+                + "), so it is read in flashing mode instead."))
+            return await flashInDownloadMode(
+                bundle: bundle, target: target, path: path, expectedID: expectedID,
+                expectedGeneration: expectedGeneration, wroteFlash: &wroteFlash,
+                progress: progress)
+        case .identified(let identity)
+            where target.usbIdentityFromEsptool
+                && !Self.identityIsCompleteForFlashing(identity, expectedID: expectedID):
+            // What it did say still counts: another board's ID or another
+            // family is refused, and its own family and board name the image.
+            if let reportedID = ConfigCommands.canonicalHardwareID(identity.hardwareID),
+               reportedID != expectedID {
+                return .failure(
+                    "USB device mismatch",
+                    "The device at \(path) did not report \(target.hardwareID), "
+                        + "so nothing was written.")
+            }
+            if let liveTarget = target.target,
+               let reportedTarget = identity.target,
+               liveTarget != reportedTarget {
+                return .failure(
+                    "USB target mismatch",
+                    "This board reported target \(liveTarget) before, but over USB it "
+                        + "now reports \(reportedTarget). Nothing was written.")
+            }
+            var evidence = target
+            if target.target == nil, let reported = identity.target, !reported.isEmpty {
+                evidence.chosenFamily = reported
+            }
+            if target.profile == nil, let reported = identity.board, !reported.isEmpty {
+                evidence.chosenProfile = reported
+            }
+            progress(.log(.app, "The board's firmware answered without saying all of "
+                + "what it is, so it is read in flashing mode instead."))
+            return await flashInDownloadMode(
+                bundle: bundle, target: evidence, path: path, expectedID: expectedID,
+                expectedGeneration: expectedGeneration, wroteFlash: &wroteFlash,
+                progress: progress)
         case .identified(let identity):
             let reportedID = ConfigCommands.canonicalHardwareID(identity.hardwareID)
             guard reportedID == expectedID
@@ -654,6 +730,21 @@ extension PanelManager {
         }
 
         wroteFlash = true
+        return await writeOverUSB(
+            bundle: bundle, writes: writes, chip: detectedChip, path: path, tool: tool,
+            expectedID: expectedID, target: target, layout: partitionCompatibility,
+            progress: progress)
+    }
+
+
+    /// Write, wait for the board, and prove it booted what was written. The
+    /// caller has verified the board and set its own `wroteFlash`.
+    private func writeOverUSB(
+        bundle: FirmwareBundle, writes: [FirmwareBundle.FlashWrite], chip detectedChip: String,
+        path: String, tool: EsptoolCommand.Tool, expectedID: String,
+        target: FirmwareUpdateTarget, layout partitionCompatibility: USBPartitionCompatibility,
+        progress: @escaping @Sendable (UsbOnboarder.Progress) -> Void
+    ) async -> OperationOutcome {
         do {
             try await UsbOnboarder.flash(
                 writes: writes, chip: detectedChip, port: path, tool: tool,
@@ -699,6 +790,15 @@ extension PanelManager {
                     + "partition table without erasing saved settings. It answered "
                     + "on \(answered.port) after restarting.")
         }
+        if partitionCompatibility == .layoutNotRead {
+            return .success(
+                "Firmware written over USB",
+                "\(bundle.firmwareVersion) was written to \(target.displayName) "
+                    + "in flashing mode, with its partition table, and the board "
+                    + "answered on \(answered.port) after restarting. Nothing was "
+                    + "erased; if its storage layout changed, it may need its WiFi "
+                    + "set again.")
+        }
         return .success(
             "Firmware written over USB",
             "\(bundle.firmwareVersion) was written to \(target.displayName) "
@@ -707,4 +807,84 @@ extension PanelManager {
                 + "settings and OTA password remain.")
     }
 
+    /// Whether a CFGSHOW answer says enough to take the normal USB path.
+    nonisolated static func identityIsCompleteForFlashing(
+        _ identity: WifiConfigUI.USBIdentity, expectedID: String
+    ) -> Bool {
+        ConfigCommands.canonicalHardwareID(identity.hardwareID) == expectedID
+            && identity.target?.isEmpty == false
+            && identity.board?.isEmpty == false
+            && identity.chip?.isEmpty == false
+            && identity.partition?.isEmpty == false
+    }
+
+    /// The USB update for a board whose firmware did not identify it: read in
+    /// download mode, matched to an image by chip, flash size and what the
+    /// record knows or the person chose, then written whole.
+    private func flashInDownloadMode(
+        bundle: FirmwareBundle, target: FirmwareUpdateTarget, path: String,
+        expectedID: String, expectedGeneration: Int, wroteFlash: inout Bool,
+        progress: @escaping @Sendable (UsbOnboarder.Progress) -> Void
+    ) async -> OperationOutcome {
+        let tool: EsptoolCommand.Tool
+        switch EsptoolInstallation.locate() {
+        case .installed(let path):
+            tool = EsptoolCommand.Tool(path: path)
+        case .missing(let searched):
+            return .failure(
+                "The esp32 core is not installed",
+                "USB updating uses the esptool included with the Arduino esp32 "
+                    + "core. It was not found under \(searched.joined(separator: " or ")).")
+        }
+        let identity: DownloadModeIdentity
+        switch await Self.readDownloadModeIdentity(
+            port: path, expectedID: expectedID, tool: tool, progress: progress)
+        {
+        case .success(let read): identity = read
+        case .failure(let failure): return .failure(failure)
+        }
+        if let expectedChip = target.chip, !expectedChip.isEmpty,
+           expectedChip != ServiceMetadata.unknownChip, expectedChip != identity.chip {
+            return .failure(
+                "USB chip mismatch",
+                "This board reported \(expectedChip) before, but esptool read "
+                    + "\(identity.chip). Nothing was written.")
+        }
+        let exactTarget: String
+        switch Self.downloadModeImage(
+            in: bundle, for: identity, family: target.familyForUpdate,
+            profile: target.profileForUpdate)
+        {
+        case .success(let chosen): exactTarget = chosen
+        case .failure(let failure): return .failure(failure)
+        }
+        guard usbPathGeneration(path) == expectedGeneration,
+              usbDevices.contains(where: { $0.path == path && $0.isConnected })
+        else {
+            return .failure(
+                "USB device changed",
+                "The serial device changed while the board was being read, so "
+                    + "nothing was written.")
+        }
+        guard let writes = bundle.flashPlan(forTarget: exactTarget) else {
+            return .failure(
+                "Bundle is OTA-only",
+                "The \(exactTarget) image does not include the bootloader, partition "
+                    + "table and boot_app0 required for a safe USB write. Nothing was "
+                    + "written.")
+        }
+        let required = bundle.image(forTarget: exactTarget)?.partition
+        let layout: USBPartitionCompatibility
+        if let reported = target.partition, let required {
+            layout = Self.usbPartitionCompatibility(reported: reported, required: required)
+        } else {
+            layout = .layoutNotRead
+        }
+        progress(.log(.app, "Writing the \(exactTarget) image of "
+            + "\(bundle.firmwareVersion) to \(identity.summary)."))
+        wroteFlash = true
+        return await writeOverUSB(
+            bundle: bundle, writes: writes, chip: identity.chip, path: path, tool: tool,
+            expectedID: expectedID, target: target, layout: layout, progress: progress)
+    }
 }

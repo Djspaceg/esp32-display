@@ -102,6 +102,22 @@ public enum EsptoolOutput {
         return megabytes * 0x100000
     }
 
+    /// The PSRAM packaged with the chip, in bytes, from the `Features:` line
+    /// `chip-id` prints, for example `Embedded PSRAM 8MB (AP_3v3)`, or nil when
+    /// it names none. External PSRAM on a module is not in eFuse and is not
+    /// reported, so nil is "not said", never "absent".
+    public static func embeddedPSRAMBytes(in output: String) -> Int? {
+        guard let regex = try? NSRegularExpression(
+            pattern: "Embedded PSRAM\\s*(\\d+)\\s*MB")
+        else { return nil }
+        let range = NSRange(output.startIndex..<output.endIndex, in: output)
+        guard let match = regex.matches(in: output, range: range).last,
+              let sizeRange = Range(match.range(at: 1), in: output),
+              let megabytes = Int(output[sizeRange]), megabytes <= 1 << 12
+        else { return nil }
+        return megabytes * 0x100000
+    }
+
     /// What `flash-id` read when no flash chip answered it, as
     /// "manufacturer 1f, device ffff", or nil when a chip gave its ID or
     /// esptool printed none.

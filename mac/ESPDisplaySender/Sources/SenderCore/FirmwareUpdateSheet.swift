@@ -434,6 +434,9 @@ struct FirmwareUpdateSheet: View {
         Form {
             panelSection
             transportSection
+            if selectedTransport == .usb, target.usbIdentityFromEsptool {
+                downloadModeSection
+            }
             bundleSection
             if let bundle {
                 releaseNotesSection(bundle)
@@ -564,7 +567,11 @@ struct FirmwareUpdateSheet: View {
     private func applyRefreshedTarget() {
         let canResolveAutomaticFirmware: Bool
         switch manager.firmwareUpdateReadiness(target.serviceName) {
-        case .ready(let refreshed):
+        case .ready(var refreshed):
+            // A family chosen for a board that names none survives a refresh.
+            refreshed.chosenFamily = target.chosenFamily
+            refreshed.chosenProfile = target.chosenProfile
+            refreshed.chosenChip = target.chosenChip
             target = refreshed
             canResolveAutomaticFirmware = true
         case .notReady:
@@ -600,6 +607,86 @@ struct FirmwareUpdateSheet: View {
             .pickerStyle(.segmented)
             .disabled(isPushing || isRefreshingUSBDevices)
         }
+    }
+
+    /// A board on USB whose firmware does not identify it: it is read in
+    /// flashing mode before the write, and when nothing the app knows names
+    /// its family, the person chooses it here.
+    @ViewBuilder
+    private var downloadModeSection: some View {
+        Section("Board") {
+            Text("This board's firmware isn't saying what it is, so the app reads "
+                + "it in flashing mode first: its chip, flash size and MAC. Nothing "
+                + "is written unless the MAC is this board's.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if needsFamilyChoice {
+                Picker("Firmware family", selection: Binding(
+                    get: { familyChoiceID },
+                    set: { chooseFamily($0) }
+                )) {
+                    Text("Choose…").tag("")
+                    ForEach(familyChoices) { choice in
+                        Text(choice.label).tag(choice.id)
+                    }
+                }
+                .disabled(isPushing)
+                Text("Nothing the app knows about this board names its firmware "
+                    + "family. Choose the one it takes; the chip esptool reads must "
+                    + "match it before anything is written.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Families to offer: only for a board read in flashing mode whose record
+    /// does not settle the image by itself - from a file the person opened,
+    /// its images, and otherwise the bundled families.
+    private var familyChoices: [PanelManager.FirmwareFamilyChoice] {
+        guard target.usbIdentityFromEsptool else { return [] }
+        if let bundle, automaticIdentity == nil {
+            let candidates = bundle.images.map {
+                PanelManager.DownloadModeCandidate($0, in: bundle)
+            }
+            guard PanelManager.downloadModeNeedsChoice(
+                candidates: candidates, chip: target.chip, family: target.target,
+                profile: target.profile)
+            else { return [] }
+            return PanelManager.firmwareFamilyChoices(
+                candidates: candidates, chip: target.chip, family: target.target)
+        }
+        guard case .ready(let releases) = bundledFirmware else { return [] }
+        let recorded = FirmwareReleaseCatalog.Identity(
+            family: target.target, chip: target.chip,
+            profile: target.profile, partition: target.partition)
+        if (try? releases.resolveFamilyForUpdate(
+            live: recorded, usb: nil, transport: .usb)) != nil {
+            return []
+        }
+        return PanelManager.firmwareFamilyChoices(
+            catalog: releases.catalog, chip: target.chip, family: target.target)
+    }
+
+    private var needsFamilyChoice: Bool {
+        selectedTransport == .usb && !familyChoices.isEmpty
+    }
+
+    private var familyChoiceID: String {
+        familyChoices.first {
+            $0.family == target.chosenFamily && $0.profile == target.chosenProfile
+        }?.id ?? ""
+    }
+
+    private func chooseFamily(_ id: String) {
+        let choice = familyChoices.first { $0.id == id }
+        target.chosenFamily = choice?.family
+        target.chosenProfile = choice?.profile
+        target.chosenChip = choice?.chip
+        updateFailure = nil
+        reloadAutomaticFirmwareForSelectedTransport()
     }
 
     /// `unknown` from the panel and no record at all are different facts, and the
@@ -639,7 +726,7 @@ struct FirmwareUpdateSheet: View {
             } else {
                 Button("Choose Firmware Bundle…") { chooseFile() }
                     .disabled(isPushing)
-                if let readFailure {
+                if let readFailure, !(needsFamilyChoice && target.chosenFamily == nil) {
                     Text(readFailure)
                         .font(.callout)
                         .foregroundStyle(.orange)
@@ -877,12 +964,12 @@ struct FirmwareUpdateSheet: View {
     /// shipped family the detected chip uniquely identifies.
     private var effectiveTarget: String? {
         if let family = automaticIdentity?.family { return family }
-        guard let family = target.target, !family.isEmpty else { return nil }
+        guard let family = target.familyForUpdate, !family.isEmpty else { return nil }
         return family
     }
 
     private var effectiveChip: String? {
-        automaticIdentity?.chip ?? target.chip
+        automaticIdentity?.chip ?? target.chip ?? target.chosenChip
     }
 
     private func chipIsConfirmed(for bundle: FirmwareBundle) -> Bool {
@@ -955,6 +1042,7 @@ struct FirmwareUpdateSheet: View {
             return plan(bundle).canPush && !password.isEmpty
         case .usb:
             return target.usbDevice != nil && usbBundleCanWrite(bundle)
+                && !(needsFamilyChoice && target.chosenFamily == nil)
         }
     }
 
@@ -983,6 +1071,19 @@ struct FirmwareUpdateSheet: View {
             return "\(byteCount(image.byteCount)) will be written to the device's "
                 + "inactive firmware slot, and it will restart onto it."
         case .usb:
+            if target.usbIdentityFromEsptool {
+                let layoutKept = target.partition != nil
+                    && target.partition == effectiveTarget.flatMap {
+                        bundle.image(forTarget: $0)?.partition
+                    }
+                return "If the board's firmware still doesn't say what it is, the app "
+                    + "reads the board in flashing mode first, and nothing is written "
+                    + "unless it is this board, with a chip this firmware supports. "
+                    + "Then the whole image and its partition table are written, and "
+                    + "nothing is erased."
+                    + (layoutKept ? "" : " If the board's storage layout changes, it "
+                        + "may need its WiFi set again.")
+            }
             if let migration = usbPartitionMigration(bundle) {
                 return migration.confirmationMessage
             }
@@ -1096,8 +1197,8 @@ struct FirmwareUpdateSheet: View {
         case .ready(let releases):
             do {
                 let live = FirmwareReleaseCatalog.Identity(
-                    family: target.target, chip: target.chip,
-                    profile: target.profile, partition: target.partition)
+                    family: target.familyForUpdate, chip: target.chip ?? target.chosenChip,
+                    profile: target.profileForUpdate, partition: target.partition)
                 let usb = target.usbDevice.map {
                     FirmwareReleaseCatalog.Identity(
                         family: $0.target, chip: $0.chip,
@@ -1303,9 +1404,18 @@ struct FirmwareUpdateSheet: View {
         case .usb:
             let monitor = usbFlash
             monitor.record(.phase(.findingBoard))
+            // The family the bundled firmware was resolved to, for a board
+            // that names none itself.
+            var usbTarget = target
+            if usbTarget.familyForUpdate == nil {
+                usbTarget.chosenFamily = automaticIdentity?.family
+            }
+            if usbTarget.profileForUpdate == nil {
+                usbTarget.chosenProfile = automaticIdentity?.profile
+            }
             Task {
                 let outcome = await manager.flashFirmwareOverUSB(
-                    bundle: bundle, to: target
+                    bundle: bundle, to: usbTarget
                 ) { update in
                     monitor.record(update)
                 }

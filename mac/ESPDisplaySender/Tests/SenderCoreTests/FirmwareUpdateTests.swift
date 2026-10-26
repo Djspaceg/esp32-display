@@ -406,7 +406,7 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertEqual(target.usbDevice?.target, "s3-185")
     }
 
-    func testColdUSBReadinessRequiresCompleteCurrentMetadata() {
+    func testColdUSBReadinessWithIncompleteMetadataReadsTheBoardInDownloadMode() {
         var panel = Self.panel(
             serviceName: "espdisplay",
             hardwareID: "020000123456",
@@ -426,13 +426,15 @@ final class FirmwareUpdateTests: XCTestCase {
             path: path, identity: incomplete,
             generation: manager.usbPathGeneration(path))
 
-        guard case .notReady(let reason) =
-            manager.firmwareUpdateReadiness("espdisplay")
-        else { return XCTFail("missing partition evidence must disable USB update") }
-        XCTAssertEqual(
-            reason,
-            "USB is connected, but the app cannot verify the board family, "
-                + "chip, profile, and partition safely.")
+        // Missing partition evidence no longer leaves the board unflashable:
+        // it is read in download mode before the write, and what it did say
+        // still names its family.
+        guard case .ready(let target) = manager.firmwareUpdateReadiness("espdisplay")
+        else { return XCTFail("an incompletely identified board must stay updatable") }
+        XCTAssertTrue(target.usbIdentityFromEsptool)
+        XCTAssertEqual(target.usbDevice?.path, path)
+        XCTAssertEqual(target.target, "s3-185")
+        XCTAssertEqual(target.profile, "st77916")
     }
 
     func testColdUSBReadinessAllowsVersionBootstrapWithCompleteMetadata() {
@@ -554,11 +556,11 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertEqual(FirmwareVersion.compare("1.4.0", to: installed), .older)
     }
 
-    /// The safety half of the same rule. A device that will not say what it is
-    /// stays refused, and the refusal is a sentence the window can print rather
-    /// than a dead button: `firmwareUpdateUnavailableReason` returns it, and
-    /// pressing the control reports the same words through the outcome alert.
-    func testIncompletelyIdentifiedUSBDeviceIsRefusedWithAVisibleReason() {
+    /// The safety half of the same rule, since a board on USB must never be left
+    /// unflashable: a device that does not say all of what it is is still
+    /// offered, and the write reads it in download mode and proves its MAC
+    /// with esptool before anything is written.
+    func testIncompletelyIdentifiedUSBDeviceIsUpdatedFromDownloadMode() {
         var panel = Self.panel(
             serviceName: "espdisplay",
             hardwareID: "a4cb8fdb3c24",
@@ -579,19 +581,15 @@ final class FirmwareUpdateTests: XCTestCase {
             board: "st77916",
             chip: "esp32s3")
 
-        let expected = "USB is connected, but the app cannot verify the board "
-            + "family, chip, profile, and partition safely."
-        XCTAssertEqual(
-            manager.firmwareUpdateReadiness("espdisplay"), .notReady(expected))
-        XCTAssertEqual(
-            manager.firmwareUpdateUnavailableReason("espdisplay"), expected,
-            "the reason must be readable in the UI, not swallowed by a grey button")
-        XCTAssertNil(manager.beginFirmwareUpdate("espdisplay"))
-        XCTAssertEqual(
-            manager.operationOutcome,
-            .failure("Firmware updates unavailable", expected),
-            "pressing the control must report the same sentence")
-        XCTAssertFalse(manager.canPerform(.firmwareUpdate, for: "espdisplay"))
+        // Offered over USB all the same: the write reads the board in
+        // download mode, and esptool's MAC must be this board's.
+        XCTAssertNil(manager.firmwareUpdateUnavailableReason("espdisplay"))
+        let target = manager.beginFirmwareUpdate("espdisplay")
+        XCTAssertEqual(target?.usbIdentityFromEsptool, true)
+        XCTAssertEqual(target?.usbDevice?.path, path)
+        XCTAssertEqual(target?.target, "s3")
+        XCTAssertNil(manager.operationOutcome)
+        XCTAssertTrue(manager.canPerform(.firmwareUpdate, for: "espdisplay"))
     }
 
     /// A board with no identity of its own is never a write target, however

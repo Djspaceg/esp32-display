@@ -20,6 +20,12 @@ extension PanelManager {
         let noUSB = "Game data is written over USB. Connect this device to "
             + "this Mac with a data cable."
         switch firmwareUpdateReadiness(serviceName) {
+        case .ready(let target) where target.usbIdentityFromEsptool:
+            // A firmware update can still reach it; game data needs its
+            // firmware answering to find where the data goes.
+            return .notReady(
+                "This device's firmware isn't saying enough about itself over USB, so "
+                    + "game data can't be written. Update its firmware first.")
         case .ready(let target) where target.usbDevice != nil:
             return .ready(target)
         case .ready:
