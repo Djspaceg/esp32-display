@@ -13,6 +13,7 @@
 
 #include "../display_stream/band_compress.h"
 #include "../display_stream/band_protocol.h"
+#include "../display_stream/camera_protocol.h"
 #include "../display_stream/bc1.h"
 #include "../display_stream/boot_menu_model.h"
 #include "../display_stream/button_press_model.h"
@@ -100,6 +101,36 @@ static std::string firmwareSourcePath(const char *relative) {
 
 int main() {
   bool dropped;
+
+  // --- Camera control and JPEG fragment header ----------------------------
+  {
+    uint8_t command[cameraproto::COMMAND_BYTES] = {
+        'E', 'C', 'A', 'M', cameraproto::VERSION,
+        cameraproto::COMMAND_START,
+        (uint8_t)cameraproto::Resolution::Vga, 0};
+    cameraproto::Command parsed = {};
+    CHECK(cameraproto::parseCommand(command, sizeof(command), parsed));
+    CHECK_EQ(parsed.kind, cameraproto::COMMAND_START);
+    CHECK_EQ((uint8_t)parsed.resolution, (uint8_t)cameraproto::Resolution::Vga);
+    command[7] = 1;
+    CHECK(!cameraproto::parseCommand(command, sizeof(command), parsed));
+
+    uint8_t header[cameraproto::FRAME_HEADER_BYTES] = {};
+    CHECK_EQ(cameraproto::writeFrameHeader(
+                 header, sizeof(header), cameraproto::Resolution::Qvga,
+                 0x1234, 2, 3),
+             cameraproto::FRAME_HEADER_BYTES);
+    CHECK(memcmp(header, "ECAM", 4) == 0);
+    CHECK_EQ(header[5], cameraproto::FRAME_FRAGMENT);
+    CHECK_EQ(header[6], (uint8_t)cameraproto::Resolution::Qvga);
+    CHECK_EQ(cameraproto::readU16LE(header + 8), 0x1234);
+    CHECK_EQ(cameraproto::readU16LE(header + 10), 2);
+    CHECK_EQ(cameraproto::readU16LE(header + 12), 3);
+    CHECK_EQ(cameraproto::writeFrameHeader(
+                 header, sizeof(header), cameraproto::Resolution::Qvga,
+                 1, 3, 3),
+             0);
+  }
 
   // --- SSD1315 72x40 monochrome page framebuffer -------------------------
   {

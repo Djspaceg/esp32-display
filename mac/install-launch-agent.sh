@@ -6,7 +6,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LABEL="com.espdisplay.sender"
-BIN="$HOME/Applications/ESPDisplaySender.app/Contents/MacOS/ESPDisplaySender"
+BIN="/Applications/ESPDisplaySender.app/Contents/MacOS/ESPDisplaySender"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 if [[ ! -x "$BIN" ]]; then
@@ -29,5 +29,5 @@ echo "prompts (System Settings > Privacy & Security > Screen Recording)."
 echo "launchd retries startup failures, while a clean Quit stays stopped until"
 echo "the next login or a foreground app launch."
 echo
-echo "open manager: open $HOME/Applications/ESPDisplaySender.app"
+echo "open manager: open /Applications/ESPDisplaySender.app"
 echo "uninstall: launchctl bootout gui/$(id -u) $PLIST && rm $PLIST"

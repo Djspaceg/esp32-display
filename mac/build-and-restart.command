@@ -32,7 +32,7 @@ else
 fi
 echo
 echo "    log:     /tmp/espdisplaysender.log"
-echo "    manager: open ~/Applications/ESPDisplaySender.app"
+echo "    manager: open /Applications/ESPDisplaySender.app"
 
 # Finder leaves the Terminal window open, but a prompt makes it obvious the
 # script finished rather than stalled. Skipped when run non-interactively.

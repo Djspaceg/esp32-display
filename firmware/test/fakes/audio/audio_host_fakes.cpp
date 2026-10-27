@@ -14,6 +14,7 @@
 #include "lwip/sockets.h"
 
 #include "../../../display_stream/app_state.h"
+#include "../../../display_stream/camera_service.h"
 #include "../../../display_stream/control_apply.h"
 #include "../../../display_stream/display_power.h"
 #include "../../../display_stream/frame_pipeline.h"
@@ -98,6 +99,14 @@ TwoWire Wire;
 uint32_t millis() { return nowMs; }
 uint32_t micros() { return nowMs * 1000U; }
 void delay(uint32_t milliseconds) { nowMs += milliseconds; }
+
+// Camera hardware is intentionally absent from the audio/network host seam.
+// net_link and telemetry still share the actual camera capability hooks, so
+// provide the unavailable branch rather than making that seam pull esp_camera.
+bool startCameraService() { return false; }
+bool cameraAvailable() { return false; }
+bool handleCameraCommand(const uint8_t *, size_t) { return false; }
+void serviceCamera() {}
 
 int FakeWiFi::RSSI() const {
   rssiCalls++;

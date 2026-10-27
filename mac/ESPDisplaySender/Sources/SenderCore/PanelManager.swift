@@ -75,6 +75,7 @@ final class PanelManager: ObservableObject {
     /// object so ten frames a second redraw one small view instead of the
     /// whole window.
     let preview = FramePreview()
+    let cameraPreview = CameraPreview()
 
     var sessions: [String: DeviceSession] = [:]
     /// Which session is currently feeding `preview`, and whether anyone is
@@ -120,6 +121,7 @@ final class PanelManager: ObservableObject {
         var sessionID: UUID?
     }
     var pendingTelemetry: [String: PendingTelemetry] = [:]
+    var cameraAssemblers: [String: CameraFrameAssembler] = [:]
     var scheduleTelemetryFlush: (TimeInterval, @escaping @MainActor () -> Void) -> Void = {
         delay, work in
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {

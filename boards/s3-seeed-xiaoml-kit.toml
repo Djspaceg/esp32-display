@@ -189,6 +189,24 @@ playback_channels = 0
 capture_rate_hz = 0
 capture_channels = 0
 
+[camera]
+xclk = 10
+sccb_sda = 40
+sccb_scl = 39
+d0 = 15
+d1 = 17
+d2 = 18
+d3 = 16
+d4 = 14
+d5 = 12
+d6 = 11
+d7 = 48
+vsync = 38
+href = 47
+pclk = 13
+pwdn = -1
+reset = -1
+
 [capabilities]
 # The shared S3 bundle still includes the Doom runtime and WAD, but this
 # 72x40 monochrome panel cannot present Doom's 96x54 framebuffer.

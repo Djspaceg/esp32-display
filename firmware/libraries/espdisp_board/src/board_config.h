@@ -78,6 +78,7 @@ static const int8_t NO_PIN = -1;
 #include "generated_board_variants.h"
 #include "generated_board_identity.h"
 #include "generated_board_audio.h"
+#include "generated_board_camera.h"
 #include "generated_board_touch.h"
 #include "generated_board_usb_host.h"
 #include "generated_board_detection.h"

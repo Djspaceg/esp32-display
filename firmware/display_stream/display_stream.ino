@@ -72,6 +72,7 @@
 #include "band_protocol.h"
 #include "band_compress.h"
 #include "bc1.h"
+#include "camera_service.h"
 #include "tile_protocol.h"
 #include "device_protocol.h"
 #include "control_queue.h"
@@ -695,6 +696,10 @@ void setup() {
     Serial.println("audio: disabled for this runtime profile");
   }
 
+  if (startCameraService()) {
+    Serial.println("camera: JPEG service available");
+  }
+
   bootscreen::advance(bootscreen::Stage::Services);
   // OTA before the announce, not after, even though ArduinoOTA is the later
   // arrival here: addMdnsService() bakes deviceCapabilities() into the caps TXT
@@ -797,6 +802,7 @@ void loop() {
   }
   handleSerialConfig();
   serviceAudioToneTest();
+  serviceCamera();
   applyPendingControl();
   applyPendingInputMap();
   updateIdentify();

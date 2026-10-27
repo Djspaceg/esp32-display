@@ -8,6 +8,7 @@
 #include "audio_engine.h"
 #include "audio_protocol.h"
 #include "band_protocol.h"
+#include "camera_service.h"
 #include "control_apply.h"
 #include "device_protocol.h"
 #include "display_power.h"
@@ -48,6 +49,10 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
   lastSenderPacketAt = millis();
   if (len == 4 && memcmp(data, "EPNG", 4) == 0) {
     return;  // keepalive ping: endpoint refresh only
+  }
+  if (len >= 4 && memcmp(data, "ECAM", 4) == 0) {
+    if (!handleCameraCommand(data, len)) statBadLen = statBadLen + 1;
+    return;
   }
   // Firmware update packets ride this socket (stream_update.h). Never
   // counted as frame packets, so the link-heal starvation check below in

@@ -127,6 +127,9 @@ public enum DeviceProtocol {
         /// nothing. Without it the board keeps today's behaviour and the app
         /// can only choose what the gestures it forwards do here.
         public static let inputMap = Capabilities(rawValue: 1 << 23)
+        /// Emits ECAM JPEG fragments only after this app asks it to start.
+        /// This is advertised only when the detected camera initialized.
+        public static let camera = Capabilities(rawValue: 1 << 24)
     }
 
     public struct DeviceInfo: Equatable, Sendable {

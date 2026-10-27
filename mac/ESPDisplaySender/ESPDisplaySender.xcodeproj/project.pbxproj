@@ -80,6 +80,7 @@
 				A00000000000000000000012 /* Resources */,
 				A00000000000000000000013 /* Embed canonical firmware releases */,
 				A00000000000000000000014 /* Embed audio driver */,
+				A00000000000000000000015 /* Embed camera extension */,
 			);
 			buildRules = (
 			);
@@ -171,6 +172,21 @@
 			shellPath = /bin/zsh;
 			shellScript = "\"$SRCROOT/../AudioDriver/embed-driver.sh\"\n";
 		};
+		A00000000000000000000015 /* Embed camera extension */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Embed camera extension";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/zsh;
+			shellScript = "\"$SRCROOT/../CameraExtension/embed-extension.sh\"\n";
+		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -221,6 +237,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_ENTITLEMENTS = ESPDisplaySender.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 2;
@@ -245,6 +262,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_ENTITLEMENTS = ESPDisplaySender.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 2;

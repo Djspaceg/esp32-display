@@ -216,6 +216,11 @@ struct PanelSnapshot: Identifiable, Equatable {
     var lastFrameAt: Date?
     /// Live audio state and diagnostics. Discovery-only and never persisted.
     var audioStatus: PanelAudioSnapshot?
+    /// Camera control is session-local. The board sends no video unless this
+    /// app has asked for it, so this deliberately does not persist across app
+    /// launches or a device reboot.
+    var cameraStreaming = false
+    var cameraResolution: CameraProtocol.Resolution = .qvga
 
     var capabilities: DeviceProtocol.Capabilities {
         DeviceProtocol.Capabilities(rawValue: capabilitiesRaw)

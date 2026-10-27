@@ -351,7 +351,7 @@ pauses for the transfer. Boards without the bit, and the CLI, keep ArduinoOTA.
 
 ## macOS app
 
-Build and install to `~/Applications/ESPDisplaySender.app`:
+Build and install to `/Applications/ESPDisplaySender.app`:
 
 ```sh
 mac/make-app.sh

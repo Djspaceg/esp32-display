@@ -6,6 +6,7 @@
 #include <board_power.h>
 
 #include "app_state.h"
+#include "camera_service.h"
 #include "chip_identity.h"
 #include "device_protocol.h"
 #include "display_power.h"
@@ -88,6 +89,7 @@ uint32_t deviceCapabilities() {
                 ? (deviceproto::CAP_AUDIO_DOWNLINK |
                    deviceproto::CAP_AUDIO_UPLINK)
                 : 0u)
+         | (cameraAvailable() ? deviceproto::CAP_CAMERA : 0u)
          // Exactly ONE bit-15 frame protocol per board, never both: a tile
          // packet and a packed band packet are byte-ambiguous past the
          // shared flag bit, so a board that accepted both could misparse

@@ -4348,6 +4348,22 @@ def test_board_descriptor_validator():
         lambda: board_descriptor.validate_descriptors(descriptors),
         "repository descriptors pass validation",
     )
+    xiaoml = next(item for item in descriptors if item["key"] == "s3-seeed-xiaoml-kit")
+    check(board_descriptor.has_camera(xiaoml),
+          "the XIAOML descriptor declares its camera")
+    check_equal(
+        tuple(board_descriptor.camera_pin(xiaoml, field) for field in (
+            "xclk", "sccb_sda", "sccb_scl", "d0", "d1", "d2", "d3", "d4",
+            "d5", "d6", "d7", "vsync", "href", "pclk", "pwdn", "reset")),
+        (10, 40, 39, 15, 17, 18, 16, 14, 12, 11, 48, 38, 47, 13, -1, -1),
+        "the XIAOML descriptor pins the Sense camera",
+    )
+    duplicate_camera = copy.deepcopy(xiaoml)
+    duplicate_camera["camera"]["d0"] = duplicate_camera["camera"]["xclk"]
+    check_descriptor_fails(
+        [duplicate_camera], "camera signal GPIOs must be unique",
+        "camera descriptor refuses duplicate signal pins",
+    )
     v2_audio = {
         "amp": "ns4150b",
         "codec": "es8311",

@@ -259,6 +259,7 @@ extension PanelManager {
         }
         previewFocus = target
         preview.focus(on: target)
+        cameraPreview.focus(on: target)
         if let target {
             sessions[target]?.setPreviewEnabled(true)
         }
@@ -332,6 +333,35 @@ extension PanelManager {
     ) {
         if let sessionID, sessions[serviceName]?.id != sessionID { return }
         preview.accept(image: image, landscape: landscape, from: serviceName)
+    }
+
+    func acceptCamera(
+        jpeg: Data, resolution: CameraProtocol.Resolution, from serviceName: String,
+        sessionID: UUID? = nil
+    ) {
+        if let sessionID, sessions[serviceName]?.id != sessionID { return }
+        CameraExtensionBridge.shared.forward(jpeg: jpeg, resolution: resolution)
+        cameraPreview.accept(jpeg: jpeg, resolution: resolution, from: serviceName)
+    }
+
+    func setCameraStreaming(
+        _ enabled: Bool, resolution: CameraProtocol.Resolution, for serviceName: String
+    ) {
+        guard let panel = panels.first(where: { $0.serviceName == serviceName }),
+              panel.capabilities.contains(.camera),
+              let session = sessions[serviceName]
+        else {
+            operationOutcome = .failure(
+                "Camera unavailable",
+                "This device has not reported a working camera connection yet.")
+            return
+        }
+        session.setCameraStreaming(enabled, resolution: resolution)
+        updatePanel(serviceName) {
+            $0.cameraStreaming = enabled
+            $0.cameraResolution = resolution
+        }
+        if !enabled { cameraPreview.clear() }
     }
 
     func attachPicker(_ picker: PickerSource) {

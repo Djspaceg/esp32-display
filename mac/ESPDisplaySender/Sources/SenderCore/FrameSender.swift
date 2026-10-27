@@ -36,6 +36,7 @@ final class FrameSender {
         case touch(DeviceProtocol.TouchEvent)
         case battery(DeviceProtocol.BatteryStatus)
         case inputReport(DeviceProtocol.InputReport)
+        case camera(CameraProtocol.Fragment)
     }
 
     private let host: String
@@ -979,6 +980,14 @@ final class FrameSender {
             onDeviceEvent?(.info(info))
             return
         }
+        if let fragment = CameraProtocol.parseFragment(data) {
+            lock.withLock {
+                _deviceReplies &+= 1
+                _lastReplyAt = Date()
+            }
+            onDeviceEvent?(.camera(fragment))
+            return
+        }
         if let acknowledgement = DeviceProtocol.parseAck(data) {
             lock.withLock {
                 _lastControlAck = acknowledgement
@@ -1287,6 +1296,14 @@ final class FrameSender {
     /// whether it landed, and the manager sends it again until it has.
     func sendInputMap(_ packet: Data) {
         transmit(packet, repeats: 3)
+    }
+
+    /// Start or stop JPEG capture. ECAM is offered only when EINF advertised a
+    /// working camera, so an older or camera-less board receives no new packet.
+    func setCameraStreaming(_ enabled: Bool, resolution: CameraProtocol.Resolution) {
+        transmit(
+            CameraProtocol.commandPacket(enabled ? .start : .stop, resolution: resolution),
+            repeats: 3)
     }
 
     private func sendManagementControl(

@@ -236,6 +236,25 @@ IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # the three controller ID bytes a dsi_panel_id candidate requires from a DCS
 # read of its MIPI-DSI panel.
 OPTIONAL_FIELDS = {
+    # Camera wiring is optional because only the XIAO ESP32-S3 Sense carrier
+    # currently has one. A complete pin map, rather than a profile-name list in
+    # firmware or the app, is the authority for whether a board can offer video.
+    "camera.xclk": -1,
+    "camera.sccb_sda": -1,
+    "camera.sccb_scl": -1,
+    "camera.d0": -1,
+    "camera.d1": -1,
+    "camera.d2": -1,
+    "camera.d3": -1,
+    "camera.d4": -1,
+    "camera.d5": -1,
+    "camera.d6": -1,
+    "camera.d7": -1,
+    "camera.vsync": -1,
+    "camera.href": -1,
+    "camera.pclk": -1,
+    "camera.pwdn": -1,
+    "camera.reset": -1,
     "detection.sense_pin": -1,
     "detection.sense_min_mv": 0,
     "detection.sense_max_mv": 0,
@@ -294,7 +313,11 @@ OPTIONAL_PIN_DEFAULTS = {
 MOTION_ADDRESSES = {"qmi8658": 0x6B, "bma423": 0x19}
 PMU_PANEL_RAILS = ("aldo1", "aldo2", "aldo3", "aldo4")
 PMU_INPUT_LIMITS = (100, 500, 900, 1000, 1500, 2000)
-ALLOWED_TOP_LEVEL = {path.split(".", 1)[0] for path in REQUIRED_FIELDS}
+ALLOWED_TOP_LEVEL = {
+    path.split(".", 1)[0]
+    for path in (tuple(REQUIRED_FIELDS) + tuple(OPTIONAL_FIELDS)
+                 + tuple(OPTIONAL_PIN_DEFAULTS))
+}
 ALLOWED_SECTION_FIELDS: Dict[str, set[str]] = {}
 for required_path in (tuple(REQUIRED_FIELDS) + tuple(OPTIONAL_FIELDS)
                       + tuple(OPTIONAL_PIN_DEFAULTS)):
@@ -362,6 +385,72 @@ def _validate_key(descriptor: Dict[str, Any]) -> None:
         raise DescriptorError(
             "%s: carrier.pin_key reports as the PWR key, which this board's "
             "axp2101 already has" % _source_name(descriptor))
+
+
+CAMERA_PIN_FIELDS = (
+    "xclk", "sccb_sda", "sccb_scl", "d0", "d1", "d2", "d3", "d4", "d5",
+    "d6", "d7", "vsync", "href", "pclk", "pwdn", "reset")
+
+
+def camera_pin(descriptor: Dict[str, Any], field: str) -> int:
+    """One camera GPIO, or -1 where this board has no camera signal."""
+    return descriptor.get("camera", {}).get(
+        field, OPTIONAL_FIELDS["camera." + field])
+
+
+def has_camera(descriptor: Dict[str, Any]) -> bool:
+    """Whether this descriptor declares the complete supported camera bus."""
+    return camera_pin(descriptor, "xclk") >= 0
+
+
+def _validate_camera(descriptor: Dict[str, Any]) -> None:
+    source = _source_name(descriptor)
+    pins = {field: camera_pin(descriptor, field) for field in CAMERA_PIN_FIELDS}
+    present = pins["xclk"] >= 0
+    if not present:
+        if any(value >= 0 for value in pins.values()):
+            raise DescriptorError(
+                "%s: camera.xclk is required when any camera pin is declared"
+                % source)
+        return
+    if descriptor["identity"]["target"] not in S3_FAMILIES:
+        raise DescriptorError("%s: camera support requires an ESP32-S3 family" % source)
+    required = tuple(field for field in CAMERA_PIN_FIELDS
+                     if field not in ("pwdn", "reset"))
+    maximum = GPIO_MAX_BY_TARGET[descriptor["identity"]["target"]]
+    for field in required:
+        value = pins[field]
+        if (not isinstance(value, int) or isinstance(value, bool)
+                or value < 0 or value > maximum):
+            raise DescriptorError(
+                "%s: camera.%s must be a valid GPIO" % (source, field))
+    for field in ("pwdn", "reset"):
+        value = pins[field]
+        if (not isinstance(value, int) or isinstance(value, bool)
+                or value < -1 or value > maximum):
+            raise DescriptorError(
+                "%s: camera.%s must be -1 or a valid GPIO" % (source, field))
+    wired = [value for value in pins.values() if value >= 0]
+    if len(set(wired)) != len(wired):
+        raise DescriptorError("%s: camera signal GPIOs must be unique" % source)
+    occupied = {}
+    for path in EXISTING_PIN_PATHS:
+        value = _field(descriptor, path)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            occupied.setdefault(value, path)
+    for path in OPTIONAL_PIN_DEFAULTS:
+        value = optional_pin(descriptor, path)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            occupied.setdefault(value, path)
+    for field in AUDIO_PIN_FIELDS:
+        value = descriptor["audio"][field]
+        if value >= 0:
+            occupied.setdefault(value, "audio." + field)
+    for field, value in pins.items():
+        if value >= 0 and value in occupied:
+            raise DescriptorError(
+                "%s: camera.%s GPIO%d collides with %s"
+                % (source, field, value, occupied[value]))
 
 
 def pmu_panel_rails(descriptor: Dict[str, Any]) -> Tuple[str, ...]:
@@ -1641,6 +1730,7 @@ def validate_descriptors(
         _validate_optional_pins(descriptor)
         _validate_pmu(descriptor)
         _validate_boot_optional(descriptor)
+        _validate_camera(descriptor)
         _validate_doom_capability(descriptor)
         _validate_motion(descriptor)
         _validate_usb_host(descriptor)

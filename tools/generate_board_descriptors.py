@@ -393,6 +393,55 @@ def render_audio(descriptors: Sequence[Dict[str, Any]]) -> str:
     return "".join(lines)
 
 
+def render_camera(descriptors: Sequence[Dict[str, Any]]) -> str:
+    ordered = sorted(
+        descriptors, key=lambda item: item["identity"]["variant_value"])
+    fields = (
+        "xclk", "sccb_sda", "sccb_scl", "d0", "d1", "d2", "d3", "d4", "d5",
+        "d6", "d7", "vsync", "href", "pclk", "pwdn", "reset")
+    lines = [
+        HEADER,
+        "#pragma once\n\n",
+        "struct GeneratedCamera {\n",
+        "  Variant variant;\n",
+        "  bool present;\n",
+        "  int8_t xclk;\n",
+        "  int8_t sccbSda;\n",
+        "  int8_t sccbScl;\n",
+        "  int8_t d0;\n",
+        "  int8_t d1;\n",
+        "  int8_t d2;\n",
+        "  int8_t d3;\n",
+        "  int8_t d4;\n",
+        "  int8_t d5;\n",
+        "  int8_t d6;\n",
+        "  int8_t d7;\n",
+        "  int8_t vsync;\n",
+        "  int8_t href;\n",
+        "  int8_t pclk;\n",
+        "  int8_t pwdn;\n",
+        "  int8_t reset;\n",
+        "};\n\n",
+        "static constexpr GeneratedCamera GENERATED_CAMERAS[] = {\n",
+    ]
+    for item in ordered:
+        values = [board_descriptor.camera_pin(item, field) for field in fields]
+        lines.append("    {Variant::%s, %s, %s},\n" % (
+            item["identity"]["variant"],
+            _bool(board_descriptor.has_camera(item)),
+            ", ".join(str(value) for value in values)))
+    lines.extend([
+        "};\n\n",
+        "inline const GeneratedCamera *generatedCamera(Variant variant) {\n",
+        "  for (const auto &camera : GENERATED_CAMERAS) {\n",
+        "    if (camera.variant == variant) return &camera;\n",
+        "  }\n",
+        "  return nullptr;\n",
+        "}\n",
+    ])
+    return "".join(lines)
+
+
 def _panel_initializer(descriptor: Dict[str, Any]) -> str:
     panel = descriptor["panel"]
     return (
@@ -940,6 +989,15 @@ def render_swift_catalog(
     lines.append(
         "    public static let headlessProfiles: Set<String> = Set(%s)\n\n"
         % _swift_array(headless))
+    cameras = [
+        descriptor["identity"]["profile"]
+        for family in grouped.values()
+        for descriptor in family
+        if board_descriptor.has_camera(descriptor)
+    ]
+    lines.append(
+        "    public static let cameraProfiles: Set<String> = Set(%s)\n\n"
+        % _swift_array(cameras))
     # Boards with a knob (encoder lines on the carrier). The knob drives the
     # Mac's volume and mute through media keys whatever the touch preset, so
     # the app offers the Accessibility grant on these boards' pages.
@@ -1003,6 +1061,8 @@ def expected_outputs(repo_root: str) -> Dict[str, str]:
             render_identity(descriptors),
         "firmware/libraries/espdisp_board/src/generated_board_audio.h":
             render_audio(descriptors),
+        "firmware/libraries/espdisp_board/src/generated_board_camera.h":
+            render_camera(descriptors),
         "firmware/libraries/espdisp_board/src/generated_board_touch.h":
             render_touch_calibrations(descriptors),
         "firmware/libraries/espdisp_board/src/generated_board_usb_host.h":

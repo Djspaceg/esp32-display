@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>ESPDisplayCamera</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.espdisplay.camera-extension</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>ESPDisplay XIAOML Camera</string>
+	<key>CFBundlePackageType</key>
+	<string>SYSX</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>CMIOExtension</key>
+	<dict>
+		<key>CMIOExtensionMachServiceName</key>
+		<string>com.espdisplay.camera-extension.service</string>
+	</dict>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>Provides the XIAOML Kit camera to video apps while ESPDisplaySender is running.</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.cmio.extension</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>ESPDisplayCamera.CameraExtensionMain</string>
+	</dict>
+</dict>
+</plist>

@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Build the native ESPDisplaySender app into ~/Applications.
+# Build the native ESPDisplaySender app into /Applications.
 #
 # Xcode signs with the Apple Development team configured in the project,
 # preserving the app's designated requirement across rebuilds so macOS privacy
@@ -49,19 +49,24 @@ discard_scratch() {
 }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+WORKSPACE="$(cd "$HERE/.." && pwd)"
 PROJECT="$HERE/ESPDisplaySender/ESPDisplaySender.xcodeproj"
 SCHEME="ESPDisplaySender App"
-APP="$HOME/Applications/ESPDisplaySender.app"
-STAGED_APP="$HOME/Applications/.ESPDisplaySender.app.staged"
-# Trailing slash stripped so the require_under prefix test below is exact;
-# macOS sets TMPDIR with one.
-SCRATCH_PARENT="${TMPDIR:-/tmp}"
-SCRATCH_PARENT="${SCRATCH_PARENT%/}"
-DERIVED_DATA="$(mktemp -d "$SCRATCH_PARENT/espdisplaysender.XXXXXX")"
+APP_PARENT="/Applications"
+APP="$APP_PARENT/ESPDisplaySender.app"
+STAGED_APP="$APP_PARENT/.ESPDisplaySender.app.staged"
+LEGACY_APP="$HOME/Applications/ESPDisplaySender.app"
+SCRATCH_PARENT="$WORKSPACE"
+DERIVED_DATA="$(mktemp -d "$SCRATCH_PARENT/.espdisplaysender.XXXXXX")"
+
+[[ -d "$APP_PARENT" ]] || {
+  echo "error: application directory is missing: $APP_PARENT" >&2
+  exit 1
+}
 
 cleanup() {
   discard_scratch "$DERIVED_DATA" "$SCRATCH_PARENT" "build directory"
-  discard_scratch "$STAGED_APP" "$HOME/Applications" "staged app"
+  discard_scratch "$STAGED_APP" "$APP_PARENT" "staged app"
 }
 trap cleanup EXIT INT TERM
 
@@ -115,20 +120,28 @@ if [[ ! -d "$BUILT_APP" ]]; then
   exit 1
 fi
 
-mkdir -p "$HOME/Applications"
-discard_scratch "$STAGED_APP" "$HOME/Applications" "staged app"
+discard_scratch "$STAGED_APP" "$APP_PARENT" "staged app"
 ditto "$BUILT_APP" "$STAGED_APP"
 codesign --verify --deep --strict --verbose=1 "$STAGED_APP"
 
 # The outgoing install is moved to the Trash rather than deleted, so a bad
-# build is recoverable and nothing recursive ever runs against ~/Applications.
+# build is recoverable and nothing recursive ever runs against /Applications.
 # The cost is that repeated rebuilds accumulate bundles in the Trash.
 if [[ -e "$APP" ]]; then
-  require_under "$APP" "$HOME/Applications" "installed app"
+  require_under "$APP" "$APP_PARENT" "installed app"
   RETIRED="$HOME/.Trash/ESPDisplaySender.app.$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$HOME/.Trash"
+  require_under "$RETIRED" "$HOME/.Trash" "retired app"
   mv -- "$APP" "$RETIRED"
   echo "previous install moved to $RETIRED"
+fi
+if [[ -e "$LEGACY_APP" ]]; then
+  require_under "$LEGACY_APP" "$HOME/Applications" "legacy installed app"
+  RETIRED="$HOME/.Trash/ESPDisplaySender.app.$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$HOME/.Trash"
+  require_under "$RETIRED" "$HOME/.Trash" "retired legacy app"
+  mv -- "$LEGACY_APP" "$RETIRED"
+  echo "legacy install moved to $RETIRED"
 fi
 mv -- "$STAGED_APP" "$APP"
 

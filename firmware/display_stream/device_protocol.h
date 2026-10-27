@@ -154,6 +154,10 @@ enum Capability : uint32_t {
   // bit behaves as it always has, and a sender without it never sends EMAP,
   // so the board keeps its defaults, which are that same behaviour.
   CAP_INPUT_MAP = 1u << 23,
+  // Emits ECAM JPEG fragments only after the sender asks it to start. This is
+  // a runtime fact: the descriptor may wire a camera but an absent or failed
+  // sensor must not make the app offer a feed that cannot arrive.
+  CAP_CAMERA = 1u << 24,
 };
 
 enum class ControlOpcode : uint8_t {

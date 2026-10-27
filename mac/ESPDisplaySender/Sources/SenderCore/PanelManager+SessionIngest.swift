@@ -265,6 +265,19 @@ extension PanelManager {
                 updatePanel(serviceName) { $0.inputReport = report }
             }
             syncInputMap(for: serviceName)
+        case .camera(let fragment):
+            var assembler = cameraAssemblers[serviceName] ?? CameraFrameAssembler()
+            let complete = assembler.append(fragment)
+            cameraAssemblers[serviceName] = assembler
+            if let (jpeg, resolution) = complete {
+                updatePanel(serviceName) {
+                    $0.cameraStreaming = true
+                    $0.cameraResolution = resolution
+                }
+                acceptCamera(
+                    jpeg: jpeg, resolution: resolution, from: serviceName,
+                    sessionID: sessionID)
+            }
         }
         persistIfNeeded(force: reconciledIdentity)
     }

@@ -460,6 +460,9 @@ struct PanelDetailView: View {
             {
                 audioSection
             }
+            if panel.capabilities.contains(.camera) {
+                cameraSection
+            }
             diagnosticsSection
             dangerSection
         }
@@ -707,6 +710,78 @@ struct PanelDetailView: View {
                 + "scale it down. Choosing a display, window, or application "
                 + "instead uses the macOS picker. Either choice is remembered and "
                 + "reapplied when the sender restarts.")
+        }
+    }
+
+    private var cameraSection: some View {
+        Section {
+            LabeledContent("Streaming") {
+                Toggle("Stream camera", isOn: Binding(
+                    get: { panel.cameraStreaming },
+                    set: {
+                        manager.setCameraStreaming(
+                            $0, resolution: panel.cameraResolution,
+                            for: panel.serviceName)
+                    }))
+                    .toggleStyle(.switch)
+                    .fixedSize()
+                    .disabled(manager.sessions[panel.serviceName] == nil)
+            }
+            LabeledContent("Resolution") {
+                Picker("Camera resolution", selection: Binding(
+                    get: { panel.cameraResolution },
+                    set: {
+                        manager.setCameraStreaming(
+                            panel.cameraStreaming, resolution: $0,
+                            for: panel.serviceName)
+                    })) {
+                    ForEach(CameraProtocol.Resolution.allCases, id: \.self) {
+                        Text($0.title).tag($0)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                .disabled(!panel.cameraStreaming)
+            }
+            if manager.cameraPreview.serviceName == panel.serviceName,
+               let frame = manager.cameraPreview.frame {
+                LabeledContent("Live feed") {
+                    Image(decorative: frame.image, scale: 1)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: 420, maxHeight: 315)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .accessibilityLabel("Live camera feed")
+                }
+            } else {
+                LabeledContent("Live feed", value: panel.cameraStreaming
+                    ? "Waiting for camera frames" : "Stopped")
+            }
+            LabeledContent("Other apps") {
+                Button("Install Camera Extension") {
+                    CameraExtensionInstaller.activate { result in
+                        Task { @MainActor in
+                            switch result {
+                            case .success:
+                                manager.operationOutcome = .success(
+                                    "Camera extension installed",
+                                    "Approve it in System Settings, then choose "
+                                        + "ESPDisplay XIAOML Camera in your video app.")
+                            case .failure(let error):
+                                manager.operationOutcome = .failure(
+                                    "Camera extension could not install",
+                                    error.localizedDescription)
+                            }
+                        }
+                    }
+                }
+            }
+        } header: {
+            Text("Camera")
+        } footer: {
+            Text("The device sends JPEG frames only while Stream camera is on. "
+                + "The extension receives those frames from this app, so keep "
+                + "ESPDisplaySender running while another app uses the camera.")
         }
     }
 
