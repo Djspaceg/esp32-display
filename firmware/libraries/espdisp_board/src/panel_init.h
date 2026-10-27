@@ -124,6 +124,67 @@ static const gc9107_lcd_init_cmd_t GC9107_WAVESHARE_INIT[] = {
 #endif
 
 #if defined(ESPDISP_PANEL_S3_RUNTIME)
+// LilyGO's T-QT Pro sequence for its earlier GC9107 glass,
+// extras/old_panel/GC9A01_Init.h at Xinyuan-LilyGO/T-QT 230f0c0, the one
+// LilyGO's 2024 factory image runs, COLMOD 0x05 (RGB565) included. INVOFF
+// is left to esp_lcd_panel_invert_color from the descriptor, and DISPON to
+// esp_lcd_panel_disp_on_off after the whole memory is cleared, so the glass
+// never shows power-on noise.
+// https://github.com/Xinyuan-LilyGO/T-QT/blob/230f0c0ea7677fdde29ca7a49a419dbf597e6b3e/extras/old_panel/GC9A01_Init.h
+static const uint8_t tqt_b0[] = {0xC0};
+static const uint8_t tqt_b1[] = {0x80};
+static const uint8_t tqt_b2[] = {0x27};
+static const uint8_t tqt_b3[] = {0x13};
+static const uint8_t tqt_b6[] = {0x19};
+static const uint8_t tqt_b7[] = {0x05};
+static const uint8_t tqt_ac[] = {0xC8};
+static const uint8_t tqt_ab[] = {0x0F};
+static const uint8_t tqt_3a[] = {0x05};
+static const uint8_t tqt_b4[] = {0x04};
+static const uint8_t tqt_a8[] = {0x08};
+static const uint8_t tqt_b8[] = {0x08};
+static const uint8_t tqt_ea[] = {0x02};
+static const uint8_t tqt_e8[] = {0x2A};
+static const uint8_t tqt_e9[] = {0x47};
+static const uint8_t tqt_e7[] = {0x5F};
+static const uint8_t tqt_c6[] = {0x21};
+static const uint8_t tqt_c7[] = {0x15};
+static const uint8_t tqt_f0[] = {0x1D, 0x38, 0x09, 0x4D, 0x92, 0x2F, 0x35,
+                                 0x52, 0x1E, 0x0C, 0x04, 0x12, 0x14, 0x1F};
+static const uint8_t tqt_f1[] = {0x16, 0x40, 0x1C, 0x54, 0xA9, 0x2D, 0x2E,
+                                 0x56, 0x10, 0x0D, 0x0C, 0x1A, 0x14, 0x1E};
+static const uint8_t tqt_f4[] = {0x00, 0x00, 0xFF};
+static const uint8_t tqt_ba[] = {0xFF, 0xFF};
+static const gc9107_lcd_init_cmd_t GC9107_LILYGO_TQT_INIT[] = {
+    {0xFE, nullptr, 0, 0},
+    {0xEF, nullptr, 0, 0},
+    {0xB0, tqt_b0, sizeof(tqt_b0), 0},
+    {0xB1, tqt_b1, sizeof(tqt_b1), 0},
+    {0xB2, tqt_b2, sizeof(tqt_b2), 0},
+    {0xB3, tqt_b3, sizeof(tqt_b3), 0},
+    {0xB6, tqt_b6, sizeof(tqt_b6), 0},
+    {0xB7, tqt_b7, sizeof(tqt_b7), 0},
+    {0xAC, tqt_ac, sizeof(tqt_ac), 0},
+    {0xAB, tqt_ab, sizeof(tqt_ab), 0},
+    {0x3A, tqt_3a, sizeof(tqt_3a), 0},
+    {0xB4, tqt_b4, sizeof(tqt_b4), 0},
+    {0xA8, tqt_a8, sizeof(tqt_a8), 0},
+    {0xB8, tqt_b8, sizeof(tqt_b8), 0},
+    {0xEA, tqt_ea, sizeof(tqt_ea), 0},
+    {0xE8, tqt_e8, sizeof(tqt_e8), 0},
+    {0xE9, tqt_e9, sizeof(tqt_e9), 0},
+    {0xE7, tqt_e7, sizeof(tqt_e7), 0},
+    {0xC6, tqt_c6, sizeof(tqt_c6), 0},
+    {0xC7, tqt_c7, sizeof(tqt_c7), 0},
+    {0xF0, tqt_f0, sizeof(tqt_f0), 0},
+    {0xF1, tqt_f1, sizeof(tqt_f1), 0},
+    {0xF4, tqt_f4, sizeof(tqt_f4), 0},
+    {0xBA, tqt_ba, sizeof(tqt_ba), 0},
+    {0x11, nullptr, 0, 120},  // SLPOUT, LilyGO's 120 ms
+};
+#endif
+
+#if defined(ESPDISP_PANEL_S3_RUNTIME)
 // The Questwise 0.42-inch 96x54 ST7735 breakout, driven through the vendored
 // GC9107 driver: both controllers take the standard DCS window, pixel-format
 // and MADCTL commands, and that driver sends whatever controller-specific
@@ -286,11 +347,11 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
 
   esp_lcd_panel_dev_config_t panel_config = {};
   panel_config.reset_gpio_num = cfg.pinRst;
-  panel_config.rgb_ele_order =
-      cfg.panel->driver == board::PanelDriver::Gc9107 ||
-              cfg.panel->driver == board::PanelDriver::St7735
-          ? LCD_RGB_ELEMENT_ORDER_BGR
-          : LCD_RGB_ELEMENT_ORDER_RGB;
+  // The descriptor's color_order. Every GC9107 and ST7735 glass but the
+  // T-QT's takes BGR; the T-QT's is RGB (LilyGO's MADCTL 0x00).
+  panel_config.rgb_ele_order = cfg.panel->colorBgr
+                                   ? LCD_RGB_ELEMENT_ORDER_BGR
+                                   : LCD_RGB_ELEMENT_ORDER_RGB;
   // The framebuffer arrives from the Mac already in panel byte order, so the
   // ESP32 never touches a pixel. The core's ST7789 driver defaults to
   // big-endian and only diverges when this is set to LITTLE; the vendored
@@ -311,6 +372,14 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
           .init_cmds_size = sizeof(GC9107_WAVESHARE_INIT) /
                             sizeof(GC9107_WAVESHARE_INIT[0]),
       };
+#if defined(ESPDISP_PANEL_S3_RUNTIME)
+      // The init table is the glass's own: the T-QT's is LilyGO's.
+      if (cfg.panel->profile == board::PanelProfile::Gc9107Tqt_128x128) {
+        vendor.init_cmds = GC9107_LILYGO_TQT_INIT;
+        vendor.init_cmds_size = sizeof(GC9107_LILYGO_TQT_INIT) /
+                                sizeof(GC9107_LILYGO_TQT_INIT[0]);
+      }
+#endif
       panel_config.vendor_config = &vendor;
       err = esp_lcd_new_panel_gc9107(io, &panel_config, &panel);
       break;

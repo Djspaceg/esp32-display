@@ -10,6 +10,9 @@ static constexpr PlatformConfig PLATFORM_ESP32_C6 = {
 static constexpr PlatformConfig PLATFORM_ESP32_S3 = {
     Platform::Esp32S3, "esp32s3", "universal-8m-doom-saves-ota", true, true,
     WifiTopology::Native, IdentitySource::WifiStationMac, SerialTransport::NativeUsbCdc};
+static constexpr PlatformConfig PLATFORM_ESP32_S3_4M = {
+    Platform::Esp32S3_4M, "esp32s3", "s3-4m-ota", true, true,
+    WifiTopology::Native, IdentitySource::WifiStationMac, SerialTransport::NativeUsbCdc};
 static constexpr PlatformConfig PLATFORM_ESP32_P4 = {
     Platform::Esp32P4, "esp32p4", "p4-32m-saves-ota", true, true,
     WifiTopology::HostedCoprocessor, IdentitySource::EfuseBaseMac, SerialTransport::UartBridge};

@@ -571,7 +571,7 @@ class NetworkPort(NamedTuple):
     address: str
     hostname: str
     board: str  # chip-level Arduino board token
-    target: str  # firmware family: c3, c6, s3, or p4
+    target: str  # firmware family: c3, c6, s3, s3-4m, or p4
     profile: str  # runtime physical profile token
     partition: str  # release partition compatibility token
 
@@ -919,6 +919,10 @@ def resolve_family(
     print("Probing %s for its chip type..." % port.address, flush=True)
     chip = probe_chip(port.address)
     matches = [family for family in FAMILIES.values() if family.chip == chip]
+    if len(matches) > 1:
+        # Families that share a chip (s3, s3-4m) ship to disjoint flash sizes.
+        flash = detect_flash_bytes(matches[0], port.address)
+        matches = [family for family in matches if flash in family.flash_sizes]
     if len(matches) == 1:
         family = matches[0]
         _validate_flash_profile(family, profile)
@@ -927,6 +931,29 @@ def resolve_family(
     raise Fail(
         "could not determine the firmware family on %s; re-run with --family %s"
         % (port.address, "|".join(FAMILIES)))
+
+
+def check_flash_capacity(family: Family, port_address: str) -> None:
+    """Refuse a family whose image the chip's flash cannot boot.
+
+    Only asked where another family shares the chip: the S3 8 MiB image
+    asserts at boot on a 4 MiB part (its header names 8 MiB), and the two S3
+    families ship to disjoint flash sizes, so the size names the right one.
+    """
+    if len(board_keys_for_chip(family.chip)) < 2:
+        return
+    flash = detect_flash_bytes(family, port_address)
+    if flash in family.flash_sizes:
+        return
+    fits = [other.key for other in FAMILIES.values()
+            if other.chip == family.chip and flash in other.flash_sizes]
+    raise Fail(
+        "%s has %d MiB of flash; the %s image needs %s. %s"
+        % (port_address, flash // 0x100000, family.key,
+           " or ".join("%d MiB" % (size // 0x100000)
+                       for size in family.flash_sizes),
+           "Re-run with --family %s." % fits[0] if len(fits) == 1
+           else "No family fits it."))
 
 
 # --------------------------------------------------------------------------
@@ -2640,7 +2667,8 @@ def validate_release_catalog(
         )
     families = catalog["families"]
     if not isinstance(families, dict) or set(families) != set(FAMILIES):
-        raise Fail("release catalog must list exactly c3, c6, s3, and p4")
+        raise Fail("release catalog must list exactly %s, and %s"
+                   % (", ".join(list(FAMILIES)[:-1]), list(FAMILIES)[-1]))
     root = os.path.realpath(output_root)
     required_entry = {
         "latest_version", "artifact", "sha256", "bytes", "chip",
@@ -5064,6 +5092,7 @@ def confirm_attached_board(
         raise Fail(
             "%s now resolves to family %s, not the %s image that was built"
             % (port.address, confirmed.key, family.key))
+    check_flash_capacity(family, port.address)
     chip = probe_chip(port.address)
     if chip is not None and chip != family.chip:
         raise Fail(
@@ -5138,6 +5167,7 @@ def cmd_flash(args) -> int:
             "release flash always writes every part")
     port = resolve_port(args.port)
     family = resolve_family(args.family, port, args.profile)
+    check_flash_capacity(family, port.address)
     print("Family: %s (%s) on %s" %
           (family.key, family.fqbn, port.address), flush=True)
     if build_first:
@@ -5932,11 +5962,12 @@ def _verify_partition_payload(family: Family, blob: bytes) -> None:
             "game_saves": (0x42, 0x08, 0x3D0000, 0x02F000),
             "doom_wad": (0x42, 0x06, 0x3FF000, 0x401000),
         }
-    elif family.key in ("c3", "c6"):
+    elif family.key in ("c3", "c6", "s3-4m"):
         if any(entry[0] == "doom_wad" for entry in entries):
             raise Fail("%s partition table contains an incompatible payload" %
                        family.key)
-        if family.key == "c3":
+        # The C3 and the 4 MiB S3 share one layout: two 0x1F0000 slots.
+        if family.key in ("c3", "s3-4m"):
             expected = {
                 "nvs": (0x01, 0x02, 0x009000, 0x005000),
                 "otadata": (0x01, 0x00, 0x00E000, 0x002000),
@@ -6864,7 +6895,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bundle.set_defaults(func=cmd_bundle)
 
     p_release = subs.add_parser(
-        "release", help="build c3, c6, s3, and p4 artifacts with a catalog")
+        "release", help="build every family's artifacts with a catalog")
     p_release.add_argument(
         "--output-root",
         help="artifact directory (default firmware-dev for build-numbered firmware)")

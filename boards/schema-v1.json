@@ -63,7 +63,7 @@
         "legacy_targets"
       ],
       "properties": {
-        "target": {"enum": ["c3", "c6", "s3", "p4"]},
+        "target": {"enum": ["c3", "c6", "s3", "s3-4m", "p4"]},
         "chip": {"type": "string", "minLength": 1},
         "profile": {"type": "string", "minLength": 1},
         "partition": {"type": "string", "minLength": 1},
@@ -212,6 +212,10 @@
           "type": "boolean",
           "description": "A mirrored memory axis addresses the glass from the far end, so its window starts memory - glass - offset in. Absent means false: every quadrant uses the near offsets."
         },
+        "clear_memory": {
+          "type": "boolean",
+          "description": "Write black over the whole memory_width x memory_height at init, before the display turns on. Needs a spi panel with both memory extents. Absent means false."
+        },
         "color_order": {"enum": ["rgb", "bgr"]},
         "data_endian": {"enum": ["big", "little"]},
         "pixel_depth": {"const": 16},
@@ -256,6 +260,10 @@
         "pin_panel_power": {"$ref": "#/$defs/pin"},
         "pin_encoder_a": {"$ref": "#/$defs/pin"},
         "pin_encoder_b": {"$ref": "#/$defs/pin"},
+        "pin_key": {
+          "$ref": "#/$defs/pin",
+          "description": "A second push button to GND, read with a pull-up and reported as the PWR key's press and long press. Not on a board whose axp2101 has a PWR key. Absent means -1."
+        },
         "usb_host": {
           "enum": ["none", "unpowered", "powered"],
           "description": "The carrier's USB host port: none, unpowered (the device brings its own 5 V) or powered. Absent means none."

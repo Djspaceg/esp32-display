@@ -8,8 +8,9 @@
 // was measured. Clearing the whole memory once at init turns any such
 // mismatch into black instead.
 //
-// Only the ST7735 is cleared. Its memory extents are measured; every other
-// panel's init stays exactly as it was proven on its own board.
+// Only a panel whose descriptor sets clear_memory is cleared (the XIAO's
+// ST7735 and the T-QT's GC9107); every other panel's init stays exactly as it
+// was proven on its own board.
 #pragma once
 
 #include <stddef.h>
@@ -26,9 +27,8 @@ struct MemoryExtent {
 
 /// The controller memory to clear at init, or 0x0 for none.
 inline MemoryExtent memoryToClear(const board::PanelConfig &panel) {
-  if (panel.driver != board::PanelDriver::St7735 ||
-      panel.bus != board::PanelBus::Spi || panel.memoryWidth == 0 ||
-      panel.memoryHeight == 0) {
+  if (!panel.clearMemory || panel.bus != board::PanelBus::Spi ||
+      panel.memoryWidth == 0 || panel.memoryHeight == 0) {
     return {0, 0};
   }
   return {panel.memoryWidth, panel.memoryHeight};

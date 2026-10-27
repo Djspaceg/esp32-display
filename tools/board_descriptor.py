@@ -180,8 +180,17 @@ PLATFORM_ENUM = {
     "c3": "Esp32C3",
     "c6": "Esp32C6",
     "s3": "Esp32S3",
+    "s3-4m": "Esp32S3_4M",
     "p4": "Esp32P4",
 }
+# Every release family, in the order generated tables list them.
+FAMILY_KEYS = ("c3", "c6", "s3", "s3-4m", "p4")
+# The families built for an ESP32-S3: the 8 MiB-and-up universal image, and
+# the 4 MiB image for S3 parts whose flash cannot hold its layout (the
+# T-QT Pro's ESP32-S3FN4R2, which also has quad rather than octal PSRAM).
+S3_FAMILIES = ("s3", "s3-4m")
+# Families whose chip has a second I2C controller (Wire1).
+TWO_I2C_FAMILIES = S3_FAMILIES + ("p4",)
 
 DETECTION_KINDS = {
     "always",
@@ -205,7 +214,7 @@ AUDIO_CODECS = {"none", "unknown", "es8311", "pcm5101a"}
 AUDIO_MICS = {"none", "unknown", "es7210", "ics43434", "pdm"}
 AUDIO_SPEAKER_BUSES = {"none", "unknown", "i2s"}
 AUDIO_MIC_BUSES = {"none", "unknown", "i2s", "pdm"}
-GPIO_MAX_BY_TARGET = {"c3": 21, "c6": 30, "s3": 48, "p4": 54}
+GPIO_MAX_BY_TARGET = {"c3": 21, "c6": 30, "s3": 48, "s3-4m": 48, "p4": 54}
 WIFI_TOPOLOGIES = {"native", "hosted_coprocessor"}
 IDENTITY_SOURCES = {"wifi_station_mac", "efuse_base_mac"}
 SERIAL_TRANSPORTS = {"native_usb_cdc", "uart_bridge"}
@@ -231,6 +240,10 @@ OPTIONAL_FIELDS = {
     # A mirrored memory axis addresses the glass from the far end (the
     # T-Watch-S3's ST7789V3); absent keeps the near offsets in every quadrant.
     "panel.window_follows_mirror": False,
+    # Write black over the controller's whole memory_width x memory_height at
+    # init, before the display turns on (panel_memory_clear.h); absent leaves
+    # the panel's proven init untouched.
+    "panel.clear_memory": False,
     # AXP2101 ALDOs the panel, backlight or touch hang off, raised to 3300 mV
     # and switched on before panel bring-up; see Config::pmuPanelAldoMask.
     "power.panel_rails": [],
@@ -250,6 +263,9 @@ OPTIONAL_PIN_DEFAULTS = {
     "carrier.pin_panel_power": -1,
     "carrier.pin_encoder_a": -1,
     "carrier.pin_encoder_b": -1,
+    # A second push button, active low, reported as the PWR key's inputs (the
+    # T-QT's right-hand KEY on GPIO47).
+    "carrier.pin_key": -1,
     # The codec control bus, declared only when it is not the touch bus.
     "audio.pin_control_sda": -1,
     "audio.pin_control_scl": -1,
@@ -305,6 +321,35 @@ def window_follows_mirror(descriptor: Dict[str, Any]) -> bool:
         OPTIONAL_FIELDS["panel.window_follows_mirror"])
 
 
+def clear_memory(descriptor: Dict[str, Any]) -> bool:
+    """Whether panel init writes black over the controller's whole memory."""
+    return descriptor["panel"].get(
+        "clear_memory", OPTIONAL_FIELDS["panel.clear_memory"])
+
+
+def _validate_clear_memory(descriptor: Dict[str, Any]) -> None:
+    source = _source_name(descriptor)
+    clear = clear_memory(descriptor)
+    if not isinstance(clear, bool):
+        raise DescriptorError("%s: panel.clear_memory must be bool" % source)
+    panel = descriptor["panel"]
+    if clear and (panel["bus"] != "spi" or not panel["memory_width"]):
+        # The clear addresses the memory with absolute single-lane CASET and
+        # RASET, so it needs a SPI panel and the memory's extents.
+        raise DescriptorError(
+            "%s: panel.clear_memory needs a spi panel with memory_width and "
+            "memory_height" % source)
+
+
+def _validate_key(descriptor: Dict[str, Any]) -> None:
+    if (optional_pin(descriptor, "carrier.pin_key") >= 0 and
+            descriptor["power"]["controller"] == "axp2101"):
+        # Both would report as the PWR key's two inputs.
+        raise DescriptorError(
+            "%s: carrier.pin_key reports as the PWR key, which this board's "
+            "axp2101 already has" % _source_name(descriptor))
+
+
 def pmu_panel_rails(descriptor: Dict[str, Any]) -> Tuple[str, ...]:
     """The AXP2101 ALDOs panel bring-up switches on; () when none."""
     value = descriptor["power"].get(
@@ -343,7 +388,7 @@ def _validate_motion(descriptor: Dict[str, Any]) -> None:
     if controller == "none" and sda != -1:
         raise DescriptorError(
             "%s: motion.sda/scl are only for a motion controller" % source)
-    if sda != -1 and descriptor["identity"]["target"] not in ("s3", "p4"):
+    if sda != -1 and descriptor["identity"]["target"] not in TWO_I2C_FAMILIES:
         raise DescriptorError(
             "%s: a separate motion bus needs a second I2C controller "
             "(s3 or p4)" % source)
@@ -432,7 +477,7 @@ def _validate_pmu(descriptor: Dict[str, Any]) -> None:
         raise DescriptorError(
             "%s: power.sda/scl, panel_rails and input_limit_ma are only for "
             "an axp2101" % source)
-    if sda != -1 and descriptor["identity"]["target"] not in ("s3", "p4"):
+    if sda != -1 and descriptor["identity"]["target"] not in TWO_I2C_FAMILIES:
         # The PMU's own bus is the chip's second I2C controller (Wire1).
         raise DescriptorError(
             "%s: a separate power.sda/scl bus needs a second I2C controller "
@@ -690,11 +735,12 @@ def _validate_detection(descriptor: Dict[str, Any]) -> None:
         # level with the pull-down enabled, reported as 0 or 3300 mV, on any
         # GPIO except its USB Serial/JTAG pads.
         target = descriptor["identity"]["target"]
-        if target not in ("s3", "p4"):
+        if target not in S3_FAMILIES + ("p4",):
             raise DescriptorError(
-                "%s: detection sense guards are only supported on s3 and p4"
+                "%s: detection sense guards are only supported on s3, s3-4m "
+                "and p4"
                 % source)
-        if target == "s3" and not 1 <= sense_pin <= 10:
+        if target in S3_FAMILIES and not 1 <= sense_pin <= 10:
             raise DescriptorError(
                 "%s: detection.sense_pin must be an S3 ADC1 pin (1..10)"
                 % source)
@@ -1482,6 +1528,8 @@ def validate_descriptors(
         _validate_motion(descriptor)
         _validate_usb_host(descriptor)
         _validate_backlight_floor(descriptor)
+        _validate_clear_memory(descriptor)
+        _validate_key(descriptor)
         panel_symbol = descriptor["panel"]["symbol"]
         if panel_symbol in panels:
             shared, owner = panels[panel_symbol]

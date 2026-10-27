@@ -544,6 +544,9 @@ void setup() {
   if (bcfg->hasBootButton() || bcfg->hasEncoder()) {
     initializeButtonInput();
   }
+  if (bcfg->hasKey()) {
+    initializeKeyInput();
+  }
 
   bootscreen::advance(bootscreen::Stage::Sensors);
   // Touch, before WiFi: the capability bits mDNS advertises depend on whether
@@ -750,6 +753,15 @@ void loop() {
   }
 
   handleButton();
+  {
+    // The second key is polled, not edge-driven: 10 ms against its 30 ms
+    // debounce catches any press a hand can make.
+    static uint32_t lastKeyPoll = 0;
+    if (millis() - lastKeyPoll >= 10) {
+      lastKeyPoll = millis();
+      serviceKeyButton();
+    }
+  }
   handleSerialConfig();
   serviceAudioToneTest();
   applyPendingControl();

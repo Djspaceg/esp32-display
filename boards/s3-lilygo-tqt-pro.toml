@@ -1,0 +1,245 @@
+schema = 1
+key = "s3-lilygo-tqt-pro"
+catalog_order = 10
+name = "LilyGO T-QT Pro (GC9107)"
+hardware = ["LilyGO T-QT Pro N4R2"]
+
+# The LilyGO T-QT Pro, N4R2 version: ESP32-S3FN4R2 (4 MB embedded flash, 2 MB
+# quad PSRAM; esptool on the unit here: "Embedded Flash 4MB (XMC), Embedded
+# PSRAM 2MB (AP_3v3)"), native USB, a 0.85-inch 128x128 GC9107 and two
+# buttons. Pins, panel set-up, backlight and buttons are LilyGO's, from
+# https://github.com/Xinyuan-LilyGO/T-QT at 230f0c0: extras/
+# Setup211_LilyGo_T_QT_Pro_S3.h, examples/LVGL_Factory and schematic/
+# T-QT-Pro.pdf. The 8 MB S3 image cannot run on this chip (an 8 MB flash
+# header asserts on 4 MB at boot, and octal PSRAM does not start on quad), so
+# the board has its own family, s3-4m. The 8 MB, no-PSRAM T-QT Pro N8 is a
+# different chip and is not this descriptor.
+
+[migration]
+firmware_config = "generated"
+config_symbol = "CONFIG_LILYGO_TQT_PRO"
+
+[identity]
+target = "s3-4m"
+chip = "esp32s3"
+profile = "gc9107-tqt"
+partition = "s3-4m-ota"
+variant = "LilygoTqtPro"
+variant_value = 16
+legacy_targets = []
+
+[family]
+platform_key = "s3-4m"
+build_target = "s3-4m"
+fqbn = "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=4M,PSRAM=enabled,PartitionScheme=custom"
+partition_csv = "partitions_s3_4m.csv"
+extra_flags = ["-DESPDISP_FAMILY_S3_4M"]
+extra_library_dirs = []
+fqbn_options = []
+flash_bytes = [4194304]
+common_layout_bytes = 4194304
+# Doom needs its 4 MB WAD in flash, which 4 MB beside two application slots
+# cannot hold, so this family's image carries no Doom.
+requires_doom_wad = false
+bootloader_address = 0
+partitions_address = 32768
+boot_app0_address = 57344
+app_address = 65536
+blurb = "ESP32-S3 4 MB display firmware"
+
+[platform]
+use_psram_frame_buffers = true
+use_raw_lwip_receive_task = true
+wifi = "native"
+identity_source = "wifi_station_mac"
+serial = "native_usb_cdc"
+
+[capacity]
+minimum_flash_bytes = 4194304
+
+[panel]
+# LilyGO ships two glasses behind the same GC9107 footprint. This unit's
+# factory flash was 99.2% byte-identical to LilyGO's
+# T-QT-Pro-N4R2_LVGL_Factory_240815.bin and unlike the 2026 new-panel image,
+# so it is the earlier glass: extras/old_panel/GC9A01_Init.h (inversion off,
+# 0x20) and GC9A01_Rotation.h (MADCTL RGB; column 2, row 1 in plain and MX|MY,
+# column 1, row 2 in the MV states). LilyGO's 2024 factory sketch draws
+# upright at setRotation(0), plain MADCTL, so orientation_offset is 0.
+# LilyGO's TFT_eSPI setup clocks it at 40 MHz.
+# The GC9107 datasheet gives 128x160 of memory, but LilyGO's own window
+# (columns 2..129) runs past column 127, so the memory is taken as the
+# 132x162 of an ST7735-class controller and cleared whole at init: a write
+# past a shorter row wraps, and black written anywhere is still black.
+symbol = "PANEL_GC9107_TQT_128X128"
+profile = "Gc9107Tqt_128x128"
+driver = "Gc9107"
+bus = "spi"
+width = 128
+height = 128
+memory_width = 132
+memory_height = 162
+pixel_clock_hz = 40000000
+spi_mode = 0
+col_offset = 2
+row_offset = 1
+orientation_offset = 0
+invert_color = false
+round_display = false
+supports_command_rotation = true
+color_order = "rgb"
+data_endian = "big"
+pixel_depth = 16
+dsi_data_lanes = 0
+dsi_lane_mbps = 0
+hsync_back_porch = 0
+hsync_pulse_width = 0
+hsync_front_porch = 0
+vsync_back_porch = 0
+vsync_pulse_width = 0
+vsync_front_porch = 0
+clear_memory = true
+
+[carrier]
+# Setup211: MOSI GPIO2, SCLK GPIO3, CS GPIO5, DC GPIO6, RST GPIO1, BL GPIO10.
+# The backlight is a SI2301 P-FET (Q1) whose gate GPIO10 pulls low to light
+# it (TFT_BACKLIGHT_ON 0). Buttons, LVGL_Factory: left PIN_BTN_L GPIO0 (BOOT,
+# S2 with a 100K pull-up), right PIN_BTN_R GPIO47 (SW1 "KEY", RW1 100K
+# pull-up), both to GND.
+pin_sclk = 3
+pin_mosi = 2
+pin_data1 = -1
+pin_data2 = -1
+pin_data3 = -1
+pin_cs = 5
+pin_dc = 6
+pin_rst = 1
+pin_bl = 10
+pin_boot = 0
+pin_rgb_led = -1
+pin_key = 47
+
+[touch]
+controller = "none"
+sda = -1
+scl = -1
+reset = -1
+interrupt = -1
+addresses = []
+panel_short = 128
+panel_long = 128
+raw_x_mirrored = false
+raw_y_mirrored = false
+rotate_clockwise = true
+
+[led]
+channel_order = "rgb"
+pixel_count = 0
+
+[gesture]
+swipe_min_px = 24
+tap_max_move_px = 12
+tap_max_ms = 400
+long_press_ms = 600
+press_max_ms = 10000
+
+[orientation]
+# LilyGO's per-rotation window: (2,1) plain and MX|MY, (1,2) under MV.
+offsets = [[2, 1], [1, 2], [2, 1], [1, 2]]
+mirror_x_supported = true
+quarter_turns = [0, 1, 2, 3]
+
+[motion]
+controller = "none"
+address = 0
+x_axis = 0
+x_sign = 1
+y_axis = 1
+y_sign = 1
+
+[reset]
+expander = "none"
+expander_address = 0
+panel_output = 0
+touch_output = 0
+
+[backlight]
+kind = "pwm"
+enable_pin = -1
+inverted = true
+
+[power]
+# BAT_ADC GPIO4 is VBAT through R3/R4, 100K/100K 1% (schematic), which
+# LilyGO's factory sketch reads as analogRead * 2 * 3.3 / 4096. The TP4056B
+# charger's CHRG output reaches no GPIO.
+controller = "battery_adc"
+battery_adc = 4
+battery_adc_scale = 2
+battery_enable = -1
+charge_status = -1
+axp_address = 0
+
+[serial]
+transport = "native_usb_cdc"
+bridge = "none"
+rx = -1
+tx = -1
+
+[audio]
+# No speaker or microphone on the T-QT Pro.
+amp = "none"
+codec = "none"
+mic = "none"
+speaker_bus = "none"
+mic_bus = "none"
+pin_playback_mclk = -1
+pin_playback_bclk = -1
+pin_playback_lrck = -1
+pin_dout = -1
+pin_capture_mclk = -1
+pin_capture_bclk = -1
+pin_capture_lrck = -1
+pin_din = -1
+pin_pdm_clock = -1
+pin_amp_enable = -1
+codec_i2c_address = 0
+mic_i2c_address = 0
+playback_rate_hz = 0
+playback_channels = 0
+capture_rate_hz = 0
+capture_channels = 0
+
+[capabilities]
+doom = false
+audio = false
+
+[compile]
+selector = ""
+macros = []
+
+[detection]
+# The only board in its family, so nothing here can be mistaken for another
+# supported board: every other S3 runs the 8 MB family. What stops this image
+# driving the T-QT's pins on some other 4 MB S3 is flash of at most 4 MB and
+# the battery divider on GPIO4: VBAT through 100K/100K, read with the
+# pull-down on, which loads the lower leg (about a fifth of VBAT reaches the
+# pin). Measured on the unit here on USB, 2026-10-27: 572 mV. A bare GPIO4
+# reads near 0; the window is the 1.9-inch board's 250 mV, which a cell at
+# its 3.0 V cut-off still clears.
+order = 10
+resolution = "exactly_one"
+no_match = "unknown"
+kind = "flash_range"
+flash_min_exclusive = 0
+flash_max_inclusive = 4194304
+sda = -1
+scl = -1
+frequency_hz = 0
+scan_first = 0
+scan_last = 0
+addresses = []
+reset_pin = -1
+reset_low_ms = 0
+reset_release_wait_ms = 0
+release = "never"
+sense_pin = 4
+sense_min_mv = 250

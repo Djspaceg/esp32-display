@@ -702,6 +702,15 @@ static void handlePanelConfig(char **tokens, int count) {
   candidatePanel.memoryWidth = (uint16_t)values.memWidth;
   candidatePanel.memoryHeight = (uint16_t)values.memHeight;
   candidatePanel.windowFollowsMirror = values.follow == 1;
+  // PANEL_CONFIG carries neither the colour order nor the memory clear, so a
+  // candidate keeps the stream firmware's rules from before the descriptor
+  // stated them: BGR on the GC9107 and ST7735, and the ST7735's memory
+  // cleared whenever its extents are given.
+  candidatePanel.colorBgr =
+      candidatePanel.driver == board::PanelDriver::Gc9107 ||
+      candidatePanel.driver == board::PanelDriver::St7735;
+  candidatePanel.clearMemory =
+      candidatePanel.driver == board::PanelDriver::St7735;
   // Bootstrap orientations name quadrants directly; for the XIAO, whose
   // descriptor offset is 0, quadrant 0 is rotation 0, flex cable on top.
   candidatePanel.orientationOffset = 0;

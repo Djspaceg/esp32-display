@@ -26,6 +26,7 @@ static constexpr GeneratedBoardIdentity GENERATED_BOARD_IDENTITIES[] = {
     {Variant::P4_34C, Platform::Esp32P4, "p4", "esp32p4", "jd9365-34c", "p4-32m-saves-ota"},
     {Variant::XiaoSt7735, Platform::Esp32S3, "s3", "esp32s3", "st7735-042", "universal-8m-doom-saves-ota"},
     {Variant::LilygoTwatchS3, Platform::Esp32S3, "s3", "esp32s3", "st7789-twatch", "universal-8m-doom-saves-ota"},
+    {Variant::LilygoTqtPro, Platform::Esp32S3_4M, "s3-4m", "esp32s3", "gc9107-tqt", "s3-4m-ota"},
 };
 
 static constexpr GeneratedBoardIdentity GENERATED_BOARD_IDENTITIES_BY_CATALOG[] = {
@@ -44,6 +45,7 @@ static constexpr GeneratedBoardIdentity GENERATED_BOARD_IDENTITIES_BY_CATALOG[] 
     {Variant::LcdSt77916, Platform::Esp32S3, "s3", "esp32s3", "st77916", "universal-8m-doom-saves-ota"},
     {Variant::ElecrowKnob128, Platform::Esp32S3, "s3", "esp32s3", "gc9a01-knob-128", "universal-8m-doom-saves-ota"},
     {Variant::LilygoTwatchS3, Platform::Esp32S3, "s3", "esp32s3", "st7789-twatch", "universal-8m-doom-saves-ota"},
+    {Variant::LilygoTqtPro, Platform::Esp32S3_4M, "s3-4m", "esp32s3", "gc9107-tqt", "s3-4m-ota"},
 };
 
 inline const GeneratedBoardIdentity *generatedIdentity(Variant variant) {

@@ -28,14 +28,21 @@ PLATFORM_SYMBOLS = {
     "c3": "PLATFORM_ESP32_C3",
     "c6": "PLATFORM_ESP32_C6",
     "s3": "PLATFORM_ESP32_S3",
+    "s3-4m": "PLATFORM_ESP32_S3_4M",
     "p4": "PLATFORM_ESP32_P4",
 }
 PLATFORM_ENUMS = {
     "c3": "Platform::Esp32C3",
     "c6": "Platform::Esp32C6",
     "s3": "Platform::Esp32S3",
+    "s3-4m": "Platform::Esp32S3_4M",
     "p4": "Platform::Esp32P4",
 }
+
+
+def _family_prefix(target: str) -> str:
+    """A family key as the stem of a generated C++ symbol (s3-4m -> S3_4M)."""
+    return target.upper().replace("-", "_")
 WIFI_ENUMS = {
     "native": "WifiTopology::Native",
     "hosted_coprocessor": "WifiTopology::HostedCoprocessor",
@@ -146,7 +153,7 @@ def render_platform_config(
     grouped: Dict[str, List[Dict[str, Any]]],
 ) -> str:
     lines = [HEADER, "#pragma once\n\n"]
-    for target in ("c3", "c6", "s3", "p4"):
+    for target in board_descriptor.FAMILY_KEYS:
         descriptor = grouped[target][0]
         family = descriptor["family"]
         platform = descriptor["platform"]
@@ -394,7 +401,7 @@ def _panel_initializer(descriptor: Dict[str, Any]) -> str:
         "%(hsync_front_porch)d,\n"
         "    %(vsync_back_porch)d, %(vsync_pulse_width)d, "
         "%(vsync_front_porch)d,\n"
-        "    %(window_follows_mirror)s};\n"
+        "    %(window_follows_mirror)s, %(color_bgr)s, %(clear_memory)s};\n"
         % {
             **panel,
             "bus": PANEL_BUS_ENUMS[panel["bus"]],
@@ -403,6 +410,8 @@ def _panel_initializer(descriptor: Dict[str, Any]) -> str:
             "rotation": _bool(panel["supports_command_rotation"]),
             "window_follows_mirror": _bool(
                 board_descriptor.window_follows_mirror(descriptor)),
+            "color_bgr": _bool(panel["color_order"] == "bgr"),
+            "clear_memory": _bool(board_descriptor.clear_memory(descriptor)),
         }
     )
 
@@ -453,6 +462,7 @@ def _config_initializer(descriptor: Dict[str, Any]) -> str:
         _bool(board_descriptor.boot_button_optional(descriptor)),
         *(str(board_descriptor.optional_pin(descriptor, "motion." + key))
           for key in ("sda", "scl")),
+        str(board_descriptor.optional_pin(descriptor, "carrier.pin_key")),
     ]
     rendered = []
     for index in range(0, len(values), 6):
@@ -538,7 +548,7 @@ def render_detection(
         "#pragma once\n\n",
         "using namespace boarddetectmodel;\n\n",
     ]
-    for target in ("c3", "c6", "s3", "p4"):
+    for target in board_descriptor.FAMILY_KEYS:
         family = sorted(
             grouped[target], key=lambda item: item["detection"]["order"])
         probes: List[Tuple[Any, ...]] = []
@@ -548,7 +558,7 @@ def render_detection(
                 probes.append(key)
         max_probe_count = max(max_probe_count, len(probes))
         amp_pins = board_descriptor.family_amp_enable_pins(family)
-        prefix = target.upper()
+        prefix = _family_prefix(target)
         if probes:
             lines.append(
                 "static constexpr I2cProbePlan GENERATED_%s_PROBES[] = {\n"
@@ -689,6 +699,7 @@ def render_detection(
         "    case Platform::Esp32C3: return GENERATED_C3_DETECTION;\n",
         "    case Platform::Esp32C6: return GENERATED_C6_DETECTION;\n",
         "    case Platform::Esp32S3: return GENERATED_S3_DETECTION;\n",
+        "    case Platform::Esp32S3_4M: return GENERATED_S3_4M_DETECTION;\n",
         "    default: return GENERATED_P4_DETECTION;\n",
         "  }\n",
         "}\n",
@@ -723,7 +734,7 @@ def render_python_catalog(
         "SOURCE_SHA256 = %r\n\n" % digest,
         "PLATFORMS = {\n",
     ]
-    for target in ("c3", "c6", "s3", "p4"):
+    for target in board_descriptor.FAMILY_KEYS:
         descriptor = grouped[target][0]
         family = descriptor["family"]
         identity = descriptor["identity"]
@@ -735,7 +746,7 @@ def render_python_catalog(
             )
         )
     lines.append("}\n\nBUILD_TARGETS = {\n")
-    for target in ("c3", "c6", "s3", "p4"):
+    for target in board_descriptor.FAMILY_KEYS:
         descriptor = grouped[target][0]
         family = descriptor["family"]
         # P4 USB writes still require the operator to name the carrier; the
@@ -758,7 +769,7 @@ def render_python_catalog(
             )
         )
     lines.append("}\n\nFAMILIES = {\n")
-    for target in ("c3", "c6", "s3", "p4"):
+    for target in board_descriptor.FAMILY_KEYS:
         descriptor = grouped[target][0]
         family = descriptor["family"]
         profiles = tuple(item["identity"]["profile"] for item in grouped[target])
@@ -805,10 +816,10 @@ def render_swift_catalog(
         "    }\n\n",
         "    public static let sourceSHA256 = %s\n" % _q(digest),
         "    public static let requiredFamilies: Set<String> = "
-        + _swift_array(("c3", "c6", "s3", "p4")) + "\n",
+        + _swift_array(board_descriptor.FAMILY_KEYS) + "\n",
         "    public static let expected: [String: Expected] = [\n",
     ]
-    for target in ("c3", "c6", "s3", "p4"):
+    for target in board_descriptor.FAMILY_KEYS:
         descriptor = grouped[target][0]
         family = descriptor["family"]
         profiles = [
@@ -826,7 +837,7 @@ def render_swift_catalog(
         )
     lines.append("    ]\n\n")
     lines.append("    public static let profilesByTarget: [String: Set<String>] = [\n")
-    for target in ("c3", "c6", "s3", "p4"):
+    for target in board_descriptor.FAMILY_KEYS:
         profiles = [
             item["identity"]["profile"] for item in grouped[target]
         ]
@@ -842,7 +853,7 @@ def render_swift_catalog(
                 )
     lines.append("    ]\n\n")
     lines.append("    public static let geometryByProfile: [String: PanelGeometry] = [\n")
-    for target in ("c3", "c6", "s3", "p4"):
+    for target in board_descriptor.FAMILY_KEYS:
         for descriptor in grouped[target]:
             profile = descriptor["identity"]["profile"]
             panel = descriptor["panel"]
@@ -854,7 +865,7 @@ def render_swift_catalog(
     # The descriptor's own name, which is what the app shows as the board
     # model: "ESP32-C6-LCD-1.47 (ST7789)" rather than the profile token.
     lines.append("    public static let boardNameByProfile: [String: String] = [\n")
-    for target in ("c3", "c6", "s3", "p4"):
+    for target in board_descriptor.FAMILY_KEYS:
         for descriptor in grouped[target]:
             lines.append(
                 "        %s: %s,\n"
@@ -862,7 +873,7 @@ def render_swift_catalog(
             )
     lines.append("    ]\n\n")
     lines.append("    public static let universalFamilyAliases: [String: Set<String>] = [\n")
-    for target in ("c3", "c6", "s3", "p4"):
+    for target in board_descriptor.FAMILY_KEYS:
         aliases = {target}
         for descriptor in grouped[target]:
             aliases.update(descriptor["identity"]["legacy_targets"])
@@ -912,7 +923,7 @@ def render_swift_catalog(
         % ", ".join("PanelGeometry(width: %d, height: %d)" % size
                     for size in sorted(large)))
     lines.append("    public static let hardwareByProfile: [String: [String]] = [\n")
-    for target in ("c3", "c6", "s3", "p4"):
+    for target in board_descriptor.FAMILY_KEYS:
         for descriptor in grouped[target]:
             lines.append(
                 "        %s: %s,\n"
@@ -927,11 +938,12 @@ def expected_outputs(repo_root: str) -> Dict[str, str]:
     descriptors = list(board_descriptor.validate_descriptors(
         board_descriptor.load_repository_descriptors(repo_root)))
     grouped = board_descriptor.grouped_by_family(descriptors)
-    required_families = {"c3", "c6", "s3", "p4"}
+    required_families = set(board_descriptor.FAMILY_KEYS)
     if set(grouped) != required_families:
         raise board_descriptor.DescriptorError(
-            "descriptor repository must contain exactly c3, c6, s3, and p4; found %s"
-            % ", ".join(sorted(grouped))
+            "descriptor repository must contain exactly %s; found %s"
+            % (", ".join(board_descriptor.FAMILY_KEYS),
+               ", ".join(sorted(grouped)))
         )
     digest = board_descriptor.descriptor_source_digest(repo_root)
     return {

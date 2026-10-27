@@ -290,7 +290,7 @@ inline board::Variant probeS3(bool verbose = true,
                               int *outCandidateCount = nullptr) {
   const uint32_t flashBytes = ESP.getFlashChipSize();
   const auto &plan =
-      board::detectionPlanForPlatform(board::Platform::Esp32S3);
+      board::detectionPlanForPlatform(board::COMPILED_PLATFORM.platform);
   boarddetectmodel::ProbeEvidence
       evidence[board::GENERATED_MAX_PROBE_COUNT] = {};
   boarddetectmodel::runI2cProbes(
@@ -316,7 +316,7 @@ inline board::Variant probeS3(bool verbose = true,
     }
   }
   const board::DetectionResult result = board::detectFromEvidence(
-      board::Platform::Esp32S3, flashBytes, evidence, plan.probeCount,
+      board::COMPILED_PLATFORM.platform, flashBytes, evidence, plan.probeCount,
       senses, plan.senseCount);
   if (outCandidateCount != nullptr) {
     *outCandidateCount = result.matchedCandidates;

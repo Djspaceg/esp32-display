@@ -10,12 +10,13 @@ public enum GeneratedBoardCatalog {
         public let bootloaderAddress: Int
     }
 
-    public static let sourceSHA256 = "d14cc71937fe9604b5ebf989be139ddc4d12e4fd2d6f72425451d43e65227973"
-    public static let requiredFamilies: Set<String> = ["c3", "c6", "s3", "p4"]
+    public static let sourceSHA256 = "caa0a2845bb81e5866e7a9defda97093011c8308f65b44922c03eda9c3f6d7f2"
+    public static let requiredFamilies: Set<String> = ["c3", "c6", "s3", "s3-4m", "p4"]
     public static let expected: [String: Expected] = [
         "c3": Expected(chip: "esp32c3", profiles: ["gc9a01a-240"], flashBytes: [4194304], partition: "c3-4m-ota", bootloaderAddress: 0),
         "c6": Expected(chip: "esp32c6", profiles: ["st7789", "jd9853"], flashBytes: [8388608], partition: "default-8m", bootloaderAddress: 0),
         "s3": Expected(chip: "esp32s3", profiles: ["st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"], flashBytes: [8388608, 16777216, 33554432], partition: "universal-8m-doom-saves-ota", bootloaderAddress: 0),
+        "s3-4m": Expected(chip: "esp32s3", profiles: ["gc9107-tqt"], flashBytes: [4194304], partition: "s3-4m-ota", bootloaderAddress: 0),
         "p4": Expected(chip: "esp32p4", profiles: ["st7703-4b", "jd9365-4c", "jd9365-34c"], flashBytes: [33554432], partition: "p4-32m-saves-ota", bootloaderAddress: 8192),
     ]
 
@@ -23,6 +24,7 @@ public enum GeneratedBoardCatalog {
         "c3": Set(["gc9a01a-240"]),
         "c6": Set(["st7789", "jd9853"]),
         "s3": Set(["st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"]),
+        "s3-4m": Set(["gc9107-tqt"]),
         "p4": Set(["st7703-4b", "jd9365-4c", "jd9365-34c"]),
         "p4-4b": Set(["st7703-4b"]),
         "s3-085": Set(["gc9107"]),
@@ -44,6 +46,7 @@ public enum GeneratedBoardCatalog {
         "st77916": PanelGeometry(width: 360, height: 360),
         "gc9a01-knob-128": PanelGeometry(width: 240, height: 240),
         "st7789-twatch": PanelGeometry(width: 240, height: 240),
+        "gc9107-tqt": PanelGeometry(width: 128, height: 128),
         "st7703-4b": PanelGeometry(width: 720, height: 720),
         "jd9365-4c": PanelGeometry(width: 720, height: 720),
         "jd9365-34c": PanelGeometry(width: 800, height: 800),
@@ -62,6 +65,7 @@ public enum GeneratedBoardCatalog {
         "st77916": "ESP32-S3-Touch-LCD-1.85C (ST77916)",
         "gc9a01-knob-128": "CrowPanel 1.28 Rotary Knob (GC9A01)",
         "st7789-twatch": "LilyGO T-Watch-S3 (ST7789V3)",
+        "gc9107-tqt": "LilyGO T-QT Pro (GC9107)",
         "st7703-4b": "ESP32-P4-WIFI6-Touch-LCD-4B (ST7703)",
         "jd9365-4c": "ESP32-P4-WIFI6-Touch-LCD-4C (JD9365)",
         "jd9365-34c": "ESP32-P4-WIFI6-Touch-LCD-3.4C (JD9365)",
@@ -71,10 +75,11 @@ public enum GeneratedBoardCatalog {
         "c3": Set(["c3"]),
         "c6": Set(["c6"]),
         "s3": Set(["s3", "s3-085", "s3-154", "s3-175", "s3-185"]),
+        "s3-4m": Set(["s3-4m"]),
         "p4": Set(["p4", "p4-4b"]),
     ]
 
-    public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7789", "jd9853", "st7703-4b", "jd9365-4c", "jd9365-34c", "st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"])
+    public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7789", "jd9853", "st7703-4b", "jd9365-4c", "jd9365-34c", "st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch", "gc9107-tqt"])
 
     public static let encoderProfiles: Set<String> = Set(["gc9a01-knob-128"])
 
@@ -95,6 +100,7 @@ public enum GeneratedBoardCatalog {
         "st77916": ["ESP32-S3-Touch-LCD-1.85C"],
         "gc9a01-knob-128": ["ELECROW CrowPanel 1.28inch HMI ESP32 Rotary Display", "ELECROW ESP32-S3 1.28 Rotary Round Knob Touch Display"],
         "st7789-twatch": ["LilyGO T-Watch-S3"],
+        "gc9107-tqt": ["LilyGO T-QT Pro N4R2"],
         "st7703-4b": ["ESP32-P4-WIFI6-Touch-LCD-4B"],
         "jd9365-4c": ["ESP32-P4-WIFI6-Touch-LCD-4C"],
         "jd9365-34c": ["ESP32-P4-WIFI6-Touch-LCD-3.4C"],

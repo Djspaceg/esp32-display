@@ -12,6 +12,11 @@
 void initializeButtonInput();
 void handleButton();
 
+// A carrier's second key (Config::pinKey), reported as the PWR key's press
+// and long press. serviceKeyButton() polls it; call it every 10 ms or so.
+void initializeKeyInput();
+void serviceKeyButton();
+
 // Runs one input map function (a deviceproto::InputFunction value) for
 // `input` (its ETCH gesture value): the board's own, the sender's, or nothing.
 void runInputFunction(uint8_t input, uint8_t function);

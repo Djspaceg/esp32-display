@@ -4054,11 +4054,16 @@ int main() {
       CHECK_EQ(panelorient::clearBandRows(clear, 96 * 54 * 2), 40);
       // A bus that cannot carry one whole memory row clears nothing.
       CHECK_EQ(panelorient::clearBandRows(clear, 100), 0);
-      // Only the ST7735 is cleared; every other panel's init is unchanged.
+      // Only the panels whose descriptors ask (the XIAO's ST7735 and the
+      // T-QT's GC9107) are cleared; every other panel's init is unchanged.
       for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
         const board::PanelConfig &panel = *board::configFor(identity.variant).panel;
         const panelorient::MemoryExtent other = panelorient::memoryToClear(panel);
-        if (identity.variant == Variant::XiaoSt7735) continue;
+        if (identity.variant == Variant::XiaoSt7735 ||
+            identity.variant == Variant::LilygoTqtPro) {
+          continue;
+        }
+        CHECK(!panel.clearMemory);
         CHECK_EQ(other.width, 0);
         CHECK_EQ(other.height, 0);
       }
@@ -4067,6 +4072,215 @@ int main() {
     CHECK(x.panel->spiMode == 0);
     CHECK(board::supportsDoom(Variant::XiaoSt7735));
     CHECK(!board::supportsAudio(Variant::XiaoSt7735));
+  }
+
+  // --- the LilyGO T-QT Pro (S3 4 MiB family) board entry -------------------
+  {
+    using board::Variant;
+    const board::Config &t = board::configFor(Variant::LilygoTqtPro);
+    CHECK(t.variant == Variant::LilygoTqtPro);
+    CHECK(strcmp(board::variantToken(Variant::LilygoTqtPro), "gc9107-tqt") == 0);
+    CHECK(board::variantFromName("gc9107-tqt") == Variant::LilygoTqtPro);
+    // Its own family: the 8 MiB S3 image cannot boot on its 4 MiB chip.
+    CHECK(strcmp(board::targetToken(Variant::LilygoTqtPro), "s3-4m") == 0);
+    CHECK(t.platform == &board::PLATFORM_ESP32_S3_4M);
+    CHECK(strcmp(t.platform->chipToken, "esp32s3") == 0);
+    CHECK(strcmp(t.platform->partitionToken, "s3-4m-ota") == 0);
+    CHECK(board::isS3Chip(t.platform->platform));
+    CHECK(board::variantMatchesPlatform(Variant::LilygoTqtPro,
+                                        board::Platform::Esp32S3_4M));
+    CHECK(!board::variantMatchesPlatform(Variant::LilygoTqtPro,
+                                         board::Platform::Esp32S3));
+    // Every other board stays out of the family, so no CFGBOARD can move one
+    // across in either direction.
+    for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+      if (identity.variant == Variant::LilygoTqtPro) continue;
+      CHECK(!board::variantMatchesPlatform(identity.variant,
+                                           board::Platform::Esp32S3_4M));
+    }
+    {
+      char hint[64];
+      CHECK(board::formatProfileHint(board::Platform::Esp32S3_4M, hint,
+                                     sizeof(hint)));
+      CHECK(strcmp(hint, "gc9107-tqt|auto") == 0);
+    }
+    // LilyGO's Setup211 pin map and LVGL_Factory buttons, pin by pin.
+    CHECK(t.pinSclk == 3);
+    CHECK(t.pinMosi == 2);
+    CHECK(t.pinCs == 5);
+    CHECK(t.pinDc == 6);
+    CHECK(t.pinRst == 1);
+    CHECK(t.pinData1 == board::NO_PIN && t.pinData2 == board::NO_PIN &&
+          t.pinData3 == board::NO_PIN && !t.isQspi());
+    CHECK(t.pinBl == 10 && t.hasBacklightPin());
+    CHECK(t.backlightInverted);  // SI2301 P-FET gate: low lights it
+    CHECK(t.pinBlEnable == board::NO_PIN);
+    CHECK(t.pinBootButton == 0 && t.hasBootButton());
+    CHECK(t.pinKey == 47 && t.hasKey());
+    CHECK(t.pinRgbLed == board::NO_PIN && !t.hasEncoder());
+    CHECK(!t.hasTouch() && !t.hasMotion());
+    // VBAT through 100K/100K on GPIO4.
+    CHECK(t.power == board::PowerController::BatteryAdc && t.hasBattery());
+    CHECK(t.pinBatteryAdc == 4 && t.batteryAdcScale == 2);
+    CHECK(t.serialTransport() == board::SerialTransport::NativeUsbCdc);
+    const int8_t used[] = {t.pinSclk, t.pinMosi, t.pinCs, t.pinDc, t.pinRst,
+                           t.pinBl, t.pinBootButton, t.pinKey,
+                           t.pinBatteryAdc};
+    for (int8_t pin : used) CHECK(pin != 19 && pin != 20);
+    // The second key is the T-QT's alone.
+    for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+      if (identity.variant == Variant::LilygoTqtPro) continue;
+      CHECK(!board::configFor(identity.variant).hasKey());
+    }
+    // LilyGO's earlier GC9107 glass: RGB, no inversion, 40 MHz, mode 0.
+    CHECK(t.panel->driver == board::PanelDriver::Gc9107);
+    CHECK(t.panel->profile == board::PanelProfile::Gc9107Tqt_128x128);
+    CHECK(t.panel->bus == board::PanelBus::Spi);
+    CHECK(t.panel->width == 128 && t.panel->height == 128);
+    CHECK(!t.panel->invertColor && !t.panel->colorBgr);
+    CHECK(!t.panel->roundDisplay);
+    CHECK(t.panel->pixelClockHz == 40 * 1000 * 1000);
+    CHECK(t.panel->spiMode == 0);
+    // Upright is LilyGO's setRotation(0): plain MADCTL.
+    CHECK(t.panel->orientationOffset == 0);
+    CHECK(t.panel->colOffset == 2 && t.panel->rowOffset == 1);
+    CHECK(!t.panel->windowFollowsMirror);
+    {
+      // LilyGO's GC9A01_Rotation.h windows: column 2, row 1 in plain and
+      // MX|MY; column 1, row 2 in the two MV states.
+      const uint16_t tableX[4] = {2, 1, 2, 1};
+      const uint16_t tableY[4] = {1, 2, 1, 2};
+      for (uint8_t rotation = 0; rotation < 4; rotation++) {
+        const uint8_t q = panelorient::addressedQuadrant(
+            rotation, t.panel->orientationOffset, false, false);
+        CHECK_EQ(q, rotation);
+        for (int mirrored = 0; mirrored < 2; mirrored++) {
+          const panelorient::WindowGap gap = panelorient::windowGap(
+              t.panel->width, t.panel->height, t.panel->memoryWidth,
+              t.panel->memoryHeight, t.panel->colOffset, t.panel->rowOffset,
+              q, mirrored != 0, t.panel->windowFollowsMirror);
+          CHECK_EQ(gap.x, tableX[rotation]);
+          CHECK_EQ(gap.y, tableY[rotation]);
+          // Every window lies inside the memory that is cleared.
+          CHECK(gap.x + t.panel->width <= t.panel->memoryWidth);
+          CHECK(gap.y + t.panel->height <= t.panel->memoryHeight);
+        }
+      }
+    }
+    // The whole memory, taken as 132x162, is written black at init.
+    CHECK(t.panel->clearMemory);
+    CHECK(t.panel->memoryWidth == 132 && t.panel->memoryHeight == 162);
+    {
+      const panelorient::MemoryExtent clear =
+          panelorient::memoryToClear(*t.panel);
+      CHECK_EQ(clear.width, 132);
+      CHECK_EQ(clear.height, 162);
+      CHECK_EQ(panelorient::clearBandRows(clear, 128 * 128 * 2), 124);
+    }
+    // No Doom (no room for its WAD) and no audio parts.
+    CHECK(!board::supportsDoom(Variant::LilygoTqtPro));
+    CHECK(!board::supportsAudio(Variant::LilygoTqtPro));
+    // Detection: the family's only candidate, and only on at most 4 MiB of
+    // flash with the battery divider showing on GPIO4.
+    {
+      const auto &plan =
+          board::detectionPlanForPlatform(board::Platform::Esp32S3_4M);
+      CHECK_EQ(plan.candidateCount, 1);
+      CHECK_EQ(plan.candidates[0].variantValue, (int)Variant::LilygoTqtPro);
+      CHECK_EQ(plan.probeCount, 0);
+      CHECK_EQ(plan.senseCount, 1);
+      CHECK_EQ(plan.sensePins[0], 4);
+      const uint32_t mb4 = 4u * 1024u * 1024u;
+      const boarddetectmodel::SenseEvidence cell = {true, 1900};
+      const boarddetectmodel::SenseEvidence bare = {true, 20};
+      const boarddetectmodel::SenseEvidence unread = {false, 0};
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3_4M, mb4,
+                                      nullptr, 0, &cell, 1)
+                .variant == Variant::LilygoTqtPro);
+      // Another 4 MiB S3, its GPIO4 bare: nothing is driven.
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3_4M, mb4,
+                                      nullptr, 0, &bare, 1)
+                .variant == Variant::Unknown);
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3_4M, mb4,
+                                      nullptr, 0, &unread, 1)
+                .variant == Variant::Unknown);
+      // This image on an 8 MiB S3 (it boots there) is not a T-QT.
+      CHECK(board::detectFromEvidence(board::Platform::Esp32S3_4M,
+                                      2 * mb4, nullptr, 0, &cell, 1)
+                .variant == Variant::Unknown);
+      // And the 8 MiB family never names it.
+      const auto &s3 = board::detectionPlanForPlatform(board::Platform::Esp32S3);
+      for (uint8_t i = 0; i < s3.candidateCount; ++i) {
+        CHECK(s3.candidates[i].variantValue != (int)Variant::LilygoTqtPro);
+      }
+    }
+    // An unresolved 4 MiB board keeps GPIO10 untouched.
+    CHECK(!board::unresolvedBacklight(board::Platform::Esp32S3_4M).valid);
+  }
+
+  // --- Colour order follows the descriptor ---------------------------------
+  {
+    // Every GC9107 and ST7735 glass before the T-QT's took BGR and every
+    // other panel RGB; the descriptor now says which, and none moved.
+    using board::Variant;
+    for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+      const board::PanelConfig &panel = *board::configFor(identity.variant).panel;
+      if (identity.variant == Variant::LilygoTqtPro) continue;
+      const bool driverWasBgr = panel.driver == board::PanelDriver::Gc9107 ||
+                                panel.driver == board::PanelDriver::St7735;
+      CHECK(panel.colorBgr == driverWasBgr);
+    }
+  }
+
+  // --- A second key: press on release, long press while held -------------
+  {
+    using buttonpress::KeyEvent;
+    const uint32_t debounce = 30, hold = 600;
+    {
+      buttonpress::KeyTracker key;
+      CHECK(key.update(0, false, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(100, true, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(140, true, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(300, false, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(340, false, debounce, hold) == KeyEvent::Press);
+      CHECK(key.update(400, false, debounce, hold) == KeyEvent::None);
+    }
+    {
+      // Held: one long press at 600 ms, and its release reports nothing.
+      buttonpress::KeyTracker key;
+      CHECK(key.update(1000, true, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(1040, true, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(1590, true, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(1600, true, debounce, hold) == KeyEvent::LongPress);
+      CHECK(key.update(2500, true, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(2600, false, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(2640, false, debounce, hold) == KeyEvent::None);
+      // The next press is a press again.
+      CHECK(key.update(3000, true, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(3040, true, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(3100, false, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(3140, false, debounce, hold) == KeyEvent::Press);
+    }
+    {
+      // A bounce shorter than the debounce is not a press.
+      buttonpress::KeyTracker key;
+      CHECK(key.update(0, true, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(10, false, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(20, true, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(25, false, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(200, false, debounce, hold) == KeyEvent::None);
+    }
+    {
+      // Timing survives the millisecond clock wrapping.
+      buttonpress::KeyTracker key;
+      const uint32_t start = 0xFFFFFF00u;
+      CHECK(key.update(start, true, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(start + 40, true, debounce, hold) == KeyEvent::None);
+      CHECK(key.update(start + 600, true, debounce, hold) == KeyEvent::LongPress);
+    }
+    // The key is reported as the PWR key's two inputs.
+    CHECK(deviceproto::inputMask(false, false, true, true) &
+          (1u << (uint8_t)deviceproto::TouchGesture::PowerKeyPress));
   }
 
   // --- the S3 0.85-inch GC9107 board entry --------------------------------
@@ -7141,12 +7355,12 @@ int main() {
     CHECK(!tileproto::panelCanStreamTiles(720, 720, true));  // > 32 columns
     CHECK(!tileproto::panelCanStreamTiles(466, 466, false)); // no PSRAM
     CHECK(!tileproto::panelCanStreamTiles(0, 0, true));
-    // Which boards that makes, pinned: every square S3 panel the grid
-    // carries, and the 1.9 (170x320) and the XIAO (96x54) stay on bands.
+    // Which boards that makes, pinned: every square panel on either S3 family
+    // the grid carries (the T-QT too), and the 1.9 and the XIAO stay on bands.
     {
       std::vector<board::Variant> tiles;
       for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
-        if (identity.platform != board::Platform::Esp32S3) continue;
+        if (!board::isS3Chip(identity.platform)) continue;
         const board::Config &cfg = board::configFor(identity.variant);
         if (tileproto::panelCanStreamTiles(
                 cfg.panel->width, cfg.panel->height,
@@ -7158,7 +7372,7 @@ int main() {
           board::Variant::AmoledCo5300, board::Variant::LcdSt77916,
           board::Variant::LcdGc9107, board::Variant::TouchSt7789,
           board::Variant::LcdSt7789_130, board::Variant::ElecrowKnob128,
-          board::Variant::LilygoTwatchS3};
+          board::Variant::LilygoTwatchS3, board::Variant::LilygoTqtPro};
       CHECK(tiles.size() == sizeof(want) / sizeof(want[0]));
       for (board::Variant v : want) {
         bool found = false;

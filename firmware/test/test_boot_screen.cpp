@@ -294,9 +294,9 @@ int main() {
       }
     }
   }
-  // The 128x128 panel, the 172-high landscape frames and both 96x54 frames
-  // are the compact ones.
-  CHECK(compactLayouts == 6);
+  // The two 128x128 panels (the 0.85 and the T-QT), the 172-high landscape
+  // frames and both 96x54 frames are the compact ones.
+  CHECK(compactLayouts == 7);
   CHECK(bottomLayouts > 0);
   {
     const Layout small = bootscreenmodel::layout(128, 128, false);

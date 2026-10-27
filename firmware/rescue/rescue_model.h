@@ -25,7 +25,7 @@ struct UsbPins {
 constexpr UsbPins usbPinsFor(board::Platform platform) {
   return platform == board::Platform::Esp32C3   ? UsbPins{18, 19}
          : platform == board::Platform::Esp32C6 ? UsbPins{12, 13}
-         : platform == board::Platform::Esp32S3 ? UsbPins{19, 20}
+         : board::isS3Chip(platform)            ? UsbPins{19, 20}
                                                 : UsbPins{24, 25};
 }
 

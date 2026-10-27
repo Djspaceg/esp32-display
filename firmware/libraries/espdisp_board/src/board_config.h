@@ -107,6 +107,10 @@ enum class MotionController : uint8_t { None, Qmi8658, Bma423 };
 /// P4 keeps its historical ESPDISP_BOARD_P4_4B family selector, which now
 /// composes the P4 platform with every P4 carrier; platform_config.h remains
 /// free of carrier selectors and wiring.
+#if defined(ESPDISP_FAMILY_S3_4M) && !defined(CONFIG_IDF_TARGET_ESP32S3) && \
+    defined(ESP_PLATFORM)
+#error "ESPDISP_FAMILY_S3_4M selects an ESP32-S3 family"
+#endif
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
 #if (defined(ESPDISP_BOARD_P4_4B) + defined(ESPDISP_BOARD_S3_085) + \
      defined(ESPDISP_BOARD_S3_154) + defined(ESPDISP_DOOM_S3_175) + \
@@ -126,6 +130,9 @@ enum class MotionController : uint8_t { None, Qmi8658, Bma423 };
     defined(ESPDISP_BOARD_S3_154) || defined(ESPDISP_DOOM_S3_175) || \
     defined(ESPDISP_BOARD_S3_185)
 #error "ESP32-S3 family builds must not use profile-specific compile selectors"
+#endif
+#if defined(ESPDISP_FAMILY_S3_4M) && defined(ESPDISP_DOOM_RUNTIME)
+#error "The S3 4 MiB family has no room for the Doom WAD"
 #endif
 #define ESPDISP_PANEL_S3_RUNTIME 1
 static const Variant COMPILED_VARIANT = Variant::Unknown;
@@ -332,6 +339,12 @@ struct Config {
   int8_t pinMotionSda = NO_PIN;
   int8_t pinMotionScl = NO_PIN;
 
+  /// A second push button to GND, read with the pull-up on, or NO_PIN. It
+  /// reports as the PWR key's two inputs (press and long press), so the
+  /// sender's input map covers it unchanged; the T-QT's right-hand KEY.
+  int8_t pinKey = NO_PIN;
+
+  bool hasKey() const { return pinKey != NO_PIN; }
   bool hasMotionBus() const {
     return pinMotionSda != NO_PIN && pinMotionScl != NO_PIN;
   }
@@ -925,8 +938,11 @@ static const Config CONFIG_P4_34C = {
 
 /// The backlight wiring every carrier of one family shares, so it can be
 /// driven off before the carrier is known. `valid` is false when the family
-/// has no carrier, or when any two of its carriers wire the backlight
-/// differently: then nothing may be driven.
+/// has fewer than two carriers, or when any two of its carriers wire the
+/// backlight differently: then nothing may be driven. A family of one carrier
+/// is unresolved only when the board failed that carrier's own checks (the
+/// T-QT's, on a 4 MB S3 that is not one), so its backlight pin may be
+/// anything there.
 struct UnresolvedBacklight {
   bool valid;
   int8_t pinBl;
@@ -936,23 +952,23 @@ struct UnresolvedBacklight {
 
 inline UnresolvedBacklight unresolvedBacklight(Platform platform) {
   UnresolvedBacklight result = {false, NO_PIN, NO_PIN, false};
-  bool first = true;
+  unsigned carriers = 0;
   for (const auto &identity : GENERATED_BOARD_IDENTITIES) {
     if (identity.platform != platform) continue;
     const Config *config = generatedConfigFor(identity.variant);
     if (config == nullptr || config->pinBl == NO_PIN) {
       return {false, NO_PIN, NO_PIN, false};
     }
-    if (first) {
+    if (carriers++ == 0) {
       result = {true, config->pinBl, config->pinBlEnable,
                 config->backlightInverted};
-      first = false;
     } else if (config->pinBl != result.pinBl ||
                config->pinBlEnable != result.pinBlEnable ||
                config->backlightInverted != result.inverted) {
       return {false, NO_PIN, NO_PIN, false};
     }
   }
+  if (carriers < 2) return {false, NO_PIN, NO_PIN, false};
   return result;
 }
 

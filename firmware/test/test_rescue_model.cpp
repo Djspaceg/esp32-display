@@ -122,7 +122,8 @@ int main() {
   // --- Detection runs before any guard, so it must never touch USB pins ---
   {
     const Platform platforms[] = {Platform::Esp32C3, Platform::Esp32C6,
-                                  Platform::Esp32S3, Platform::Esp32P4};
+                                  Platform::Esp32S3, Platform::Esp32S3_4M,
+                                  Platform::Esp32P4};
     for (Platform platform : platforms) {
       const auto &plan = board::detectionPlanForPlatform(platform);
       for (uint8_t i = 0; i < plan.probeCount; ++i) {
@@ -136,6 +137,10 @@ int main() {
     }
     CHECK(rescuemodel::isUsbPin(Platform::Esp32S3, 19));
     CHECK(rescuemodel::isUsbPin(Platform::Esp32S3, 20));
+    // The 4 MiB S3 family is the same chip, with the same USB pads.
+    CHECK(rescuemodel::isUsbPin(Platform::Esp32S3_4M, 19));
+    CHECK(rescuemodel::isUsbPin(Platform::Esp32S3_4M, 20));
+    CHECK(!rescuemodel::isUsbPin(Platform::Esp32S3_4M, 24));
     CHECK(rescuemodel::isUsbPin(Platform::Esp32C6, 12));
     CHECK(rescuemodel::isUsbPin(Platform::Esp32C6, 13));
     CHECK(rescuemodel::isUsbPin(Platform::Esp32C3, 18));
@@ -165,7 +170,7 @@ int main() {
       }
       ++profiles;
     }
-    CHECK(profiles == 15);
+    CHECK(profiles == 16);
 
     board::Config onUsb = board::CONFIG_TOUCH_ST7789;
     onUsb.pinSclk = 19;
@@ -310,6 +315,7 @@ int main() {
   {
     for (const Platform platform :
          {Platform::Esp32C3, Platform::Esp32C6, Platform::Esp32S3,
+          Platform::Esp32S3_4M,
           Platform::Esp32P4}) {
       const board::UnresolvedBacklight backlight =
           board::unresolvedBacklight(platform);
@@ -318,6 +324,10 @@ int main() {
       CHECK(!rescuemodel::isUsbPin(platform, backlight.pinBlEnable));
     }
     CHECK(board::unresolvedBacklight(Platform::Esp32P4).valid);
+    // A family of one carrier drives nothing: unresolved there means the
+    // board failed that carrier's own checks.
+    CHECK(!board::unresolvedBacklight(Platform::Esp32S3_4M).valid);
+    CHECK(!board::unresolvedBacklight(Platform::Esp32C3).valid);
   }
 
   // --- A stored CFGBOARD override is reported the way the stream applies it -

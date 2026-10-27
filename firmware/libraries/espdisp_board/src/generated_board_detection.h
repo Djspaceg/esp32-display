@@ -47,6 +47,15 @@ static constexpr FamilyDetectionPlan GENERATED_S3_DETECTION = {
     sizeof(GENERATED_S3_CANDIDATES) / sizeof(GENERATED_S3_CANDIDATES[0]), ResolutionPolicy::ExactlyOne,
     GENERATED_S3_SENSE_PINS, 1};
 
+static constexpr int8_t GENERATED_S3_4M_SENSE_PINS[] = {4};
+static constexpr CandidateRule GENERATED_S3_4M_CANDIDATES[] = {
+    {16, CandidateMatch::FlashRange, 255, 0, 4194304, 0, 250, 0},
+};
+static constexpr FamilyDetectionPlan GENERATED_S3_4M_DETECTION = {
+    nullptr, 0, GENERATED_S3_4M_CANDIDATES,
+    sizeof(GENERATED_S3_4M_CANDIDATES) / sizeof(GENERATED_S3_4M_CANDIDATES[0]), ResolutionPolicy::ExactlyOne,
+    GENERATED_S3_4M_SENSE_PINS, 1};
+
 static constexpr DsiIdProbePlan GENERATED_P4_DSI_ID_PROBE = {2, 480, 27, 10, 120};
 static constexpr TouchConfigProbePlan GENERATED_P4_TOUCH_CONFIG_PROBE = {7, 8, {0x5D, 0x14}, 2};
 static constexpr int8_t GENERATED_P4_SENSE_PINS[] = {52};
@@ -69,6 +78,7 @@ inline const FamilyDetectionPlan &detectionPlanForPlatform(
     case Platform::Esp32C3: return GENERATED_C3_DETECTION;
     case Platform::Esp32C6: return GENERATED_C6_DETECTION;
     case Platform::Esp32S3: return GENERATED_S3_DETECTION;
+    case Platform::Esp32S3_4M: return GENERATED_S3_4M_DETECTION;
     default: return GENERATED_P4_DETECTION;
   }
 }

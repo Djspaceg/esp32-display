@@ -4334,14 +4334,14 @@ def test_board_descriptor_validator():
         },
         "schema requires every descriptor section",
     )
-    check_equal(len(descriptors), 15, "all current boards have descriptors")
+    check_equal(len(descriptors), 16, "all current boards have descriptors")
     check_equal(
         sorted(
             descriptor["identity"]["profile"]
             for descriptor in descriptors
             if descriptor["migration"]["firmware_config"] == "generated"
         ),
-        ["co5300", "gc9a01a-240", "jd9853", "st7703-4b"],
+        ["co5300", "gc9107-tqt", "gc9a01a-240", "jd9853", "st7703-4b"],
         "one board per family uses generated firmware config",
     )
     check_accepts(
@@ -5275,9 +5275,9 @@ def test_board_descriptor_validator():
 
 
 def test_universal_family_catalog_and_cli():
-    check_equal(sorted(espdisp.FAMILIES), ["c3", "c6", "p4", "s3"],
-                "release catalog exposes exactly four families")
-    check_equal(espdisp.family_choices(), ["c3", "c6", "p4", "s3"],
+    check_equal(sorted(espdisp.FAMILIES), ["c3", "c6", "p4", "s3", "s3-4m"],
+                "release catalog exposes exactly five families")
+    check_equal(espdisp.family_choices(), ["c3", "c6", "p4", "s3", "s3-4m"],
                 "CLI family choices contain no profile artifact names")
     check_equal(espdisp.FAMILIES["c3"].profiles, ("gc9a01a-240",),
                 "C3 maps its round-panel profile")
@@ -5336,10 +5336,14 @@ def test_universal_family_catalog_and_cli():
                 "canonical P4 includes the Doom library path")
     check_equal(espdisp.board_key_for_chip("esp32c3"), "c3", "C3 chip to family")
     check_equal(espdisp.board_key_for_chip("esp32c6"), "c6", "C6 chip to family")
-    check_equal(espdisp.board_key_for_chip("esp32s3"), "s3", "S3 chip to family")
+    # Two families share the S3 chip; its flash size tells them apart.
+    check_equal(espdisp.board_key_for_chip("esp32s3"), None,
+                "the S3 chip alone names no family")
+    check_equal(espdisp.board_keys_for_chip("esp32s3"), ["s3", "s3-4m"],
+                "both S3 families run on the S3 chip")
     check_equal(espdisp.board_key_for_chip("esp32p4"), "p4", "P4 chip to family")
-    check_equal(espdisp.board_key_for_fqbn("esp32:esp32:esp32s3"), "s3",
-                "S3 FQBN identifies its universal family")
+    check_equal(espdisp.board_key_for_fqbn("esp32:esp32:esp32s3"), None,
+                "an S3 FQBN names no family by itself")
 
     parser = espdisp.build_parser()
     for command in ("compile", "flash"):
@@ -5875,6 +5879,109 @@ def test_build_identity_header():
             "the identity header is written only into the private copy")
 
 
+def test_s3_4m_family():
+    """The 4 MiB S3 family: its own image, table and board, chosen by flash."""
+    family = espdisp.FAMILIES["s3-4m"]
+    check_equal(family.chip, "esp32s3", "the 4 MiB family runs on the S3 chip")
+    check_equal(family.profiles, ("gc9107-tqt",), "the T-QT Pro is its board")
+    check_equal(family.flash_sizes, (4 * 1024 * 1024,),
+                "it ships only to 4 MiB of flash")
+    check_equal(family.partition_scheme, "s3-4m-ota", "its own table token")
+    check_equal(family.partition_csv, "partitions_s3_4m.csv",
+                "its own partition table source")
+    check(not family.requires_doom_wad,
+          "no Doom: 4 MiB cannot hold the WAD beside two app slots")
+    check_equal(family.extra_flags, ("-DESPDISP_FAMILY_S3_4M",),
+                "its build selects the family and links no Doom")
+    check("FlashSize=4M" in family.fqbn and "PSRAM=enabled" in family.fqbn,
+          "4 MiB flash header and quad PSRAM, which the 8 MiB image cannot run")
+    check_equal(family.hardware, {"gc9107-tqt": ("LilyGO T-QT Pro N4R2",)},
+                "hardware named for the catalog")
+    check(not set(family.flash_sizes) & set(espdisp.FAMILIES["s3"].flash_sizes),
+          "the two S3 families never claim the same flash size")
+
+    def entry(label, part_type, subtype, address, size):
+        return struct.pack(
+            "<HBBII16sI", 0x50AA, part_type, subtype, address, size,
+            label.encode("ascii").ljust(16, b"\0"), 0)
+
+    table = b"".join([
+        entry("nvs", 0x01, 0x02, 0x9000, 0x5000),
+        entry("otadata", 0x01, 0x00, 0xE000, 0x2000),
+        entry("app0", 0x00, 0x10, 0x10000, 0x1F0000),
+        entry("app1", 0x00, 0x11, 0x200000, 0x1F0000),
+    ]) + b"\xff" * 32
+    check_accepts(
+        lambda: espdisp._verify_partition_payload(family, table),
+        "the 4 MiB dual-OTA table is the family's layout")
+    with_wad = table[:4 * 32] + entry(
+        "doom_wad", 0x42, 0x06, 0x3FF000, 0x401000) + b"\xff" * 32
+    check_fails(
+        lambda: espdisp._verify_partition_payload(family, with_wad),
+        "incompatible payload", "a WAD partition has no place in 4 MiB")
+    check_fails(
+        lambda: espdisp._verify_partition_payload(
+            espdisp.FAMILIES["s3"], table),
+        "partition labels", "the 8 MiB family refuses the 4 MiB table")
+    with open(os.path.join(espdisp.REPO_ROOT, "firmware",
+                           family.partition_csv), encoding="utf-8") as source:
+        rows = [line.split(",") for line in source
+                if line.strip() and not line.startswith("#")]
+    check_equal(
+        [(row[0].strip(), int(row[3], 16), int(row[4], 16)) for row in rows],
+        [("nvs", 0x9000, 0x5000), ("otadata", 0xE000, 0x2000),
+         ("app0", 0x10000, 0x1F0000), ("app1", 0x200000, 0x1F0000)],
+        "partitions_s3_4m.csv is the layout the tool pins")
+    check(0x200000 + 0x1F0000 <= family.flash_sizes[0],
+          "both slots end inside 4 MiB")
+
+    # A board's chip names two families; its flash size picks one.
+    blank = espdisp.PortInfo("/dev/cu.usbmodem1", [], "unknown")
+    for flash, expected in ((4, "s3-4m"), (8, "s3"), (16, "s3")):
+        with unittest.mock.patch.object(
+                espdisp, "probe_chip", return_value="esp32s3"), \
+             unittest.mock.patch.object(
+                espdisp, "detect_flash_bytes",
+                return_value=flash * 1024 * 1024), \
+             unittest.mock.patch("sys.stdout", io.StringIO()):
+            check_equal(espdisp.resolve_family(None, blank).key, expected,
+                        "an S3 with %d MiB of flash takes %s" % (flash, expected))
+    with unittest.mock.patch.object(
+            espdisp, "probe_chip", return_value="esp32s3"), \
+         unittest.mock.patch.object(
+            espdisp, "detect_flash_bytes", return_value=2 * 1024 * 1024), \
+         unittest.mock.patch("sys.stdout", io.StringIO()):
+        check_fails(lambda: espdisp.resolve_family(None, blank),
+                    "could not determine",
+                    "an S3 flash size no family ships to fails closed")
+
+    # A family named outright is still held to the chip's flash: the 8 MiB
+    # image boot-loops on a 4 MiB chip.
+    with unittest.mock.patch.object(
+            espdisp, "detect_flash_bytes", return_value=4 * 1024 * 1024):
+        check_fails(
+            lambda: espdisp.check_flash_capacity(
+                espdisp.FAMILIES["s3"], "/dev/cu.usbmodem1"),
+            "--family s3-4m",
+            "the 8 MiB S3 image is refused on 4 MiB and the right family named")
+        check_accepts(
+            lambda: espdisp.check_flash_capacity(family, "/dev/cu.usbmodem1"),
+            "the 4 MiB image is accepted on 4 MiB")
+    with unittest.mock.patch.object(
+            espdisp, "detect_flash_bytes", return_value=8 * 1024 * 1024):
+        check_fails(
+            lambda: espdisp.check_flash_capacity(family, "/dev/cu.usbmodem1"),
+            "--family s3",
+            "the 4 MiB image is refused on 8 MiB")
+    with unittest.mock.patch.object(
+            espdisp, "detect_flash_bytes",
+            side_effect=AssertionError("flash size read")):
+        check_accepts(
+            lambda: espdisp.check_flash_capacity(
+                espdisp.FAMILIES["c6"], "/dev/cu.usbmodem1"),
+            "a chip only one family runs on is not asked its flash size")
+
+
 def test_family_resolution_and_discovery():
     blank = espdisp.PortInfo("/dev/cu.usbmodem1", [], "unknown")
     known = espdisp.PortInfo("/dev/cu.usbmodem2", ["s3"], "S3")
@@ -6077,7 +6184,7 @@ def test_release_catalog_contract():
     bad = json.loads(json.dumps(catalog))
     del bad["families"]["p4"]
     check_fails(lambda: espdisp.validate_release_catalog(bad, "/tmp/releases", False),
-                "exactly c3, c6, s3, and p4", "missing family")
+                "exactly c3, c6, s3, s3-4m, and p4", "missing family")
     bad = json.loads(json.dumps(catalog))
     bad["families"]["s3"]["artifact"] = "../escape.espdispfw"
     check_fails(lambda: espdisp.validate_release_catalog(bad, "/tmp/releases", False),
@@ -6096,7 +6203,8 @@ def test_release_catalog_contract():
                 "does not match", "catalog partition mismatch")
 
     def read_artifact(path):
-        for key in blobs:
+        # Longest key first: espdisp-s3-4m-... also contains "espdisp-s3-".
+        for key in sorted(blobs, key=len, reverse=True):
             if ("espdisp-%s-" % key) in path:
                 return blobs[key]
         raise AssertionError("unexpected path %s" % path)
@@ -6146,7 +6254,7 @@ def test_release_catalog_contract():
         shipping_versions=["1.5.0"])
 
     def read_historical(path):
-        for key in historical_blobs:
+        for key in sorted(historical_blobs, key=len, reverse=True):
             if ("espdisp-%s-" % key) in path:
                 return historical_blobs[key]
         raise AssertionError("unexpected path %s" % path)
@@ -6234,6 +6342,7 @@ def test_release_writes_only_bare_shipping_bundles():
             ["espdisp-c3-1.5.0.espdispfw",
              "espdisp-c6-1.5.0.espdispfw",
              "espdisp-s3-1.5.0.espdispfw",
+             "espdisp-s3-4m-1.5.0.espdispfw",
              "espdisp-p4-1.5.0.espdispfw"],
             "release builds only bare-version artifact names")
         check(
@@ -6294,6 +6403,7 @@ def test_release_defaults_to_build_numbered_dev_bundles():
             ["espdisp-c3-1.5.0+999.gabcdef0.espdispfw",
              "espdisp-c6-1.5.0+999.gabcdef0.espdispfw",
              "espdisp-s3-1.5.0+999.gabcdef0.espdispfw",
+             "espdisp-s3-4m-1.5.0+999.gabcdef0.espdispfw",
              "espdisp-p4-1.5.0+999.gabcdef0.espdispfw"],
             "default release keeps build identity in development filenames")
         check(
@@ -6434,6 +6544,7 @@ def test_release_regenerates_only_with_exact_version_confirmation():
             ["espdisp-c3-1.5.0.espdispfw",
              "espdisp-c6-1.5.0.espdispfw",
              "espdisp-s3-1.5.0.espdispfw",
+             "espdisp-s3-4m-1.5.0.espdispfw",
              "espdisp-p4-1.5.0.espdispfw"],
             "same-version regeneration keeps bare shipping names")
         with open(existing, "rb") as source:
@@ -6518,6 +6629,9 @@ def test_canonical_usb_flash_path():
          unittest.mock.patch.object(
              espdisp, "resolve_family", return_value=family), \
          unittest.mock.patch.object(
+             espdisp, "detect_flash_bytes",
+             return_value=8 * 1024 * 1024) as flash_size, \
+         unittest.mock.patch.object(
              espdisp, "flash_canonical_release",
              return_value=(artifact, "1.5.0")) as flash_release, \
          unittest.mock.patch.object(
@@ -6529,6 +6643,20 @@ def test_canonical_usb_flash_path():
     check_equal(
         flash_release.call_args.args, (family, port.address),
         "flash passes the resolved family and port to the release writer")
+    check(flash_size.called,
+          "an S3 flash reads the chip's flash size before writing")
+    with unittest.mock.patch.object(
+            espdisp, "resolve_port", return_value=port), \
+         unittest.mock.patch.object(
+             espdisp, "resolve_family", return_value=family), \
+         unittest.mock.patch.object(
+             espdisp, "detect_flash_bytes", return_value=4 * 1024 * 1024), \
+         unittest.mock.patch.object(
+             espdisp, "flash_canonical_release",
+             side_effect=AssertionError("a 4 MiB S3 got the 8 MiB image")), \
+         unittest.mock.patch("sys.stdout", io.StringIO()):
+        check_fails(lambda: espdisp.cmd_flash(args), "--family s3-4m",
+                    "the 8 MiB S3 release is never written to a 4 MiB chip")
 
     image = {
         "app_address": 0x10000,
@@ -9303,6 +9431,7 @@ def main():
     test_firmware_output_root()
     test_board_descriptor_validator()
     test_universal_family_catalog_and_cli()
+    test_s3_4m_family()
     test_compile_wifi_config_staging()
     test_s3_doom_build_contract()
     test_p4_link_drops_usb_device_stack()

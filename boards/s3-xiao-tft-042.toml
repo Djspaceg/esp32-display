@@ -93,6 +93,7 @@ vsync_back_porch = 0
 vsync_pulse_width = 0
 vsync_front_porch = 0
 window_follows_mirror = true
+clear_memory = true
 
 [carrier]
 # SCLK D8, SDIN D10, DC D3, RES D4, CS D5. The screen pulls its BL input high,

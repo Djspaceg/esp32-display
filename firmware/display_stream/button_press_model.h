@@ -140,4 +140,43 @@ class PressCounter {
   uint32_t lastReleaseAt_ = 0;
 };
 
+// A second key's two inputs, the PWR key's: a press, reported on release, and
+// a long press, reported once while it is still held at `longMs`, after which
+// its release reports nothing. Fed the key's level on every poll; a level
+// counts once it has held for `debounceMs`. Unsigned subtraction keeps the
+// timing valid across clock wrap.
+enum class KeyEvent : uint8_t { None, Press, LongPress };
+
+class KeyTracker {
+ public:
+  KeyEvent update(uint32_t now, bool down, uint32_t debounceMs,
+                  uint32_t longMs) {
+    if (down != candidate_) {
+      candidate_ = down;
+      candidateSince_ = now;
+    }
+    if (candidate_ != stable_ && now - candidateSince_ >= debounceMs) {
+      stable_ = candidate_;
+      if (stable_) {
+        downAt_ = candidateSince_;
+        longFired_ = false;
+      } else if (!longFired_) {
+        return KeyEvent::Press;
+      }
+    }
+    if (stable_ && !longFired_ && now - downAt_ >= longMs) {
+      longFired_ = true;
+      return KeyEvent::LongPress;
+    }
+    return KeyEvent::None;
+  }
+
+ private:
+  bool candidate_ = false;
+  bool stable_ = false;
+  bool longFired_ = false;
+  uint32_t candidateSince_ = 0;
+  uint32_t downAt_ = 0;
+};
+
 }  // namespace buttonpress

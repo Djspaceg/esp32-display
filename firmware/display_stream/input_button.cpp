@@ -290,6 +290,31 @@ void initializeButtonInput() {
 
 bool bootPressSettling() { return bootRunOpen; }
 
+// ---- Second key (the T-QT's KEY) ----------------------------------------
+// Reported as the PWR key's two inputs, so the input map gives it a function
+// the same way; with none assigned it does nothing but log.
+static buttonpress::KeyTracker keyTracker;
+
+void initializeKeyInput() {
+  if (bcfg == nullptr || !bcfg->hasKey()) return;
+  pinMode(bcfg->pinKey, INPUT_PULLUP);
+  Serial.printf("button: key on GPIO%d\n", bcfg->pinKey);
+}
+
+void serviceKeyButton() {
+  if (bcfg == nullptr || !bcfg->hasKey()) return;
+  const buttonpress::KeyEvent event =
+      keyTracker.update(buttonClockMs(), digitalRead(bcfg->pinKey) == LOW,
+                        DEBOUNCE_MS, LONG_PRESS_MS);
+  if (event == buttonpress::KeyEvent::None) return;
+  const bool hold = event == buttonpress::KeyEvent::LongPress;
+  const uint8_t input = (uint8_t)(
+      hold ? deviceproto::TouchGesture::PowerKeyLongPress
+           : deviceproto::TouchGesture::PowerKeyPress);
+  Serial.printf("key: %s press\n", hold ? "long" : "short");
+  runInputFunction(input, inputFunctionFor(input));
+}
+
 static void setStatusScreen(bool active, const char *cause) {
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   (void)active;

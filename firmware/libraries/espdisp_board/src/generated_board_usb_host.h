@@ -23,6 +23,7 @@ static constexpr GeneratedUsbHost GENERATED_USB_HOSTS[] = {
     {Variant::P4_34C, true, true},
     {Variant::XiaoSt7735, false, false},
     {Variant::LilygoTwatchS3, false, false},
+    {Variant::LilygoTqtPro, false, false},
 };
 
 inline const GeneratedUsbHost *generatedUsbHost(Variant variant) {

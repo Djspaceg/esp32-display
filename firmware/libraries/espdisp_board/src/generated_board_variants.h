@@ -18,6 +18,7 @@ enum class Variant : uint8_t {
   P4_34C = 13,
   XiaoSt7735 = 14,
   LilygoTwatchS3 = 15,
+  LilygoTqtPro = 16,
 };
 
 constexpr bool supportsDoom(Variant variant) {

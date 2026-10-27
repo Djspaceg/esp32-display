@@ -34,6 +34,7 @@ enum class PanelProfile : uint8_t {
   Jd9365_800x800,
   St7735_96x54,
   St7789V3_240x240,
+  Gc9107Tqt_128x128,
 };
 
 struct PanelConfig {
@@ -65,5 +66,11 @@ struct PanelConfig {
   /// in (panelorient::windowGap). False keeps every quadrant on the panel's
   /// own near offsets, as measured on the Waveshare 1.54-inch ST7789.
   bool windowFollowsMirror = false;
+  /// Whether the controller takes red and blue swapped (MADCTL BGR) on a SPI
+  /// or QSPI panel: the descriptor's color_order.
+  bool colorBgr = false;
+  /// Whether init writes black over the whole memoryWidth x memoryHeight
+  /// before the display turns on (panel_memory_clear.h).
+  bool clearMemory = false;
 };
 }  // namespace board
