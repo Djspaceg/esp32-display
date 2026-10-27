@@ -344,6 +344,15 @@ enum WifiConfigUI {
         // it explicitly and drop both modem lines before any I/O. tools/espdisp.py
         // talks to the same boards over the same ports without resetting them,
         // which is the reference this matches.
+        //
+        // Both lines in one TIOCMBIC, never DTR first: the open asserts both, and
+        // on a CH343P board's two-transistor auto-reset (the P4 4B's U7) RTS
+        // asserted without DTR holds EN low. Clearing DTR then RTS, which is
+        // what pyserial's open() does with dtr and rts set False beforehand,
+        // reset a 4B on every open; this call reset it on none. RTS first is
+        // safe for EN too, but passes through DTR alone, which by the schematic
+        // pulls GPIO35 - the 4B's BOOT button - low between the two calls, an
+        // edge the firmware's BOOT handling could take as a press.
         tty.c_cflag &= ~tcflag_t(HUPCL)
         tcsetattr(fd, TCSANOW, &tty)
         var modemLines: Int32 = TIOCM_DTR | TIOCM_RTS

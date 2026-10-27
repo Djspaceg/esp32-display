@@ -930,16 +930,27 @@ def resolve_family(
 
 
 # --------------------------------------------------------------------------
-# stdlib serial (no pyserial: it is not installed for any python3 here)
+# stdlib serial (no pyserial: /usr/bin/python3 has none, and termios is enough)
 
 
 def open_serial(address: str):
     """Open a tty at 115200 raw using termios only.
 
-    tools/serial_cmd.py uses pyserial, which is not installed on this machine;
+    tools/serial_cmd.py uses pyserial, which /usr/bin/python3 does not have;
     termios is in the standard library and does the same job for a one-line
     request/response. /dev/cu.* is used rather than /dev/tty.* so the open does
     not block on carrier detect and does not reset the board.
+
+    DTR and RTS are left as the open leaves them: macOS asserts both at once,
+    and HUPCL drops both at the last close. On a CH343P board with the
+    two-transistor auto-reset (the P4 4B's U7 to ESP_EN and GPIO35), RTS
+    asserted while DTR is not holds EN low, so deasserting DTR before RTS
+    resets the chip (the ROM then reports POWERON). pyserial's open() with
+    dtr=False and rts=False set beforehand does exactly that (serialposix.py
+    clears DTR, then RTS) and reset a 4B on 5 of 5 opens, as clearing DTR then
+    RTS by hand did on 4 of 4. Measured with no reset on a 4B: this open and
+    its close, pyserial with its defaults, clearing RTS then DTR, and clearing
+    both in one TIOCMBIC as the app's openSerial does.
     """
     try:
         fd = os.open(address, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
