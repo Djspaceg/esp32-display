@@ -174,6 +174,10 @@ struct ManagerView: View {
                 } header: {
                     Text("Devices")
                 }
+                // Mac screens are devices too, listed beside the boards.
+                ScreenDeviceSidebarSection(
+                    controller: manager.screenDevices,
+                    capturingFrom: manager.boardCaptureDisplayNames())
             }
             // The system sidebar style carries the Liquid Glass sidebar
             // treatment and selection material; a plain list does not.
@@ -182,7 +186,12 @@ struct ManagerView: View {
 
     @ViewBuilder
     private var detailColumn: some View {
-            if let panel = manager.selectedPanel {
+            if let key = ScreenDeviceEntry.key(fromTag: manager.selectedServiceName) {
+                ScreenDeviceDetailView(
+                    controller: manager.screenDevices, key: key,
+                    capturingFrom: manager.boardCaptureDisplayNames())
+                    .id(key)
+            } else if let panel = manager.selectedPanel {
                 PanelDetailView(panel: panel, manager: manager)
                     .id(panel.serviceName)
             } else {
@@ -2150,7 +2159,10 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
 
     private func syncTitle() {
         guard let window else { return }
-        let title = manager.selectedPanel?.displayName ?? "ESPDisplaySender"
+        let title = manager.selectedPanel?.displayName
+            ?? ScreenDeviceEntry.key(fromTag: manager.selectedServiceName)
+                .flatMap { manager.screenDevices.entry($0)?.name }
+            ?? "ESPDisplaySender"
         if window.title != title { window.title = title }
     }
 
@@ -2198,7 +2210,10 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
         // Defer until AppKit has completed a close/order-out transition; during
         // windowWillClose the closing window can still report itself visible.
         DispatchQueue.main.async {
-            guard NSApp.windows.allSatisfy({ !$0.isVisible }) else { return }
+            // A screen device's cover is not a window the user works in, and
+            // must not keep a Dock icon up.
+            guard NSApp.windows.allSatisfy({ !$0.isVisible || $0 is ScreenCoverWindow })
+            else { return }
             NSApp.setActivationPolicy(.accessory)
         }
     }
@@ -2245,6 +2260,7 @@ final class ESPDisplayApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        manager.screenDevices.tearDown()
         manager.stopMacAudioRouting()
         manager.flushPersistence()
     }

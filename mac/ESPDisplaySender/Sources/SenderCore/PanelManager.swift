@@ -91,6 +91,11 @@ final class PanelManager: ObservableObject {
     /// Fills the preview for a panel that has no session of its own, so a source
     /// can be chosen and judged with the hardware switched off.
     let previewDriver = PreviewDriver()
+    /// Mac screens used as devices, listed beside the boards.
+    let screenDevices: ScreenDeviceController
+    /// Screens those devices cover. A board is not offered one as a source,
+    /// and no region is dragged onto one.
+    var coveredDisplayNames: Set<String> = []
     /// The display an Automatic source tracks, as a session would resolve it.
     let defaultDisplayName: String
     private var screenChangeObserver: NSObjectProtocol?
@@ -284,10 +289,14 @@ final class PanelManager: ObservableObject {
     init(
         settings: SenderSettings? = nil,
         defaultDisplayName: String = "",
-        otaPasswords: OTAPasswordStoring = KeychainOTAPasswordStore()
+        otaPasswords: OTAPasswordStoring = KeychainOTAPasswordStore(),
+        coversScreenDevices: Bool = true
     ) {
         self.defaultDisplayName = defaultDisplayName
         self.otaPasswords = otaPasswords
+        // The listing modes print and leave, and must not cover a screen.
+        screenDevices = ScreenDeviceController(
+            storeURL: ScreenDeviceStore.defaultURL, live: coversScreenDevices)
         let url = PanelStore.defaultURL
         persistenceURL = url
         settingsURL = SettingsStore.defaultURL
@@ -376,6 +385,7 @@ final class PanelManager: ObservableObject {
                 panel.captureStatus = .waiting("Nothing to preview. \(reason)")
             }
         }
+        wireScreenDevices()
         identifyUSBPorts(usbSerialPorts)
     }
 
@@ -406,6 +416,8 @@ final class PanelManager: ObservableObject {
     ) {
         defaultDisplayName = ""
         self.recoveryStore = recoveryStore
+        // Never live here: a preview or a test must not cover a screen.
+        screenDevices = ScreenDeviceController(storeURL: nil, live: false)
         // In memory by default, never the keychain: this initialiser is what the
         // SwiftUI previews and the tests use, and both run unsigned.
         self.otaPasswords = otaPasswords

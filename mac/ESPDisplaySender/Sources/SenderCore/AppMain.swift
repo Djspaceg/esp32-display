@@ -216,7 +216,8 @@ public enum ESPDisplaySenderApp {
             // The display name is handed over so the window can preview an
             // Automatic source the same way a session would resolve it.
             let manager = PanelManager(
-                settings: overrides, defaultDisplayName: opts.displayName)
+                settings: overrides, defaultDisplayName: opts.displayName,
+                coversScreenDevices: !opts.listDisplays && !opts.listWindows)
             if !opts.listDisplays && !opts.listWindows {
                 manager.startMacAudioRouting()
             }

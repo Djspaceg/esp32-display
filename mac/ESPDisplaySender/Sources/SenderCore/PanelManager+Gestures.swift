@@ -270,6 +270,7 @@ extension PanelManager {
         // what it already shows or a feedback loop.
         let candidates = await DisplayCapture.capturableDisplays().filter {
             !Self.isPanelShaped($0.display.width, $0.display.height)
+                && !coveredDisplayNames.contains($0.name)
         }
         let ring = PanelSource.ring(displayNames: candidates.map(\.name))
         guard let next = PanelSource.next(
@@ -283,8 +284,7 @@ extension PanelManager {
         case .display(let name):
             guard let chosen = candidates.first(where: { $0.name == name })
             else { return }
-            session.usePickerFilter(
-                SCContentFilter(display: chosen.display, excludingWindows: []))
+            session.usePickerFilter(await DisplayCapture.displayFilter(chosen.display))
             updatePanel(serviceName) { panel in
                 panel.source = next
                 panel.sourceDescription = next.label

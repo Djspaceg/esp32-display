@@ -26,6 +26,9 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var rgbBuffer: [UInt8]
     private let onFrame: ([UInt8], Bool) -> Void
     private let onPreview: ((CGImage, Bool) -> Void)?
+    /// Set for a Mac screen used as a device, which draws the captured pixels
+    /// as they are: no RGB565 conversion, and no preview image.
+    private let onPixelBuffer: ((CVPixelBuffer, Bool) -> Void)?
 
     /// Guards every field the capture queue and the supervisor both touch.
     private let stateLock = NSLock()
@@ -152,19 +155,27 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     ///     later goes through `reshape(landscape:)`.
     ///   - onFrame: called on the capture queue with each converted
     ///     RGB565BE frame and whether it is landscape (the axes swapped).
+    ///   - onPixelBuffer: when set, called on the capture queue with each new
+    ///     BGRA frame instead of converting it; `onFrame` and `onPreview` are
+    ///     then never called.
     init(
         geometry: PanelGeometry = .panel172x320,
         landscape: Bool = false,
         onPreview: ((CGImage, Bool) -> Void)? = nil,
+        onPixelBuffer: ((CVPixelBuffer, Bool) -> Void)? = nil,
         onFrame: @escaping ([UInt8], Bool) -> Void
     ) {
         self.geometry = geometry
-        self.rgbBuffer = [UInt8](repeating: 0, count: geometry.frameBytes)
+        // A screen device's frames are megabytes and never converted, so no
+        // conversion buffer is held for them.
+        self.rgbBuffer = onPixelBuffer == nil
+            ? [UInt8](repeating: 0, count: geometry.frameBytes) : []
         self._landscape = landscape
         self._outW = geometry.frameWidth(landscape: landscape)
         self._outH = geometry.frameHeight(landscape: landscape)
         self.onFrame = onFrame
         self.onPreview = onPreview
+        self.onPixelBuffer = onPixelBuffer
     }
 
     /// Name of a display (as shown in System Settings / BetterDisplay) for a
@@ -318,6 +329,30 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         var count: UInt32 = 0
         guard CGGetOnlineDisplayList(16, &ids, &count) == .success else { return [] }
         return Array(ids.prefix(Int(count)))
+    }
+
+    /// Windows no capture may include: the windows covering Mac screens used
+    /// as devices (ScreenDeviceCover). Without this a capture of a screen with
+    /// one on it could show the device its own picture.
+    static let excludedWindowIDs = OSAllocatedUnfairLock<Set<CGWindowID>>(initialState: [])
+
+    /// A whole-display filter that leaves the excluded windows out.
+    static func displayFilter(_ display: SCDisplay, windows: [SCWindow]) -> SCContentFilter {
+        let covers = excludedWindowIDs.withLock { $0 }
+        return SCContentFilter(
+            display: display,
+            excludingWindows: ScreenDeviceFeedback.windowsToExclude(
+                windows, id: \.windowID, covers: covers))
+    }
+
+    /// The same, fetching the windows only when there is one to leave out, so
+    /// a Mac with no screen device pays nothing.
+    static func displayFilter(_ display: SCDisplay) async -> SCContentFilter {
+        guard !excludedWindowIDs.withLock({ $0.isEmpty }),
+            let content = try? await shareableContent(
+                excludingDesktopWindows: false, onScreenWindowsOnly: true)
+        else { return SCContentFilter(display: display, excludingWindows: []) }
+        return displayFilter(display, windows: content.windows)
     }
 
     struct Resolved {
@@ -540,7 +575,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 })
             else { return .contentGone }
             return .resolved(FilterTarget(
-                filter: SCContentFilter(display: fresh, excludingWindows: []),
+                filter: displayFilter(fresh, windows: content.windows),
                 windowID: nil,
                 owner: nil,
                 size: CGSize(width: fresh.width, height: fresh.height)))
@@ -643,7 +678,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Start capturing a display, fitted into this capture's frame shape.
     func start(display: SCDisplay, fps: Int) async throws {
         try await start(
-            filter: SCContentFilter(display: display, excludingWindows: []),
+            filter: await Self.displayFilter(display),
             fps: fps,
             contentSize: CGSize(width: display.width, height: display.height))
     }
@@ -664,7 +699,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// rectangle on its side to match (`applyRegionQuarterTurn`).
     func start(display: SCDisplay, sourceRect: CGRect, fps: Int) async throws {
         try await start(
-            filter: SCContentFilter(display: display, excludingWindows: []),
+            filter: await Self.displayFilter(display),
             fps: fps,
             sourceRect: sourceRect,
             contentSize: sourceRect.size)
@@ -1002,6 +1037,20 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         guard let pixelBuffer = sampleBuffer.imageBuffer else { return }
+
+        if let onPixelBuffer {
+            // Frames still in flight at the old size after a reshape are
+            // dropped, as PixelConvert's size check drops them below.
+            guard CVPixelBufferGetWidth(pixelBuffer) == width,
+                CVPixelBufferGetHeight(pixelBuffer) == height
+            else { return }
+            stateLock.withLock {
+                _framesCaptured &+= 1
+                _lastFrameAt = Date()
+            }
+            onPixelBuffer(pixelBuffer, isLandscape)
+            return
+        }
 
         if PixelConvert.bgraToRGB565BE(pixelBuffer, width: width, height: height, into: &rgbBuffer) {
             stateLock.lock()

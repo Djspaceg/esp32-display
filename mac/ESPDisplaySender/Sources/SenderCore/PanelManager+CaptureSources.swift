@@ -17,9 +17,12 @@ extension PanelManager {
             // Displays shaped like the panel are skipped for the same reason the
             // swipe ring skips them: they are this app's own output, so pointing
             // a panel at one is a mirror of itself or a feedback loop.
+            // A screen used as a device is skipped for the same reason: it
+            // shows this app's output.
             let names = await DisplayCapture.capturableDisplays()
                 .filter { !Self.isPanelShaped($0.display.width, $0.display.height) }
                 .map(\.name)
+                .filter { !coveredDisplayNames.contains($0) }
             if names != displayNames { displayNames = names }
         }
     }
@@ -38,6 +41,7 @@ extension PanelManager {
     /// Point a panel at a named display.
     func selectDisplay(_ name: String, for serviceName: String) {
         guard !name.isEmpty else { return }
+        guard !refusesCoveredScreen(name) else { return }
         let source = PanelSource.display(name)
         updatePanel(serviceName) { panel in
             panel.source = source
@@ -50,8 +54,7 @@ extension PanelManager {
                 guard let chosen = await DisplayCapture.capturableDisplays()
                     .first(where: { $0.name == name })
                 else { return }
-                session.usePickerFilter(
-                    SCContentFilter(display: chosen.display, excludingWindows: []))
+                session.usePickerFilter(await DisplayCapture.displayFilter(chosen.display))
             }
         }
         refreshPreviewDriver()
@@ -71,6 +74,9 @@ extension PanelManager {
     /// what arrives, which is only useful if it is already streaming.
     func chooseRegion(for serviceName: String) {
         selectedServiceName = serviceName
+        // One marquee at a time: a screen device's closes for a board's.
+        if screenDevices.choosingRegionFor != nil { screenDevices.finishChoosingRegion() }
+        regionSelector.excludedDisplays = coveredDisplayNames
 
         let panel = panels.first { $0.serviceName == serviceName }
         guard let geometry = panel?.geometry else {
@@ -415,6 +421,9 @@ extension PanelManager {
         let target = pickerTarget ?? selectedServiceName ?? panels.first?.serviceName
         pickerTarget = nil
         guard let target else { return }
+        if case .display(let name)? = PanelSource.from(filter),
+            refusesCoveredScreen(name)
+        { return }
         // Applied to a session only if there is one. A pick made while the panel
         // is switched off used to be thrown away here; now it is recorded and
         // previewed, and a session picks it up from the stored source when the

@@ -39,6 +39,9 @@ final class RegionSelector: NSObject {
     /// False for rectangular glass, where the panel's rotation decides the
     /// rectangle's shape and a free rotate would only letterbox the frame.
     var allowsRotate = true
+    /// Screens the rectangle may not be dragged onto: those covered by a Mac
+    /// screen used as a device.
+    var excludedDisplays: Set<String> = []
 
     /// Which preset the current region matches, highlighted on the overlay.
     /// The manager sets it because matching needs the panel's geometry, which
@@ -438,11 +441,18 @@ final class RegionSelector: NSObject {
         // a second display simply re-homes the region there instead of leaving an
         // out-of-bounds rectangle on the old one.
         let centre = CGPoint(x: proposed.midX, y: proposed.midY)
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(centre) })
+        guard let proposedScreen = NSScreen.screens.first(where: { $0.frame.contains(centre) })
             ?? NSScreen.main,
-            let id = screen.deviceDescription[
+            let id = proposedScreen.deviceDescription[
                 NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
-            let name = DisplayCapture.currentName(for: id)
+            let proposedName = DisplayCapture.currentName(for: id),
+            // A screen used as a device is covered, and a region on it would
+            // capture its own picture: the rectangle stays on the screen it
+            // was on instead of crossing onto one.
+            let name = ScreenDeviceFeedback.regionHost(
+                proposed: proposedName, current: region?.display, covered: excludedDisplays),
+            let screen = name == proposedName
+                ? proposedScreen : DisplayCapture.screen(named: name)
         else { return }
 
         let raw = Self.region(
