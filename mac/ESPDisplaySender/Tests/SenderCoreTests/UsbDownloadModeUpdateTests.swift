@@ -187,15 +187,20 @@ final class UsbDownloadModeUpdateTests: XCTestCase {
     func testFamilyChoicesCoverEveryFamilyAndNameEachP4Board() throws {
         let catalog = try UsbRescueTests.releaseSet().catalog
         let all = PanelManager.firmwareFamilyChoices(catalog: catalog, chip: nil)
-        XCTAssertEqual(Set(all.map(\.family)), ["c3", "c6", "p4", "s3"])
-        XCTAssertEqual(all.first { $0.family == "s3" }?.label, "ESP32-S3 boards")
+        XCTAssertEqual(Set(all.map(\.family)), ["c3", "c6", "p4", "s3", "s3-4m"])
+        // The two S3 families are told apart by the flash they ship to.
+        XCTAssertEqual(all.first { $0.family == "s3" }?.label,
+                       "ESP32-S3 boards with 8, 16 or 32 MB flash")
+        XCTAssertEqual(all.first { $0.family == "s3-4m" }?.label,
+                       "ESP32-S3 boards with 4 MB flash")
+        XCTAssertEqual(all.first { $0.family == "c6" }?.label, "ESP32-C6 boards")
         let p4 = all.filter { $0.family == "p4" }
         XCTAssertEqual(Set(p4.compactMap(\.profile)),
                        Set(catalog.families["p4"]?.profiles ?? []))
         XCTAssertTrue(p4.allSatisfy { $0.label.contains("ESP32-P4") }, "\(p4)")
         XCTAssertEqual(Set(all.map(\.id)).count, all.count)
         let s3Only = PanelManager.firmwareFamilyChoices(catalog: catalog, chip: "esp32s3")
-        XCTAssertEqual(s3Only.map(\.family), ["s3"])
+        XCTAssertEqual(Set(s3Only.map(\.family)), ["s3", "s3-4m"])
 
         // Every choice resolves to bundled firmware the way the sheet asks for
         // it, so choosing one is enough to write.

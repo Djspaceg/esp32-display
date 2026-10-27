@@ -360,10 +360,27 @@ extension PanelManager {
             } else {
                 choices.append(FirmwareFamilyChoice(
                     family: entry.family, profile: nil, chip: entry.chip,
-                    label: "\(chipName) boards"))
+                    label: familyBoardsLabel(
+                        chipName, chip: entry.chip,
+                        flashBytes: entry.compatibility.flashBytes)))
             }
         }
         return choices
+    }
+
+    /// "ESP32-S3 boards", or, where two families share the chip and so are
+    /// told apart by flash size, "ESP32-S3 boards with 4 MB flash".
+    nonisolated static func familyBoardsLabel(
+        _ chipName: String, chip: String, flashBytes: [Int]
+    ) -> String {
+        guard UsbOnboarder.familiesShareChip(chip), !flashBytes.isEmpty else {
+            return "\(chipName) boards"
+        }
+        let sizes = flashBytes.sorted().map { "\($0 >> 20)" }
+        let list = sizes.count == 1
+            ? sizes[0]
+            : sizes.dropLast().joined(separator: ", ") + " or " + sizes.last!
+        return "\(chipName) boards with \(list) MB flash"
     }
 
     /// The choices for a record from a firmware file the person opened: one
@@ -393,7 +410,8 @@ extension PanelManager {
                 } else {
                     choices.append(FirmwareFamilyChoice(
                         family: target, profile: nil, chip: image.chip,
-                        label: "\(chipName) boards"))
+                        label: familyBoardsLabel(
+                            chipName, chip: image.chip, flashBytes: image.flashSizes)))
                 }
             }
         }

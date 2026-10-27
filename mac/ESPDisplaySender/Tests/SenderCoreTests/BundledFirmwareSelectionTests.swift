@@ -61,10 +61,10 @@ final class BundledFirmwareSelectionTests: XCTestCase {
             // Newest first: to a panel on 1.5.0, 2.1.0 and 2.0.0 are
             // upgrades and its own build a reinstall. S3 rolled forward past
             // 1.5.0 when the XIAO joined its family and past 2.0.0 when the
-            // T-Watch-S3 did.
+            // T-Watch-S3 did; s3-4m began at 2.1.0 with the T-QT.
             XCTAssertEqual(
                 rows,
-                family == "s3"
+                family == "s3" || family == "s3-4m"
                     ? ["2.1.0 - Upgrade"]
                     : ["2.1.0 - Upgrade", "2.0.0 - Upgrade", "1.5.0 - Reinstall"],
                 family)
@@ -105,7 +105,7 @@ final class BundledFirmwareSelectionTests: XCTestCase {
                 let live: FirmwareReleaseCatalog.Identity
                 let usb: FirmwareReleaseCatalog.Identity?
                 switch family {
-                case "s3":
+                case "s3", "s3-4m":
                     live = complete
                     usb = nil
                 case "c6":

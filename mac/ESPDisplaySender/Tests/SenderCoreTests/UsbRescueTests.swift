@@ -1165,7 +1165,10 @@ final class UsbRescueTests: XCTestCase {
             XCTAssertEqual($0 as? EsptoolCommandError, .noPort)
         }
         XCTAssertEqual(UsbRescue.Family.named("p4")?.baud, 460_800)
-        XCTAssertEqual(UsbRescue.Family.all.map(\.chip), ["esp32c3", "esp32c6", "esp32s3", "esp32p4"])
+        XCTAssertEqual(UsbRescue.Family.all.map(\.chip),
+                       ["esp32c3", "esp32c6", "esp32s3", "esp32s3", "esp32p4"])
+        XCTAssertEqual(UsbRescue.Family.named("s3-4m")?.displayName, "ESP32-S3 (4 MB)")
+        XCTAssertEqual(UsbRescue.Family.named("s3")?.displayName, "ESP32-S3")
     }
 
     // MARK: - the images the app carries
