@@ -89,6 +89,14 @@ static constexpr PanelConfig PANEL_ST7789V3_240X240 = {
     0, 0, 0, 0, 0,
     0, 0, 0,
     true, false, false};
+static constexpr PanelConfig PANEL_SSD1315_72X40 = {
+    PanelProfile::Ssd1315_72x40, PanelDriver::Ssd1315, PanelBus::I2c,
+    72, 40, 128, 64,
+    400000, 0, 28, 0, 0,
+    false, false, false,
+    0, 0, 0, 0, 0,
+    0, 0, 0,
+    false, false, false};
 static constexpr PanelConfig PANEL_CO5300_466X466 = {
     PanelProfile::Co5300_466x466, PanelDriver::Co5300, PanelBus::Qspi,
     466, 466, 0, 0,

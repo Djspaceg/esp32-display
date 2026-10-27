@@ -12,15 +12,34 @@ struct GamesDataRow: View {
     @ObservedObject var manager: PanelManager
     @State private var target: PanelManager.FirmwareUpdateTarget?
 
-    /// Doom runs on every S3 and P4 board, Quake on some; boards with neither
-    /// get no row. The chip is the panel's, else its matched USB device's, as
-    /// the firmware sheet's target takes it.
+    /// Doom and Quake are offered only where the chip and known panel geometry
+    /// can run them. Boards with neither get no row. The chip is the panel's,
+    /// else its matched USB device's, as the firmware sheet's target takes it.
     @MainActor
     static func isOffered(for panel: PanelSnapshot, manager: PanelManager) -> Bool {
         // Games need a screen to play on.
         if panel.hasNoScreen { return false }
         let chip = panel.chip ?? manager.usbUpdateDevice(for: panel.serviceName)?.chip
-        return chip == QuakePak.p4Chip || chip == QuakePak.s3Chip
+        let profile = panel.profile
+            ?? manager.usbUpdateDevice(for: panel.serviceName)?.board
+        return supportsDoom(chip: chip, profile: profile)
+            || QuakePak.supports(chip: chip, profile: profile)
+    }
+
+    /// Doom's frame is 96x54. The family artifact carries the runtime and WAD,
+    /// while this keeps a smaller known panel from advertising an unusable
+    /// game. A missing profile preserves the existing chip-level fallback for
+    /// firmware that has not reported its profile yet.
+    static func supportsDoom(chip: String?, profile: String?) -> Bool {
+        guard chip == QuakePak.p4Chip || chip == QuakePak.s3Chip else {
+            return false
+        }
+        guard let profile,
+              let geometry = GeneratedBoardCatalog.geometryByProfile[profile]
+        else {
+            return true
+        }
+        return geometry.width >= 96 && geometry.height >= 54
     }
 
     var body: some View {

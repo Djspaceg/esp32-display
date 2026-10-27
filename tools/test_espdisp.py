@@ -4334,7 +4334,7 @@ def test_board_descriptor_validator():
         },
         "schema requires every descriptor section",
     )
-    check_equal(len(descriptors), 17, "all current boards have descriptors")
+    check_equal(len(descriptors), 18, "all current boards have descriptors")
     check_equal(
         sorted(
             descriptor["identity"]["profile"]
@@ -4977,20 +4977,20 @@ def test_board_descriptor_validator():
             [int(value) for value in written],
             [board_descriptor.backlight_floor_permille(item)],
             "%s's hand-written floor matches its descriptor" % symbol)
-    # Doom is a family capability, never a per-board opt-in: a board with a
-    # screen has it exactly when its family image carries the Doom runtime and
-    # WAD, and a board without one never does.
+    # Doom follows the family image when a panel can present its 96x54 frame;
+    # smaller screens remain supported but do not advertise an unusable game.
     for item in descriptors:
         check_equal(item["capabilities"]["doom"],
                     item["family"]["requires_doom_wad"] and
-                    board_descriptor.has_panel(item),
-                    "%s's Doom capability follows its family" % item["key"])
+                    board_descriptor.doom_capable_panel(item),
+                    "%s's Doom capability follows its family and panel"
+                    % item["key"])
     opted_out = copy.deepcopy(
         next(item for item in descriptors if item["key"] == "s3-lcd-130"))
     opted_out["capabilities"]["doom"] = False
     check_descriptor_fails(
         [opted_out], "capabilities.doom must equal family.requires_doom_wad",
-        "a board cannot opt out of a feature its family runs")
+        "a Doom-capable board cannot opt out of its family runtime")
     opted_in = copy.deepcopy(
         next(item for item in descriptors if item["key"] == "c6-lcd-147"))
     opted_in["capabilities"]["doom"] = True
@@ -5287,7 +5287,7 @@ def test_universal_family_catalog_and_cli():
                 "C6 maps both runtime profiles")
     check_equal(
         espdisp.FAMILIES["s3"].profiles,
-        ("st7735-042", "xiao-s3-bare", "gc9107", "st7789-130", "st7789-154",
+        ("st7735-042", "xiao-s3-bare", "xiaoml-042", "gc9107", "st7789-130", "st7789-154",
          "st7789-190", "co5300", "st77916", "gc9a01-knob-128",
          "st7789-twatch"),
         "S3 maps all runtime profiles into one family")
@@ -8407,7 +8407,8 @@ def test_bootstrap_refusals_and_color_controls():
     )
     check_equal(selected["key"], "s3-lcd-085",
                 "an answering 8 MiB codec bus selects the 0.85 automatically")
-    check_equal([item["key"] for item in safe], ["s3-lcd-085"],
+    check_equal([item["key"] for item in safe],
+                ["s3-lcd-085", "s3-seeed-xiaoml-kit"],
                 "automatic candidate resolution narrows the drive safety set")
     selected, safe = espdisp.bootstrap._choose_candidate(
         s3, {(42, 41): []}, set(), 8388608, None,
@@ -8415,7 +8416,8 @@ def test_bootstrap_refusals_and_color_controls():
     )
     check_equal(selected["key"], "s3-xiao-tft-042",
                 "a silent 8 MiB codec bus selects the XIAO ST7735 automatically")
-    check_equal([item["key"] for item in safe], ["s3-xiao-tft-042"],
+    check_equal([item["key"] for item in safe],
+                ["s3-seeed-xiaoml-kit", "s3-xiao-tft-042"],
                 "the XIAO resolution narrows the drive safety set")
     # The bootstrap sketch draws through the same window rule as the stream
     # firmware: the XIAO's 128x160 memory and its far-end mirror rule ride

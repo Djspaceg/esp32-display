@@ -116,6 +116,22 @@ int main() {
   check(releasePanelTransferStagingReservation(afterSoftwareRelease),
         "second software-only reservation releases cleanly");
 
+  // The SSD1315's I2C backend completes each page write synchronously. It
+  // must never add an entry to the SPI DMA gate or leave a staging slot owned.
+  board::Config i2cConfig;
+  i2cConfig.i2c = true;
+  PanelTransferStaging i2cStaging;
+  check(acquirePanelTransferStaging(10, i2cStaging),
+        "I2C staging reservation acquires");
+  check(queuePanelTransferStaging(panel, i2cConfig, 0, 0, 1, 1, i2cStaging) ==
+            ESP_OK,
+        "I2C staging draw succeeds synchronously");
+  check(dmaInFlight == 0, "I2C staging draw does not enter the DMA gate");
+  uint8_t i2cPixels[2] = {};
+  check(queuePanelBitmap(panel, i2cConfig, 0, 0, 1, 1, i2cPixels) == ESP_OK,
+        "I2C direct draw succeeds synchronously");
+  check(dmaInFlight == 0, "I2C direct draw does not enter the DMA gate");
+
   if (failures != 0) {
     printf("FAIL: panel staging ownership failed %d transition checks\n",
            failures);

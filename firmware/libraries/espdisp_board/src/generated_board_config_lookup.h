@@ -20,6 +20,7 @@ inline const Config *generatedConfigFor(Variant variant) {
     case Variant::LilygoTwatchS3: return &CONFIG_LILYGO_TWATCH_S3;
     case Variant::LilygoTqtPro: return &CONFIG_LILYGO_TQT_PRO;
     case Variant::XiaoS3Bare: return &CONFIG_XIAO_S3_BARE;
+    case Variant::SeeedXiaoml: return &CONFIG_SEEED_XIAOML;
     default: return nullptr;
   }
 }

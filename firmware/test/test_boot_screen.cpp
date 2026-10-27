@@ -174,14 +174,23 @@ int main() {
       const Layout l = bootscreenmodel::layout(w, h, round);
       const int s = l.textScale;
       CHECK(l.width == w && l.height == h);
-      // Never scaled.
-      CHECK(l.image.w == bootimage::WIDTH && l.image.h == bootimage::HEIGHT);
       CHECK(s >= 1 && s <= 4);
-      // Centred across, every layout.
-      CHECK(l.image.x == (w - bootimage::WIDTH) / 2);
       CHECK(l.bar.x == (w - l.bar.w) / 2);
       CHECK(l.bar.w > 0 && l.bar.h >= 2);
-      if (!l.compact) {
+      const bool micro = w <= 80 || h <= 48;
+      if (micro) {
+        ++compactLayouts;
+        CHECK(l.compact);
+        CHECK(l.image.x == 0 && l.image.y == 0);
+        CHECK(l.image.w == 0 && l.image.h == 0);
+        CHECK(l.textY == 1 && !l.textOverImage);
+        CHECK(l.bar.y == h - 5 && l.bar.h == 4);
+      } else {
+        // The boot image is never scaled on a panel that can show it.
+        CHECK(l.image.w == bootimage::WIDTH && l.image.h == bootimage::HEIGHT);
+        // Centred across, every ordinary layout.
+        CHECK(l.image.x == (w - bootimage::WIDTH) / 2);
+        if (!l.compact) {
         ++bottomLayouts;
         // Yoda at the bottom centre; the bar at the screen's centre.
         CHECK(l.image.y + l.image.h == h);
@@ -206,6 +215,7 @@ int main() {
         // The bar is in the bottom margin when there is one.
         if (h - (l.image.y + l.image.h) >= 4) {
           CHECK(l.bar.y >= l.image.y + l.image.h);
+        }
         }
       }
       // Bar and the longest status line are on the glass.
@@ -232,16 +242,19 @@ int main() {
           compose(l, join.text, 500, join.barColor);
       CHECK(pixelAt(screen, w, 0, 0) == bootscreenmodel::BACKGROUND ||
             l.textOverImage);
-      for (int iy = 0; iy < bootimage::HEIGHT; iy += 7) {
-        for (int ix = 0; ix < bootimage::WIDTH; ix += 5) {
-          const int x = l.image.x + ix, y = l.image.y + iy;
-          // Glass smaller than the image (the 96x54 ST7735) shows its middle.
-          if (x < 0 || y < 0 || x >= w || y >= h) continue;
-          const bool underBar = y >= l.bar.y && y < l.bar.y + l.bar.h &&
-                                x >= l.bar.x && x < l.bar.x + l.bar.w;
-          const bool underText = y >= l.textY - 1 && y <= l.textY + 7 * s + 1;
-          if (underBar || underText) continue;
-          CHECK(pixelAt(screen, w, x, y) == imagePixel(ix, iy));
+      if (!micro) {
+        for (int iy = 0; iy < bootimage::HEIGHT; iy += 7) {
+          for (int ix = 0; ix < bootimage::WIDTH; ix += 5) {
+            const int x = l.image.x + ix, y = l.image.y + iy;
+            // Glass smaller than the image (the 96x54 ST7735) shows its middle.
+            if (x < 0 || y < 0 || x >= w || y >= h) continue;
+            const bool underBar = y >= l.bar.y && y < l.bar.y + l.bar.h &&
+                                  x >= l.bar.x && x < l.bar.x + l.bar.w;
+            const bool underText =
+                y >= l.textY - 1 && y <= l.textY + 7 * s + 1;
+            if (underBar || underText) continue;
+            CHECK(pixelAt(screen, w, x, y) == imagePixel(ix, iy));
+          }
         }
       }
       const int midY = l.bar.y + l.bar.h / 2;
@@ -296,8 +309,8 @@ int main() {
     }
   }
   // The two 128x128 panels (the 0.85 and the T-QT), the 172-high landscape
-  // frames and both 96x54 frames are the compact ones.
-  CHECK(compactLayouts == 7);
+  // frames, both 96x54 frames, and both 72x40 OLED shapes are compact.
+  CHECK(compactLayouts == 9);
   CHECK(bottomLayouts > 0);
   {
     const Layout small = bootscreenmodel::layout(128, 128, false);

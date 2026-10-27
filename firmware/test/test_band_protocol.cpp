@@ -43,6 +43,7 @@
 #include "../libraries/espdisp_board/src/panel_transfer_plan.h"
 #include "../libraries/espdisp_board/src/panel_memory_clear.h"
 #include "../libraries/espdisp_board/src/panel_orientation.h"
+#include "../libraries/espdisp_board/src/ssd1315_framebuffer.h"
 #include "../libraries/espdisp_board/src/touch_gesture.h"
 #include "../libraries/espdisp_board/src/touch_map.h"
 
@@ -99,6 +100,24 @@ static std::string firmwareSourcePath(const char *relative) {
 
 int main() {
   bool dropped;
+
+  // --- SSD1315 72x40 monochrome page framebuffer -------------------------
+  {
+    uint8_t framebuffer[ssd1315::FRAME_BYTES] = {};
+    ssd1315::clear(framebuffer);
+    const uint8_t pixels[] = {
+        0xFF, 0xFF,  // white: bit set at x=1, y=7
+        0x00, 0x00,  // black: bit clear at x=2, y=7
+        0x07, 0xE0,  // green: luma over the monochrome threshold
+        0xF8, 0x00,  // red: luma below the monochrome threshold
+    };
+    CHECK(ssd1315::copyRgb565Be(framebuffer, 1, 7, 3, 9, pixels));
+    CHECK_EQ(framebuffer[1], 0x80);
+    CHECK_EQ(framebuffer[2], 0x00);
+    CHECK_EQ(framebuffer[ssd1315::WIDTH + 1], 0x01);
+    CHECK_EQ(framebuffer[ssd1315::WIDTH + 2], 0x00);
+    CHECK(!ssd1315::copyRgb565Be(framebuffer, 0, 0, 73, 1, pixels));
+  }
 
   // --- WiFi recovery: unreachable APs back off without rebooting ----------
   {
@@ -2902,6 +2921,11 @@ int main() {
       CHECK(board::variantFromS3Probe(mib8, false, false, false, false, false,
                                       -1, /*codec085*/ false, false,
                                       /*readback*/ -1) == Variant::Unknown);
+      CHECK(board::variantFromS3Probe(mib8, false, false, false, false, false,
+                                      -1, /*codec085*/ false, false,
+                                      /*readback*/ -1,
+                                      /*xiaoml*/ true) ==
+            Variant::SeeedXiaoml);
       // The 0.85 answers its codec bus; whatever SDA says, it stays the 0.85.
       CHECK(board::variantFromS3Probe(mib8, false, false, false, false, false,
                                       -1, /*codec085*/ true, false,
@@ -2937,6 +2961,10 @@ int main() {
       CHECK(!boarddetectmodel::panelReadbackNeeded(plan, mib8, probes,
                                                    plan.probeCount));
       probes[0] = boarddetectmodel::addressProbeEvidence(true, 0, true);
+      CHECK(!boarddetectmodel::panelReadbackNeeded(plan, mib8, probes,
+                                                   plan.probeCount));
+      probes[0] = {boarddetectmodel::ProbeStatus::Started, 0};
+      probes[7] = {boarddetectmodel::ProbeStatus::Started, 2};
       CHECK(!boarddetectmodel::panelReadbackNeeded(plan, mib8, probes,
                                                    plan.probeCount));
       // No other family reads a panel before it knows the board.
@@ -3046,7 +3074,7 @@ int main() {
         board::detectionPlanForPlatform(board::Platform::Esp32S3);
     CHECK(s3Plan.resolution == ResolutionPolicy::ExactlyOne);
     CHECK(board::GENERATED_MAX_PROBE_COUNT >= s3Plan.probeCount);
-    CHECK(s3Plan.probeCount == 7);
+    CHECK(s3Plan.probeCount == 8);
     // The 0.85's codec bus (ES8311 0x18, ES7210 0x40) runs only on 8 MiB
     // parts, where it is the one signal between the 0.85 and the XIAO.
     CHECK(s3Plan.probes[0].sda == 42 && s3Plan.probes[0].scl == 41);
@@ -3094,6 +3122,10 @@ int main() {
     CHECK(s3Plan.probes[6].resetPin == 1);
     CHECK(s3Plan.probes[6].resetLowMs == 20);
     CHECK(s3Plan.probes[6].resetReleaseWaitMs == 300);
+    CHECK(s3Plan.probes[7].sda == 5 && s3Plan.probes[7].scl == 6);
+    CHECK(s3Plan.probes[7].addressCount == 2);
+    CHECK(s3Plan.probes[7].addresses[0] == 0x3C);
+    CHECK(s3Plan.probes[7].addresses[1] == 0x6A);
     {
       // A bus that acknowledges the reserved canary address is held low (the
       // knob's unpowered GC9A01 clamps GPIO11, which is the 1.85C's SDA), so
@@ -3146,7 +3178,9 @@ int main() {
       seen[4] = {ProbeStatus::Started, 1};
       CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 6, seen));
       CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 5, seen));
-      CHECK(!boarddetectmodel::shouldRunProbe(s3Plan, 7, seen));
+      // The XIAOML bus is independent and non-invasive, so it still runs;
+      // only the knob's GPIO1 rail pulse is suppressed by a prior answer.
+      CHECK(boarddetectmodel::shouldRunProbe(s3Plan, 7, seen));
       // Skipped evidence stays NotRun, so the knob candidate cannot match and
       // the board that answered still resolves on its own.
       seen[6] = {};
@@ -3350,7 +3384,7 @@ int main() {
       CHECK(geometry.valid());
     }
 
-    ProbeEvidence s3Evidence[7] = {};
+    ProbeEvidence s3Evidence[board::GENERATED_MAX_PROBE_COUNT] = {};
     // An 8 MiB part whose codec probe never ran is neither 8 MiB carrier.
     detected = board::detectFromEvidence(
         board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 7);
@@ -3376,6 +3410,16 @@ int main() {
         0, nullptr, nullptr, &xiaoPanelSilent);
     CHECK(detected.variant == Variant::XiaoS3Bare);
     CHECK(detected.matchedCandidates == 1);
+    // The XIAOML OLED and LSM6DS3TR-C share GPIO5/GPIO6; either read-only
+    // acknowledgement names the carrier and suppresses the unrelated SPI
+    // readback on the colour XIAO's pins.
+    s3Evidence[7] = {ProbeStatus::Started, 2};
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence,
+        board::GENERATED_MAX_PROBE_COUNT);
+    CHECK(detected.variant == Variant::SeeedXiaoml);
+    CHECK(detected.matchedCandidates == 1);
+    s3Evidence[7] = {};
     // Silence on the codec bus alone names neither XIAO.
     detected = board::detectFromEvidence(
         board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 7);
@@ -4230,6 +4274,36 @@ int main() {
     CHECK(x.panel->spiMode == 0);
     CHECK(board::supportsDoom(Variant::XiaoSt7735));
     CHECK(!board::supportsAudio(Variant::XiaoSt7735));
+  }
+
+  // --- the Seeed XIAOML Kit (XIAO Sense + SSD1315 OLED) -------------------
+  {
+    using board::Variant;
+    const board::Config &kit = board::configFor(Variant::SeeedXiaoml);
+    CHECK(kit.variant == Variant::SeeedXiaoml);
+    CHECK(strcmp(board::variantToken(kit.variant), "xiaoml-042") == 0);
+    CHECK(board::variantFromName("xiaoml-042") == Variant::SeeedXiaoml);
+    CHECK(strcmp(board::targetToken(kit.variant), "s3") == 0);
+    CHECK(kit.platform == &board::PLATFORM_ESP32_S3);
+    CHECK(kit.panel->driver == board::PanelDriver::Ssd1315);
+    CHECK(kit.panel->profile == board::PanelProfile::Ssd1315_72x40);
+    CHECK(kit.isI2c() && !kit.isQspi() && !kit.isDsi());
+    CHECK(kit.pinMosi == 5 && kit.pinSclk == 6);
+    CHECK(kit.pinData1 == board::NO_PIN && kit.pinData2 == board::NO_PIN &&
+          kit.pinData3 == board::NO_PIN && kit.pinCs == board::NO_PIN &&
+          kit.pinDc == board::NO_PIN && kit.pinRst == board::NO_PIN);
+    CHECK(kit.pinBootButton == 0 && kit.hasBootButton());
+    CHECK(!kit.hasTouch() && !kit.hasBattery() && !kit.hasMotion() &&
+          !kit.hasBacklightPin() && !kit.hasRgbLed());
+    CHECK(kit.motion == board::MotionController::None);
+    CHECK(kit.serialTransport() == board::SerialTransport::NativeUsbCdc);
+    CHECK(kit.panel->width == 72 && kit.panel->height == 40);
+    CHECK(kit.panel->memoryWidth == 128 && kit.panel->memoryHeight == 64);
+    CHECK(kit.panel->colOffset == 28 && kit.panel->rowOffset == 0);
+    CHECK(kit.panel->pixelClockHz == 400000);
+    CHECK(!kit.panel->supportsCommandRotation);
+    CHECK(!board::supportsDoom(kit.variant));
+    CHECK(!board::supportsAudio(kit.variant));
   }
 
   // --- the LilyGO T-QT Pro (S3 4 MiB family) board entry -------------------
@@ -8058,7 +8132,7 @@ int main() {
     CHECK(board::formatProfileHint(board::Platform::Esp32S3, hint,
                                    sizeof(hint)));
     CHECK(strcmp(hint,
-                 "st7735-042|xiao-s3-bare|gc9107|st7789-130|st7789-154|"
+                 "st7735-042|xiao-s3-bare|xiaoml-042|gc9107|st7789-130|st7789-154|"
                  "st7789-190|co5300|st77916|gc9a01-knob-128|st7789-twatch|"
                  "auto") == 0);
     CHECK(board::formatProfileHint(board::Platform::Esp32C6, hint,

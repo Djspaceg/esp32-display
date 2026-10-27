@@ -206,7 +206,7 @@ DETECTION_RESOLUTIONS = {"first_match", "exactly_one"}
 PROBE_RELEASES = {"never", "always", "on_success_no_ack"}
 # "none" is a board with no panel at all (the bare XIAO ESP32-S3): the
 # firmware runs it headless and the app lists it as a device without a screen.
-PANEL_BUSES = {"spi", "qspi", "mipi_dsi", "none"}
+PANEL_BUSES = {"spi", "qspi", "i2c", "mipi_dsi", "none"}
 # What a candidate requires of its family's SPI panel readback: a controller
 # answering on the panel lines, nothing answering there, or no readback.
 PANEL_READBACKS = ("none", "answers", "silent")
@@ -418,17 +418,21 @@ def _validate_motion(descriptor: Dict[str, Any]) -> None:
             "%s: a %s answers at 0x%02X" % (source, controller, expected))
 
 
+def doom_capable_panel(descriptor: Dict[str, Any]) -> bool:
+    """Whether the screen can present Doom's minimum 96x54 framebuffer."""
+    return (has_panel(descriptor) and descriptor["panel"]["width"] >= 96 and
+            descriptor["panel"]["height"] >= 54)
+
+
 def _validate_doom_capability(descriptor: Dict[str, Any]) -> None:
-    """Doom is a family capability, never a per-board opt-in: a board with a
-    screen runs it exactly when its family image carries it, and a board
-    without one never does."""
+    """Doom follows its family image and the panel's usable game geometry."""
     expected = (descriptor["family"]["requires_doom_wad"] and
-                has_panel(descriptor))
+                doom_capable_panel(descriptor))
     if descriptor["capabilities"]["doom"] != expected:
         raise DescriptorError(
             "%s: capabilities.doom must equal family.requires_doom_wad on a "
-            "board with a panel, and be false without one: a board runs Doom "
-            "exactly when its family image carries it and it has a screen"
+            "board with a Doom-capable 96x54-or-larger panel, and be false "
+            "otherwise"
             % _source_name(descriptor))
 
 

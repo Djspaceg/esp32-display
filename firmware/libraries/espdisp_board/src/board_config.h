@@ -1,7 +1,7 @@
 // Which supported board this binary is running on, and every board fact that
 // follows from that.
 //
-// Fifteen board profiles are supported across the c3, c6, s3, and p4 release
+// Sixteen board profiles are supported across the c3, c6, s3, and p4 release
 // families. Each family has one artifact; runtime profile selection keeps the
 // physical panel/controller token independent from that family identity:
 //
@@ -17,6 +17,8 @@
 //                              battery ADC and eight addressable RGB LEDs
 //   XIAO ESP32-S3 + 0.42-inch  ST7735 96x54 over SPI, BOOT on GPIO0,
 //                              backlight always on, nothing else
+//   Seeed XIAOML Kit           SSD1315 72x40 monochrome OLED over I2C,
+//                              GPIO5 SDA, GPIO6 SCL, LSM6DS3TR-C present
 //   ESP32-S3-LCD-1.3           ST7789V2 240x240 over SPI, QMI8658A IMU on
 //                              I2C GPIO47/48, battery ADC and one RGB LED
 //   ESP32-S3-LCD-1.9           ST7789V2 170x320 over SPI, QMI8658 IMU on
@@ -191,11 +193,10 @@ struct Config {
   // peripherals; keeping panel facts out of it makes composition executable
   // rather than two tables that can drift.
 
-  // Panel bus + control pins. pinMosi is the single data line on SPI boards
-  // and data lane 0 on QSPI boards - the same physical role, and the same
-  // union field in the IDF's spi_bus_config_t. Lanes 1-3 are NO_PIN on SPI
-  // boards. pinDc is NO_PIN on QSPI panels: the command envelope replaces the
-  // D/C line.
+  // Panel bus + control pins. pinMosi is the single data line on SPI boards,
+  // data lane 0 on QSPI boards, and SDA on an I2C panel; pinSclk is SCL for
+  // I2C. Lanes 1-3 are NO_PIN on SPI/I2C boards. pinDc is NO_PIN on QSPI
+  // panels: the command envelope replaces the D/C line.
   int8_t pinSclk;
   int8_t pinMosi;   // data0 on QSPI
   int8_t pinData1;
@@ -409,6 +410,9 @@ struct Config {
   bool isQspi() const {
     return panel != nullptr && panel->bus == PanelBus::Qspi;
   }
+  bool isI2c() const {
+    return panel != nullptr && panel->bus == PanelBus::I2c;
+  }
   bool isDsi() const {
     return panel != nullptr && panel->bus == PanelBus::MipiDsi;
   }
@@ -566,6 +570,46 @@ static const Config CONFIG_XIAO_ST7735_042 = {
     /* cs    */ 6,
     /* dc    */ 4,
     /* rst   */ 5,
+    /* bl    */ NO_PIN,
+    /* boot  */ 0,
+    /* led   */ NO_PIN,
+    TouchController::None,
+    /* touchSda */ NO_PIN,
+    /* touchScl */ NO_PIN,
+    /* touchRst */ NO_PIN,
+    /* touchInt */ NO_PIN,
+    PowerController::None,
+    /* batteryAdc */ NO_PIN,
+    /* adcScale */ 0,
+    /* batteryEnable */ NO_PIN,
+    /* chargeStatus */ NO_PIN,
+    MotionController::None,
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
+    /* pinBlEnable */ NO_PIN,
+    /* backlightInverted */ false,
+};
+
+/// Seeed XIAOML Kit: XIAO ESP32-S3 Sense and its 72x40 monochrome SSD1315
+/// OLED. GPIO5/GPIO6 are the XIAO's D4/D5 and carry the OLED's SDA/SCL; the
+/// LSM6DS3TR-C shares that bus at 0x6A, but is intentionally reported-only
+/// until a future feature owns its initialization and sampling. The Sense
+/// camera, microphone and SD slot are likewise not initialized here.
+static const Config CONFIG_SEEED_XIAOML = {
+    Variant::SeeedXiaoml,
+    "Seeed Studio XIAOML Kit (SSD1315 OLED)",
+    &PLATFORM_ESP32_S3,
+    &PANEL_SSD1315_72X40,
+    /* sclk  */ 6,
+    /* mosi  */ 5,
+    /* data1 */ NO_PIN,
+    /* data2 */ NO_PIN,
+    /* data3 */ NO_PIN,
+    /* cs    */ NO_PIN,
+    /* dc    */ NO_PIN,
+    /* rst   */ NO_PIN,
     /* bl    */ NO_PIN,
     /* boot  */ 0,
     /* led   */ NO_PIN,
@@ -1103,14 +1147,15 @@ inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
                                   int gpio4Millivolts = -1,
                                   bool codec085Bus = true,
                                   bool twatchBus = false,
-                                  int panelReadback = -1) {
+                                  int panelReadback = -1,
+                                  bool xiaomlBus = false) {
   // Generated probe order: the 0.85's 8 MiB codec bus first, then the 1.85C
   // bus before the 1.75C's, because the 1.75C's SDA is the 1.85C V2's
   // amplifier enable, then the T-Watch-S3's main bus, after both buses it
   // shares pins with. The answers go through the same probe loop the device
   // runs, so its skip rules apply here too.
   const bool answers[] = {codec085Bus, st77916Bus, co5300Bus, twatchBus,
-                          st7789Bus, qmi8658Bus47_48, knob128Bus};
+                          st7789Bus, qmi8658Bus47_48, knob128Bus, xiaomlBus};
   const auto &plan = detectionPlanForPlatform(Platform::Esp32S3);
   boarddetectmodel::ProbeEvidence evidence[GENERATED_MAX_PROBE_COUNT] = {};
   boarddetectmodel::runI2cProbes(

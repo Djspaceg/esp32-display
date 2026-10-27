@@ -368,7 +368,17 @@ inline Screen layout(int width, int height, bool round, const char *name,
       }
     }
     if (nameScale < 1) nameScale = 1;
-    if (nameCount > MAX_NAME_LINES) continue;
+    // A micro display can fit the rescue title and profile token but not a
+    // useful rendering of a long product name. The compact form is still
+    // actionable, whereas continuing would return an empty screen.
+    if (nameCount > MAX_NAME_LINES) {
+      Screen compact = compactLayout(screen, boxH, profile, warning);
+      if (compact.lineCount != 0 || warning == nullptr) return compact;
+      // A full CFGBOARD warning cannot fit below RESCUE and the profile on a
+      // 72x40 OLED. Keep the actionable profile on glass; rescue.ino reports
+      // the complete warning over serial.
+      return compactLayout(screen, boxH, profile, nullptr);
+    }
     // The warning wraps like the name, onto at most two lines, at the name's
     // scale or, failing that, the smallest.
     char warningLines[MAX_NAME_LINES][MAX_LINE_CHARS + 1] = {};
@@ -380,7 +390,12 @@ inline Screen layout(int width, int height, bool round, const char *name,
             warning, (uint8_t)((boxW + warningScale) / (6 * warningScale)),
             warningLines);
         if (warningCount <= 2) break;
-        if (warningScale == 1) return compactLayout(screen, boxH, profile, warning);
+        if (warningScale == 1) {
+          Screen compact = compactLayout(screen, boxH, profile, warning);
+          return compact.lineCount != 0 ? compact
+                                        : compactLayout(screen, boxH, profile,
+                                                        nullptr);
+        }
       }
     }
     const int nameGap = 4 * nameScale;
@@ -395,7 +410,10 @@ inline Screen layout(int width, int height, bool round, const char *name,
     // Without a warning the name may use the margin, as it always has; a
     // warning that would not fit beside it takes the name's place instead.
     if (total > boxH && warning != nullptr) {
-      return compactLayout(screen, boxH, profile, warning);
+      Screen compact = compactLayout(screen, boxH, profile, warning);
+      return compact.lineCount != 0 ? compact
+                                    : compactLayout(screen, boxH, profile,
+                                                    nullptr);
     }
 
     int y = (height - total) / 2;

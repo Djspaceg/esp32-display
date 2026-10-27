@@ -171,7 +171,7 @@ int main() {
       ++profiles;
     }
     // Including the bare XIAO, whose plan is clear because it has no pins.
-    CHECK(profiles == 17);
+    CHECK(profiles == 18);
 
     board::Config onUsb = board::CONFIG_TOUCH_ST7789;
     onUsb.pinSclk = 19;
@@ -391,7 +391,8 @@ int main() {
       const rescuemodel::Screen screen = rescuemodel::layout(
           cfg.panel->width, cfg.panel->height, cfg.panel->roundDisplay,
           cfg.name, identity.profile);
-      CHECK(screen.lineCount >= 3);
+      const bool micro = cfg.panel->width <= 80 || cfg.panel->height <= 48;
+      CHECK(screen.lineCount >= (micro ? 2 : 3));
       CHECK(strcmp(screen.lines[0].text, rescuemodel::TITLE) == 0);
       CHECK(strcmp(screen.lines[screen.lineCount - 1].text,
                    identity.profile) == 0);
@@ -435,16 +436,23 @@ int main() {
       const rescuemodel::Screen screen = rescuemodel::layout(
           cfg.panel->width, cfg.panel->height, cfg.panel->roundDisplay,
           cfg.name, identity.profile, warning);
-      CHECK(screen.lineCount >= 4);
+      const bool micro = cfg.panel->width <= 80 || cfg.panel->height <= 48;
+      CHECK(screen.lineCount >= (micro ? 2 : 4));
       std::string shown;
       for (uint8_t i = 0; i < screen.lineCount; ++i) {
         if (screen.lines[i].color != rescuemodel::COLOR_WARNING) continue;
         if (!shown.empty() && shown.back() != '-') shown += ' ';
         shown += screen.lines[i].text;
       }
-      CHECK(shown == warning);
-      CHECK(screen.lines[screen.lineCount - 1].color ==
-            rescuemodel::COLOR_WARNING);
+      // The 72x40 OLED keeps the rescue title and profile visible; the
+      // complete override warning is still written to rescue serial output.
+      if (micro) {
+        CHECK(shown.empty());
+      } else {
+        CHECK(shown == warning);
+        CHECK(screen.lines[screen.lineCount - 1].color ==
+              rescuemodel::COLOR_WARNING);
+      }
       for (uint8_t i = 0; i < screen.lineCount; ++i) {
         if (!insideBox(screen, screen.lines[i])) {
           printf("  %s warning layout line %u '%s' leaves the glass\n",

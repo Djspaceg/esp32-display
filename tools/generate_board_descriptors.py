@@ -58,6 +58,7 @@ SERIAL_ENUMS = {
 PANEL_BUS_ENUMS = {
     "spi": "PanelBus::Spi",
     "qspi": "PanelBus::Qspi",
+    "i2c": "PanelBus::I2c",
     "mipi_dsi": "PanelBus::MipiDsi",
 }
 TOUCH_ENUMS = {
@@ -198,9 +199,8 @@ def render_variants(descriptors: Sequence[Dict[str, Any]]) -> str:
             % (identity["variant"], identity["variant_value"])
         )
     lines.append("};\n\n")
-    # Doom is the family's on every board with a screen: the validator has
-    # required capabilities.doom to equal family.requires_doom_wad there, and
-    # to be false on a board without one.
+    # Doom stays in a family artifact that carries its WAD, but is offered
+    # only on a panel with enough pixels to show its 96x54 framebuffer.
     doom = [
         "variant == Variant::%s" % item["identity"]["variant"]
         for item in ordered if item["capabilities"]["doom"]

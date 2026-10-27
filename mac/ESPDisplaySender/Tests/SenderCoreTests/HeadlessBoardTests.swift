@@ -110,6 +110,12 @@ final class HeadlessBoardTests: XCTestCase {
         XCTAssertFalse(GamesDataRow.isOffered(for: panel, manager: manager))
         XCTAssertTrue(
             GamesDataRow.isOffered(for: barePanel(profile: "st7735-042"), manager: manager))
+        XCTAssertFalse(
+            GamesDataRow.isOffered(for: barePanel(profile: "xiaoml-042"), manager: manager))
+        XCTAssertFalse(
+            GamesDataRow.supportsDoom(chip: "esp32s3", profile: "xiaoml-042"))
+        XCTAssertTrue(
+            GamesDataRow.supportsDoom(chip: "esp32s3", profile: "st7735-042"))
     }
 
     func testABoardThatAnnouncesNoScreenHasNoneWhateverItsProfile() {

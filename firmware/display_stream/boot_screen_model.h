@@ -134,6 +134,20 @@ inline Layout layout(int width, int height, bool round) {
   l.width = (int16_t)width;
   l.height = (int16_t)height;
   l.round = round;
+  if (width <= 80 || height <= 48) {
+    // The XIAOML Kit's 72x40 OLED cannot hold the 120x120 boot image. Keep
+    // its useful boot state: one unscaled status line and a bottom progress
+    // bar, instead of drawing an unrecognizable cropped image.
+    l.compact = true;
+    l.image = {0, 0, 0, 0};
+    l.textScale = 1;
+    l.textY = 1;
+    l.textOverImage = false;
+    const int barW = width * 3 / 5;
+    l.bar = {(int16_t)((width - barW) / 2), (int16_t)(height - 5),
+             (int16_t)barW, 4};
+    return l;
+  }
   const int imageW = bootimage::WIDTH;
   const int imageH = bootimage::HEIGHT;
   l.compact = height < 2 * imageH || width < imageW;

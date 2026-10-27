@@ -1,0 +1,221 @@
+schema = 1
+key = "s3-seeed-xiaoml-kit"
+catalog_order = 7
+name = "Seeed Studio XIAOML Kit (SSD1315 OLED)"
+hardware = ["Seeed Studio XIAOML Kit", "Seeed Studio XIAO ESP32-S3 Sense"]
+
+# XIAO ESP32-S3 Sense (ESP32-S3R8, 8 MB OPI PSRAM and 8 MB flash) plugged
+# into Seeed's XIAOML Kit expansion board. The board descriptor schema has no
+# camera field, so these documented camera pins are deliberately comments for
+# the follow-on camera work rather than a new format: XCLK=GPIO10,
+# SCCB_SDA=GPIO40, SCCB_SCL=GPIO39, D0..D7=GPIO15/17/18/16/14/12/11/48,
+# VSYNC=GPIO38, HREF=GPIO47, PCLK=GPIO13; no PWDN or reset GPIO. The detachable
+# sensor is OV3660 on current units; the product transition can ship OV2640.
+# The kit also has a PDM microphone and SD card slot, neither used here.
+
+[migration]
+firmware_config = "legacy"
+config_symbol = "CONFIG_SEEED_XIAOML"
+
+[identity]
+target = "s3"
+chip = "esp32s3"
+profile = "xiaoml-042"
+partition = "universal-8m-doom-saves-ota"
+variant = "SeeedXiaoml"
+variant_value = 18
+legacy_targets = []
+
+[family]
+platform_key = "s3"
+build_target = "s3-universal"
+fqbn = "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=8M,PSRAM=opi,PartitionScheme=custom"
+partition_csv = "partitions_s3.csv"
+extra_flags = ["-DESPDISP_DOOM_RUNTIME"]
+extra_library_dirs = ["firmware"]
+fqbn_options = []
+flash_bytes = [8388608, 16777216, 33554432]
+common_layout_bytes = 8388608
+requires_doom_wad = true
+bootloader_address = 0
+partitions_address = 32768
+boot_app0_address = 57344
+app_address = 65536
+blurb = "Universal ESP32-S3 display firmware"
+
+[platform]
+use_psram_frame_buffers = true
+use_raw_lwip_receive_task = true
+wifi = "native"
+identity_source = "wifi_station_mac"
+serial = "native_usb_cdc"
+
+[capacity]
+minimum_flash_bytes = 8388608
+
+[panel]
+# Seeed XIAOML kit: monochrome SSD1315-compatible 0.42-inch OLED. The
+# 72x40 glass exposes controller columns 28..99 on a 128-column GDDRAM;
+# panel_init_i2c.h owns that page/column address translation.
+symbol = "PANEL_SSD1315_72X40"
+profile = "Ssd1315_72x40"
+driver = "Ssd1315"
+bus = "i2c"
+width = 72
+height = 40
+memory_width = 128
+memory_height = 64
+pixel_clock_hz = 400000
+spi_mode = 0
+col_offset = 28
+row_offset = 0
+orientation_offset = 0
+invert_color = false
+round_display = false
+supports_command_rotation = false
+color_order = "rgb"
+data_endian = "big"
+pixel_depth = 16
+dsi_data_lanes = 0
+dsi_lane_mbps = 0
+hsync_back_porch = 0
+hsync_pulse_width = 0
+hsync_front_porch = 0
+vsync_back_porch = 0
+vsync_pulse_width = 0
+vsync_front_porch = 0
+window_follows_mirror = false
+clear_memory = false
+
+[carrier]
+# XIAO D4 (GPIO5) is SDA and D5 (GPIO6) is SCL. The generic carrier names
+# retain their source-compatible display-data/clock roles for this I2C panel.
+pin_sclk = 6
+pin_mosi = 5
+pin_data1 = -1
+pin_data2 = -1
+pin_data3 = -1
+pin_cs = -1
+pin_dc = -1
+pin_rst = -1
+pin_bl = -1
+pin_boot = 0
+pin_rgb_led = -1
+
+[touch]
+controller = "none"
+sda = -1
+scl = -1
+reset = -1
+interrupt = -1
+addresses = []
+panel_short = 40
+panel_long = 72
+raw_x_mirrored = false
+raw_y_mirrored = false
+rotate_clockwise = true
+
+[led]
+channel_order = "rgb"
+pixel_count = 0
+
+[gesture]
+swipe_min_px = 24
+tap_max_move_px = 12
+tap_max_ms = 400
+long_press_ms = 600
+press_max_ms = 10000
+
+[orientation]
+offsets = [[28, 0], [0, 28], [28, 24], [24, 28]]
+mirror_x_supported = true
+quarter_turns = [0, 2]
+
+[motion]
+# LSM6DS3TR-C at 0x6A shares the OLED bus. No supported driver exists; do not
+# claim orientation until a future feature owns initialization and sampling.
+controller = "none"
+address = 0
+x_axis = 0
+x_sign = 1
+y_axis = 1
+y_sign = 1
+
+[reset]
+expander = "none"
+expander_address = 0
+panel_output = 0
+touch_output = 0
+
+[backlight]
+kind = "none"
+enable_pin = -1
+inverted = false
+
+[power]
+controller = "none"
+battery_adc = -1
+battery_adc_scale = 0
+battery_enable = -1
+charge_status = -1
+axp_address = 0
+
+[serial]
+transport = "native_usb_cdc"
+bridge = "none"
+rx = -1
+tx = -1
+
+[audio]
+amp = "none"
+codec = "none"
+mic = "none"
+speaker_bus = "none"
+mic_bus = "none"
+pin_playback_mclk = -1
+pin_playback_bclk = -1
+pin_playback_lrck = -1
+pin_dout = -1
+pin_capture_mclk = -1
+pin_capture_bclk = -1
+pin_capture_lrck = -1
+pin_din = -1
+pin_pdm_clock = -1
+pin_amp_enable = -1
+codec_i2c_address = 0
+mic_i2c_address = 0
+playback_rate_hz = 0
+playback_channels = 0
+capture_rate_hz = 0
+capture_channels = 0
+
+[capabilities]
+# The shared S3 bundle still includes the Doom runtime and WAD, but this
+# 72x40 monochrome panel cannot present Doom's 96x54 framebuffer.
+doom = false
+audio = false
+
+[compile]
+selector = ""
+macros = []
+
+[detection]
+# I2C address probes are read-only. The SSD1315 OLED acknowledges 0x3C and
+# the LSM6DS3TR-C acknowledges 0x6A on XIAO D4/D5 (GPIO5/GPIO6); either is
+# enough to establish the attached XIAOML carrier before display GPIOs drive.
+order = 75
+resolution = "exactly_one"
+no_match = "unknown"
+kind = "i2c_any_ack"
+flash_min_exclusive = 0
+flash_max_inclusive = 8388608
+sda = 5
+scl = 6
+frequency_hz = 100000
+scan_first = 0
+scan_last = 0
+addresses = [60, 106]
+reset_pin = -1
+reset_low_ms = 0
+reset_release_wait_ms = 0
+release = "always"

@@ -534,10 +534,35 @@ inline bool panelReadbackNeeded(const FamilyDetectionPlan &plan,
     const CandidateRule &candidate = plan.candidates[i];
     if (candidate.panelReadback != PanelReadback::NotChecked &&
         candidateMatches(candidate, flashBytes, evidence, evidenceCount)) {
-      return true;
+      bool otherProbeAnswered = false;
+      for (size_t probe = 0; probe < evidenceCount; ++probe) {
+        if (probe != candidate.probeIndex &&
+            evidence[probe].status == ProbeStatus::Started &&
+            evidence[probe].ackCount > 0) {
+          otherProbeAnswered = true;
+          break;
+        }
+      }
+      if (!otherProbeAnswered) {
+        return true;
+      }
     }
   }
   return false;
+}
+
+inline bool panelReadbackFallbackMatches(const CandidateRule &candidate,
+                                         const ProbeEvidence *evidence,
+                                         size_t evidenceCount) {
+  if (candidate.panelReadback == PanelReadback::NotChecked) return true;
+  for (size_t probe = 0; probe < evidenceCount; ++probe) {
+    if (probe != candidate.probeIndex &&
+        evidence[probe].status == ProbeStatus::Started &&
+        evidence[probe].ackCount > 0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 inline Evaluation evaluate(const FamilyDetectionPlan &plan,
@@ -557,7 +582,8 @@ inline Evaluation evaluate(const FamilyDetectionPlan &plan,
         !senseMatches(candidate, senses, senseCount) ||
         !panelIdMatches(plan, candidate, panelId) ||
         !touchConfigMatches(candidate, touchConfig) ||
-        !panelReadbackMatches(candidate, readback)) {
+        !panelReadbackMatches(candidate, readback) ||
+        !panelReadbackFallbackMatches(candidate, evidence, evidenceCount)) {
       continue;
     }
     if (matches == 0) selected = candidate.variantValue;

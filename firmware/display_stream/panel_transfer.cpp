@@ -10,17 +10,18 @@
 
 #include "dma_gate.h"
 
-#if !defined(CONFIG_IDF_TARGET_ESP32S3)
 static esp_err_t queueDirect(esp_lcd_panel_handle_t panel,
                              const board::Config &cfg, int x0, int y0, int x1,
                              int y1, const void *pixels) {
-  dmaMarkQueued();
+  // SSD1315 I2C writes complete synchronously; they have no color-transfer
+  // ISR to retire the SPI DMA gate.
+  const bool asynchronous = !cfg.isI2c();
+  if (asynchronous) dmaMarkQueued();
   const esp_err_t err =
       boarddisplay::drawBitmap(panel, cfg, x0, y0, x1, y1, pixels);
-  if (err != ESP_OK) dmaUnmarkFailed();
+  if (err != ESP_OK && asynchronous) dmaUnmarkFailed();
   return err;
 }
-#endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 DMA_ATTR uint8_t
@@ -74,6 +75,14 @@ esp_err_t queuePanelTransferStaging(
   if (staging.slot >= paneltransfer::STAGING_SLOT_COUNT ||
       staging.pixels != panelTransferStaging[staging.slot]) {
     return ESP_ERR_INVALID_ARG;
+  }
+  if (cfg.isI2c()) {
+    const esp_err_t err =
+        boarddisplay::drawBitmap(panel, cfg, x0, y0, x1, y1, staging.pixels);
+    if (!releasePanelTransferStagingReservation(staging)) {
+      return ESP_ERR_INVALID_STATE;
+    }
+    return err;
   }
 
   portENTER_CRITICAL(&stagingOwnershipMux);
@@ -133,6 +142,9 @@ esp_err_t queuePanelBitmap(esp_lcd_panel_handle_t panel,
   if (panel == nullptr || pixels == nullptr || x0 < 0 || y0 < 0 || x1 <= x0 ||
       y1 <= y0) {
     return ESP_ERR_INVALID_ARG;
+  }
+  if (cfg.isI2c()) {
+    return queueDirect(panel, cfg, x0, y0, x1, y1, pixels);
   }
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)

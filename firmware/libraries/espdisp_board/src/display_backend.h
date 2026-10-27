@@ -4,6 +4,7 @@
 #include <esp_lcd_panel_ops.h>
 #include "board_config.h"
 #include "panel_init.h"
+#include "panel_init_i2c.h"
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
 #include "panel_init_dsi.h"
 #endif
@@ -19,6 +20,10 @@ inline bool init(const board::Config &cfg, spi_host_device_t spiHost,
       !board::platformSupportsPanel(*cfg.platform, *cfg.panel)) {
     return false;
   }
+  if (cfg.isI2c()) {
+    return boardpaneli2c::init(cfg, maxTransfer, doneCb, userCtx, outIo,
+                               outPanel);
+  }
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
   if (cfg.panel->bus == board::PanelBus::MipiDsi) {
     return boardpaneldsi::init(cfg, maxTransfer, doneCb, userCtx, outIo,
@@ -32,6 +37,9 @@ inline bool init(const board::Config &cfg, spi_host_device_t spiHost,
 inline esp_err_t drawBitmap(esp_lcd_panel_handle_t panel,
                             const board::Config &cfg, int x0, int y0,
                             int x1, int y1, const void *pixels) {
+  if (cfg.isI2c()) {
+    return boardpaneli2c::drawBitmap(cfg, x0, y0, x1, y1, pixels);
+  }
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
   if (cfg.isDsi()) {
     return boardpaneldsi::drawBitmap(panel, x0, y0, x1, y1, pixels);
@@ -44,6 +52,10 @@ inline void applyOrientation(esp_lcd_panel_handle_t panel,
                              const board::Config &cfg, bool landscape,
                              uint8_t rotation,
                              bool installationMirrorX = false) {
+  if (cfg.isI2c()) {
+    boardpaneli2c::applyOrientation(cfg, rotation, installationMirrorX);
+    return;
+  }
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
   if (cfg.isDsi()) {
     boardpaneldsi::applyOrientation(cfg, landscape, rotation);
@@ -56,6 +68,7 @@ inline void applyOrientation(esp_lcd_panel_handle_t panel,
 
 inline bool setBrightness(esp_lcd_panel_handle_t panel,
                           const board::Config &cfg, uint8_t level) {
+  if (cfg.isI2c()) return boardpaneli2c::setBrightness(level);
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
   if (cfg.isDsi()) return boardpaneldsi::setBrightness(level);
 #endif
@@ -63,8 +76,9 @@ inline bool setBrightness(esp_lcd_panel_handle_t panel,
 }
 
 inline esp_err_t setDisplayEnabled(esp_lcd_panel_handle_t panel,
-                                   const board::Config &, bool enabled) {
+                                   const board::Config &cfg, bool enabled) {
   if (panel == nullptr) return ESP_ERR_INVALID_ARG;
+  if (cfg.isI2c()) return boardpaneli2c::setDisplayEnabled(enabled);
   return esp_lcd_panel_disp_on_off(panel, enabled);
 }
 
