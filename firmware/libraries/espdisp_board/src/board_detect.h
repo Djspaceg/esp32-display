@@ -286,6 +286,68 @@ inline board::Variant probeC3(bool verbose = true,
   return result.variant;
 }
 
+/// The family's SPI panel readback, bit-banged at the bench read's pace: a
+/// reset pulse on RST, then RDDID written on SCLK/SDA with CS low and DC low,
+/// then SPI_READBACK_BITS clocked in with SDA left floating. Every line is
+/// handed back as a plain input afterwards. Runs only after the I2C probes
+/// left a readback candidate possible (panelReadbackNeeded), so it drives the
+/// screen XIAO's own panel lines and, on a bare XIAO, unconnected pads.
+inline boarddetectmodel::PanelReadbackEvidence collectPanelReadback(
+    const boarddetectmodel::SpiReadbackProbePlan &plan, bool verbose) {
+#if !defined(CONFIG_IDF_TARGET_ESP32S3)
+  (void)plan;
+  (void)verbose;
+  return {};
+#else
+  using namespace boarddetectmodel;
+  const int8_t lines[] = {plan.sclk, plan.sda, plan.cs, plan.dc, plan.rst};
+  for (int8_t pin : lines) {
+    if (pin < 0) return {};
+  }
+  for (int8_t pin : lines) gpio_reset_pin((gpio_num_t)pin);
+  pinMode(plan.cs, OUTPUT);
+  digitalWrite(plan.cs, HIGH);
+  pinMode(plan.sclk, OUTPUT);
+  digitalWrite(plan.sclk, LOW);
+  pinMode(plan.dc, OUTPUT);
+  pinMode(plan.sda, OUTPUT);
+  pinMode(plan.rst, OUTPUT);
+  digitalWrite(plan.rst, LOW);
+  delay(SPI_READBACK_RESET_LOW_MS);
+  digitalWrite(plan.rst, HIGH);
+  delay(SPI_READBACK_RESET_WAIT_MS);
+
+  digitalWrite(plan.cs, LOW);
+  digitalWrite(plan.dc, LOW);
+  for (int bit = 7; bit >= 0; --bit) {
+    digitalWrite(plan.sda, (SPI_READBACK_COMMAND >> bit) & 1);
+    delayMicroseconds(SPI_READBACK_WRITE_HALF_US);
+    digitalWrite(plan.sclk, HIGH);
+    delayMicroseconds(SPI_READBACK_WRITE_HALF_US);
+    digitalWrite(plan.sclk, LOW);
+  }
+  pinMode(plan.sda, INPUT);
+  uint32_t bits = 0;
+  for (uint8_t i = 0; i < SPI_READBACK_BITS; ++i) {
+    delayMicroseconds(SPI_READBACK_READ_SETTLE_US);
+    digitalWrite(plan.sclk, HIGH);
+    delayMicroseconds(SPI_READBACK_READ_SETTLE_US);
+    bits = (bits << 1) | (uint32_t)(digitalRead(plan.sda) == HIGH ? 1 : 0);
+    digitalWrite(plan.sclk, LOW);
+  }
+  digitalWrite(plan.cs, HIGH);
+  for (int8_t pin : lines) pinMode(pin, INPUT);
+  const PanelReadbackEvidence evidence =
+      panelReadbackEvidenceFromBits(bits, SPI_READBACK_BITS);
+  if (verbose) {
+    Serial.printf("board: S3 panel readback on GPIO%d = %08lX (%s)\n",
+                  plan.sda, (unsigned long)evidence.bits,
+                  evidence.answered ? "a panel answered" : "nothing answered");
+  }
+  return evidence;
+#endif
+}
+
 inline board::Variant probeS3(bool verbose = true,
                               int *outCandidateCount = nullptr) {
   const uint32_t flashBytes = ESP.getFlashChipSize();
@@ -315,9 +377,14 @@ inline board::Variant probeS3(bool verbose = true,
       senses[i] = collectSense(plan.sensePins[i], verbose);
     }
   }
+  boarddetectmodel::PanelReadbackEvidence readback;
+  if (boarddetectmodel::panelReadbackNeeded(plan, flashBytes, evidence,
+                                            plan.probeCount)) {
+    readback = collectPanelReadback(*plan.panelReadbackProbe, verbose);
+  }
   const board::DetectionResult result = board::detectFromEvidence(
       board::COMPILED_PLATFORM.platform, flashBytes, evidence, plan.probeCount,
-      senses, plan.senseCount);
+      senses, plan.senseCount, nullptr, nullptr, &readback);
   if (outCandidateCount != nullptr) {
     *outCandidateCount = result.matchedCandidates;
   }

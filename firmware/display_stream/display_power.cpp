@@ -105,6 +105,7 @@ uint8_t currentBrightness() {
 // call before the panel exists: the panel path does nothing until
 // initDisplay() has run.
 void driveBrightness(uint8_t level) {
+  if (!screenPresent()) return;  // no backlight and no panel to dim
   if (bcfg->isDsi() && panel != nullptr) {
     boarddisplay::setBrightness(panel, *bcfg, level);
   } else if (bcfg->hasBacklightPin()) {
@@ -125,6 +126,7 @@ static bool panelDisplayEnabled = true;
 // and host sleep use the driver's real display command; touch wake temporarily
 // turns a sleeping panel back on, preserving the existing ten-second peek.
 void applyBacklight() {
+  if (!screenPresent()) return;
   const bool shouldEnable = panelstate::displayShouldBeEnabled(
       panelManuallyOff, displaySleeping, touchWakeActive());
   if (panel != nullptr && shouldEnable != panelDisplayEnabled) {
@@ -160,7 +162,7 @@ bool identifyPhaseHigh = false;
 // If the pulse went through the reported path, every telemetry packet during an
 // identify would carry a different number and the manager's slider would twitch.
 void updateIdentify() {
-  if (identifyUntil == 0) return;
+  if (identifyUntil == 0 || !screenPresent()) return;
   uint32_t now = millis();
   if ((int32_t)(now - identifyUntil) >= 0) {
     identifyUntil = 0;

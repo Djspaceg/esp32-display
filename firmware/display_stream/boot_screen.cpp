@@ -175,6 +175,11 @@ bool show(Stage next) {
   // Redrawing the current stage keeps how far the WiFi join's bar has got.
   if (next != stage) permille = bootscreenmodel::viewFor(next).permille;
   stage = next;
+  // No screen: the stage is still kept and logged, nothing is drawn.
+  if (!screenPresent()) {
+    logStage();
+    return false;
+  }
   const bool ok = drawAll(currentLayout());
   logStage();
   return ok;
@@ -184,6 +189,10 @@ void advance(Stage next) {
   if (next == stage && next != Stage::Failed) return;
   stage = next;
   permille = bootscreenmodel::viewFor(next).permille;
+  if (!screenPresent()) {
+    logStage();
+    return;
+  }
   repaint();
   logStage();
 }
@@ -193,7 +202,7 @@ void joining(uint32_t elapsedMs, uint32_t timeoutMs) {
     advance(Stage::JoiningWifi);
   }
   permille = bootscreenmodel::joiningPermille(elapsedMs, timeoutMs);
-  if (released) return;
+  if (released || !screenPresent()) return;
   const Layout l = currentLayout();
   if (bootscreenmodel::barFill(l, permille) != shownFill) repaint();
 }

@@ -363,19 +363,23 @@ void setup() {
     }
   }
   if (boardVariant == board::Variant::Unknown) {
+    // No detector named the board, so no panel, peripheral or carrier pin of
+    // any board may be driven. It still runs, headless: WiFi, the serial
+    // command set and firmware updates, with CFGBOARD to name the board.
     boarddetect::darkenUnresolvedBacklight(board::COMPILED_PLATFORM.platform);
+    bcfg = &board::headlessConfigFor(board::COMPILED_PLATFORM.platform);
+    beginSerialConfig(*bcfg);
     beginSerialRecovery();
-    Serial.println("board: FATAL no unique compatible profile; display, network, "
-                   "and streaming remain disabled");
-    Serial.println("board: use CFGBOARD <profile> over serial to recover");
-    while (true) {
-      handleSerialConfig();
-      delay(20);
-    }
+    Serial.println("board: no unique compatible profile; running headless "
+                   "(WiFi, serial and updates; no screen)");
+    Serial.println("board: use CFGBOARD <profile> over serial to name the "
+                   "board");
+  } else {
+    bcfg = &board::configFor(boardVariant);
+    beginSerialConfig(*bcfg);
   }
-  bcfg = &board::configFor(boardVariant);
-  beginSerialConfig(*bcfg);
-  if (!board::variantMatchesPlatform(
+  if (boardVariant != board::Variant::Unknown &&
+      !board::variantMatchesPlatform(
           boardVariant, board::COMPILED_PLATFORM.platform)) {
     Serial.println("board: FATAL resolved profile belongs to another family");
     while (true) {
@@ -419,21 +423,29 @@ void setup() {
   // C6 link, mDNS or audio. The backlight stays dark until the first full
   // screen is on the panel, so what lights up is the boot screen rather than
   // whatever the panel's memory held.
-  if (bcfg->hasBacklightPin() && !bcfg->isDsi()) {
+  if (screenPresent() && bcfg->hasBacklightPin() && !bcfg->isDsi()) {
     pinMode(bcfg->pinBl, OUTPUT);
     driveBrightness(0);
   }
   const uint32_t panelInitStartedAtMs = millis();
-  if (!initDisplay()) {
+  if (screenPresent() && !initDisplay()) {
     if (doomBoot || quakeBoot) {
       Serial.println("game: display init failed; restarting normal firmware");
       delay(50);
       ESP.restart();
       return;
     }
-    Serial.println("FATAL: display init failed");
-    while (true) delay(1000);
+    // A screen that does not come up is no screen: the board carries on
+    // headless rather than stopping, so WiFi, serial and updates (the
+    // way to fix it) still work.
+    Serial.println("display: init failed; running headless (no screen)");
+    markScreenAbsent();
   }
+  if (!screenPresent()) {
+    Serial.printf("board: %s runs headless: no screen, touch or "
+                  "buttons; WiFi, serial and updates only\n",
+                  bcfg->name);
+  } else {
   // Panel-command brightness (the AMOLED) ends its init table at full
   // brightness; dark until the screen is drawn.
   driveBrightness(0);
@@ -452,6 +464,7 @@ void setup() {
                 (unsigned long)millis(), (unsigned long)setupEnteredAtMs,
                 (unsigned long)(bootScreenStartedAtMs - panelInitStartedAtMs),
                 (unsigned long)(millis() - bootScreenStartedAtMs));
+  }
 
   // Bench logging: wait (bounded) for a USB host to open the port, now that
   // the panel is not waiting on it.
@@ -484,6 +497,8 @@ void setup() {
   }
 #endif
   bootscreen::advance(bootscreen::Stage::Preparing);
+  // No screen, no frames: neither the pipeline nor its buffers exist.
+  if (screenPresent()) {
   if (!initializeFramePipeline()) {
     Serial.println("FATAL: could not initialize runtime frame geometry");
     bootscreen::fail("start failed");
@@ -505,9 +520,11 @@ void setup() {
   }
   memset(bufA, 0, frameSourceBytes());
   Serial.printf("buffers ok, free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
+  }
   Serial.printf("board: %s (family=%s profile=%s)\n", bcfg->name,
                 board::targetToken(boardVariant),
                 board::variantToken(boardVariant));
+  if (screenPresent()) {
   Serial.printf("  driver=%s bus=%s %ux%u pclk=%luMHz\n",
                 bcfg->panel->driver == board::PanelDriver::St7703    ? "ST7703"
                 : bcfg->panel->driver == board::PanelDriver::Jd9365 ? "JD9365"
@@ -520,6 +537,7 @@ void setup() {
                 bcfg->isDsi() ? "mipi-dsi" : (bcfg->isQspi() ? "qspi" : "spi"),
                 bcfg->panel->width, bcfg->panel->height,
                 (unsigned long)(bcfg->panel->pixelClockHz / 1000000));
+  }
   Serial.printf("  sclk=%d d0/mosi=%d d1=%d d2=%d d3=%d cs=%d dc=%d rst=%d bl=%d boot=%d led=%d\n",
                 bcfg->pinSclk, bcfg->pinMosi, bcfg->pinData1, bcfg->pinData2,
                 bcfg->pinData3, bcfg->pinCs, bcfg->pinDc, bcfg->pinRst,
@@ -1006,7 +1024,9 @@ void loop() {
     // content; require sustained volume before judging the link rotten.
     // The threshold is two keyframes' worth of bands for this panel's
     // geometry, whatever that geometry is.
-    bool starving = packetsDelta > 2u * PANEL_GEOMETRY.maxBandCount() &&
+    // Only a board drawing frames can starve; a headless one has no bands.
+    bool starving = screenPresent() &&
+                    packetsDelta > 2u * PANEL_GEOMETRY.maxBandCount() &&
                     millis() - lastShownChangeAt > 20000;
     if (starving && healStage == 0) {
       Serial.printf("link heal: reconnecting WiFi (rssi=%d)\n",

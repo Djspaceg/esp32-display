@@ -762,6 +762,7 @@ bool adoptLocalFrameShape(bool reshape) {
 // Reapply a pending user/motion rotation and repaint the whole screen from
 // what is already cached. Body and reasoning moved verbatim from loop().
 void serviceRotationRepaint() {
+  if (!screenPresent()) return;
   // Reapply a pending rotation now, and repaint the whole screen from what is
   // already cached instead of waiting for a frame to arrive.
   //
@@ -838,6 +839,7 @@ void serviceRotationRepaint() {
 // pending-band/tile snapshot, the DMA gate, and the delay(1) idle pacing
 // (the else branch) exactly as loop() did before the split.
 void serviceStreamDraw() {
+  if (!screenPresent()) return;
 #if defined(ESPDISP_LARGE_TILE_STREAM)
   if (largeTileStreamEnabled()) {
     serviceLargeTileDraw();

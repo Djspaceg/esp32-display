@@ -2852,17 +2852,147 @@ int main() {
                                     false, false, true) ==
           Variant::ElecrowKnob128);
     // On 8 MiB flash the 0.85's codec bus decides: an answer is the GC9107
-    // carrier, silence the XIAO's ST7735, and the larger-flash buses never
-    // run there.
+    // carrier, silence a XIAO (the ST7735's answer on SDA says which one), and
+    // the larger-flash buses never run there.
     CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, false, false,
                                     false, false, false, -1,
-                                    /*codec085*/ false) == Variant::XiaoSt7735);
+                                    /*codec085*/ false, false,
+                                    /*readback*/ 1) == Variant::XiaoSt7735);
     CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, true, true,
                                     true, true, true, 560,
-                                    /*codec085*/ false) == Variant::XiaoSt7735);
+                                    /*codec085*/ false, false,
+                                    /*readback*/ 1) == Variant::XiaoSt7735);
     CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false,
                                     false, false, false, -1,
                                     /*codec085*/ false) == Variant::Unknown);
+    // The two XIAOs share that silent codec bus, so the screen's own
+    // controller tells them apart: an RDDID read on the ST7735's SDA (GPIO9,
+    // left floating) returns the controller's bits on the screen XIAO
+    // (41BB07FF on the bench unit) and only the level the host last drove on
+    // a bare XIAO (00000000). An unread SDA is neither board.
+    {
+      using boarddetectmodel::panelReadbackEvidenceFromBits;
+      const auto answered = panelReadbackEvidenceFromBits(0x41BB07FFu, 32);
+      CHECK(answered.read && answered.answered);
+      const auto low = panelReadbackEvidenceFromBits(0x00000000u, 32);
+      CHECK(low.read && !low.answered);
+      const auto high = panelReadbackEvidenceFromBits(0xFFFFFFFFu, 32);
+      CHECK(high.read && !high.answered);
+      // Only the clocked bits count: eight high bits are still uniform.
+      CHECK(!panelReadbackEvidenceFromBits(0x000000FFu, 8).answered);
+      CHECK(panelReadbackEvidenceFromBits(0x00000081u, 8).answered);
+      CHECK(!panelReadbackEvidenceFromBits(0x1u, 0).read);
+      CHECK(!panelReadbackEvidenceFromBits(0x1u, 33).read);
+
+      const uint32_t mib8 = 8u * 1024u * 1024u;
+      CHECK(board::variantFromS3Probe(mib8, false, false, false, false, false,
+                                      -1, /*codec085*/ false, false,
+                                      /*readback*/ 1) == Variant::XiaoSt7735);
+      CHECK(board::variantFromS3Probe(mib8, false, false, false, false, false,
+                                      -1, /*codec085*/ false, false,
+                                      /*readback*/ 0) == Variant::XiaoS3Bare);
+      CHECK(board::variantFromS3Probe(mib8, false, false, false, false, false,
+                                      -1, /*codec085*/ false, false,
+                                      /*readback*/ -1) == Variant::Unknown);
+      // The 0.85 answers its codec bus; whatever SDA says, it stays the 0.85.
+      CHECK(board::variantFromS3Probe(mib8, false, false, false, false, false,
+                                      -1, /*codec085*/ true, false,
+                                      /*readback*/ 0) == Variant::LcdGc9107);
+      CHECK(board::variantFromS3Probe(mib8, false, false, false, false, false,
+                                      -1, /*codec085*/ true, false,
+                                      /*readback*/ 1) == Variant::LcdGc9107);
+      // Larger flash never reaches either XIAO.
+      CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, false, false,
+                                      false, false, -1, /*codec085*/ false,
+                                      false, /*readback*/ 0) ==
+            Variant::Unknown);
+
+      // The readback drives the screen XIAO's panel lines, so it runs only
+      // where a candidate that needs it is still possible: an 8 MiB S3 whose
+      // codec bus started and stayed silent.
+      const auto &plan = board::detectionPlanForPlatform(
+          board::Platform::Esp32S3);
+      CHECK(plan.panelReadbackProbe != nullptr);
+      const auto &spi = *plan.panelReadbackProbe;
+      CHECK(spi.sclk == 7 && spi.sda == 9 && spi.cs == 6 && spi.dc == 4 &&
+            spi.rst == 5);
+      boarddetectmodel::ProbeEvidence probes[board::GENERATED_MAX_PROBE_COUNT] =
+          {};
+      CHECK(!boarddetectmodel::panelReadbackNeeded(plan, mib8, probes,
+                                                   plan.probeCount));
+      probes[0] = {boarddetectmodel::ProbeStatus::Started, 0};
+      CHECK(boarddetectmodel::panelReadbackNeeded(plan, mib8, probes,
+                                                  plan.probeCount));
+      CHECK(!boarddetectmodel::panelReadbackNeeded(
+          plan, 16u * 1024u * 1024u, probes, plan.probeCount));
+      probes[0] = {boarddetectmodel::ProbeStatus::Started, 2};
+      CHECK(!boarddetectmodel::panelReadbackNeeded(plan, mib8, probes,
+                                                   plan.probeCount));
+      probes[0] = boarddetectmodel::addressProbeEvidence(true, 0, true);
+      CHECK(!boarddetectmodel::panelReadbackNeeded(plan, mib8, probes,
+                                                   plan.probeCount));
+      // No other family reads a panel before it knows the board.
+      CHECK(board::detectionPlanForPlatform(board::Platform::Esp32C6)
+                .panelReadbackProbe == nullptr);
+      CHECK(board::detectionPlanForPlatform(board::Platform::Esp32P4)
+                .panelReadbackProbe == nullptr);
+
+      // The bare XIAO drives nothing: no panel, no pins, nothing on a bus.
+      const board::Config &bare = board::configFor(Variant::XiaoS3Bare);
+      CHECK(bare.variant == Variant::XiaoS3Bare);
+      CHECK(!bare.hasPanel());
+      CHECK(bare.platform == &board::PLATFORM_ESP32_S3);
+      CHECK(board::configFor(Variant::XiaoSt7735).hasPanel());
+      CHECK(strcmp(board::variantToken(Variant::XiaoS3Bare),
+                   "xiao-s3-bare") == 0);
+      CHECK(strcmp(board::targetToken(Variant::XiaoS3Bare), "s3") == 0);
+      CHECK(board::variantMatchesPlatform(Variant::XiaoS3Bare,
+                                          board::Platform::Esp32S3));
+      CHECK(board::variantFromName("xiao-s3-bare") == Variant::XiaoS3Bare);
+      CHECK(!board::supportsDoom(Variant::XiaoS3Bare));
+      CHECK(!board::supportsAudio(Variant::XiaoS3Bare));
+      const int8_t barePins[] = {
+          bare.pinSclk, bare.pinMosi, bare.pinData1, bare.pinData2,
+          bare.pinData3, bare.pinCs, bare.pinDc, bare.pinRst, bare.pinBl,
+          bare.pinBootButton, bare.pinRgbLed, bare.pinTouchSda,
+          bare.pinTouchScl, bare.pinTouchRst, bare.pinTouchInt,
+          bare.pinBatteryAdc, bare.pinBatteryEnable, bare.pinChargeStatus,
+          bare.pinBlEnable, bare.pinSerialRx, bare.pinSerialTx,
+          bare.pinPanelPower, bare.pinEncoderA, bare.pinEncoderB,
+          bare.pinPmuSda, bare.pinPmuScl, bare.pinMotionSda,
+          bare.pinMotionScl, bare.pinKey};
+      for (int8_t pin : barePins) CHECK(pin == board::NO_PIN);
+      CHECK(!bare.hasTouch() && !bare.hasBattery() && !bare.hasMotion() &&
+            !bare.hasBootButton() && !bare.hasKey() && !bare.hasRgbLed() &&
+            !bare.hasBacklightPin() && !bare.hasEncoder());
+      CHECK(bare.touch == board::TouchController::None);
+      CHECK(bare.power == board::PowerController::None);
+      CHECK(bare.motion == board::MotionController::None);
+
+      // A board no family detector can name runs headless on the same terms:
+      // the family's platform, no panel and no pin of any kind.
+      const board::Platform platforms[] = {
+          board::Platform::Esp32C3, board::Platform::Esp32C6,
+          board::Platform::Esp32S3, board::Platform::Esp32S3_4M,
+          board::Platform::Esp32P4};
+      for (board::Platform platform : platforms) {
+        const board::Config &headless = board::headlessConfigFor(platform);
+        CHECK(headless.variant == Variant::Unknown);
+        CHECK(!headless.hasPanel());
+        CHECK(headless.platform != nullptr &&
+              headless.platform->platform == platform);
+        const int8_t pins[] = {
+            headless.pinSclk, headless.pinMosi, headless.pinCs,
+            headless.pinDc, headless.pinRst, headless.pinBl,
+            headless.pinBootButton, headless.pinRgbLed,
+            headless.pinTouchSda, headless.pinTouchScl,
+            headless.pinBatteryAdc, headless.pinBlEnable,
+            headless.pinPanelPower, headless.pinKey};
+        for (int8_t pin : pins) CHECK(pin == board::NO_PIN);
+        CHECK(!headless.hasTouch() && !headless.hasBattery() &&
+              !headless.hasMotion() && !headless.hasBootButton());
+      }
+    }
     // A knob bus answering on an 8 MiB 0.85 does not make a second candidate
     // out of it.
     CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, false, false,
@@ -3058,7 +3188,8 @@ int main() {
       // Not on 8 MiB parts, where its probe never runs.
       CHECK(board::variantFromS3Probe(8u * 1024u * 1024u, false, false,
                                       false, false, false, -1, false,
-                                      /*twatch*/ true) == Variant::XiaoSt7735);
+                                      /*twatch*/ true,
+                                      /*readback*/ 1) == Variant::XiaoSt7735);
       // Beside another board's own bus it is an ambiguity, never a guess.
       CHECK(board::variantFromS3Probe(16u * 1024u * 1024u, false, true,
                                       false, false, false, -1, true,
@@ -3223,10 +3354,25 @@ int main() {
     CHECK(detected.variant == Variant::LcdGc9107);
     CHECK(detected.matchedCandidates == 1);
     s3Evidence[0] = {ProbeStatus::Started, 0};
+    const boarddetectmodel::PanelReadbackEvidence xiaoPanelAnswered =
+        boarddetectmodel::panelReadbackEvidenceFromBits(0x41BB07FFu, 32);
+    const boarddetectmodel::PanelReadbackEvidence xiaoPanelSilent =
+        boarddetectmodel::panelReadbackEvidenceFromBits(0u, 32);
     detected = board::detectFromEvidence(
-        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 7);
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 7, nullptr,
+        0, nullptr, nullptr, &xiaoPanelAnswered);
     CHECK(detected.variant == Variant::XiaoSt7735);
     CHECK(detected.matchedCandidates == 1);
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 7, nullptr,
+        0, nullptr, nullptr, &xiaoPanelSilent);
+    CHECK(detected.variant == Variant::XiaoS3Bare);
+    CHECK(detected.matchedCandidates == 1);
+    // Silence on the codec bus alone names neither XIAO.
+    detected = board::detectFromEvidence(
+        board::Platform::Esp32S3, 8u * 1024u * 1024u, s3Evidence, 7);
+    CHECK(detected.variant == Variant::Unknown);
+    CHECK(detected.matchedCandidates == 0);
     // A codec bus that answered the reserved canary is held low or
     // back-powered (a 0.85 whose SDA is stuck): its silence is not the XIAO's,
     // whichever end of the address list the canary answered at.
@@ -3312,7 +3458,9 @@ int main() {
       s3Evidence[0] = boarddetectmodel::addressReplyEvidence(
           s3Plan.probes[0], [](uint8_t) { return AddressReply::Nack; });
       CHECK(board::detectFromEvidence(board::Platform::Esp32S3,
-                                      8u * 1024u * 1024u, s3Evidence, 7)
+                                      8u * 1024u * 1024u, s3Evidence, 7,
+                                      nullptr, 0, nullptr, nullptr,
+                                      &xiaoPanelAnswered)
                 .variant == Variant::XiaoSt7735);
       s3Evidence[0] = boarddetectmodel::addressReplyEvidence(
           s3Plan.probes[0], [](uint8_t address) {
@@ -4057,6 +4205,8 @@ int main() {
       // Only the panels whose descriptors ask (the XIAO's ST7735 and the
       // T-QT's GC9107) are cleared; every other panel's init is unchanged.
       for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+        // A board without a panel has nothing to clear.
+        if (!board::configFor(identity.variant).hasPanel()) continue;
         const board::PanelConfig &panel = *board::configFor(identity.variant).panel;
         const panelorient::MemoryExtent other = panelorient::memoryToClear(panel);
         if (identity.variant == Variant::XiaoSt7735 ||
@@ -4224,6 +4374,7 @@ int main() {
     // other panel RGB; the descriptor now says which, and none moved.
     using board::Variant;
     for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+      if (!board::configFor(identity.variant).hasPanel()) continue;
       const board::PanelConfig &panel = *board::configFor(identity.variant).panel;
       if (identity.variant == Variant::LilygoTqtPro) continue;
       const bool driverWasBgr = panel.driver == board::PanelDriver::Gc9107 ||
@@ -7362,6 +7513,7 @@ int main() {
       for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
         if (!board::isS3Chip(identity.platform)) continue;
         const board::Config &cfg = board::configFor(identity.variant);
+        if (!cfg.hasPanel()) continue;
         if (tileproto::panelCanStreamTiles(
                 cfg.panel->width, cfg.panel->height,
                 cfg.platform->usePsramFrameBuffers)) {
@@ -7898,8 +8050,9 @@ int main() {
     CHECK(board::formatProfileHint(board::Platform::Esp32S3, hint,
                                    sizeof(hint)));
     CHECK(strcmp(hint,
-                 "st7735-042|gc9107|st7789-130|st7789-154|st7789-190|co5300|"
-                 "st77916|gc9a01-knob-128|st7789-twatch|auto") == 0);
+                 "st7735-042|xiao-s3-bare|gc9107|st7789-130|st7789-154|"
+                 "st7789-190|co5300|st77916|gc9a01-knob-128|st7789-twatch|"
+                 "auto") == 0);
     CHECK(board::formatProfileHint(board::Platform::Esp32C6, hint,
                                    sizeof(hint)));
     CHECK(strcmp(hint, "st7789|jd9853|auto") == 0);

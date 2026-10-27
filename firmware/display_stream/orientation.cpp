@@ -41,6 +41,7 @@ uint8_t automaticRotation = 0;
 uint8_t appliedPanelRotation = 0;
 
 bool panelIsRectangular() {
+  if (!screenPresent()) return false;
   return bcfg->panel->width != bcfg->panel->height;
 }
 
@@ -92,7 +93,8 @@ void applyPanelConfig(bool landscape) {
 // pure classifier has held it for 500ms. A live press resets the candidate so
 // one gesture cannot begin under one coordinate transform and end under another.
 void serviceAutoRotation() {
-  if (!motionAvailable || !automaticRotationEnabled) return;
+  if (!motionAvailable || !automaticRotationEnabled || !screenPresent())
+    return;
   const uint32_t now = millis();
 
   const motionorient::AutomaticMode mode =
@@ -138,7 +140,7 @@ void serviceAutoRotation() {
 // The motion half of loop()'s 5-second serial report: raw sample, candidate,
 // and the rotation actually applied.
 void reportMotionDiagnostics() {
-    if (motionAvailable && motionSampleValid) {
+    if (motionAvailable && motionSampleValid && screenPresent()) {
       Serial.printf(
           "motion: raw=%d,%d,%d candidate=%d auto=%u effective=%u mode=%s\n",
           (int)lastMotionSample.x, (int)lastMotionSample.y,

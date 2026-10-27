@@ -19,6 +19,7 @@ inline const Config *generatedConfigFor(Variant variant) {
     case Variant::XiaoSt7735: return &CONFIG_XIAO_ST7735_042;
     case Variant::LilygoTwatchS3: return &CONFIG_LILYGO_TWATCH_S3;
     case Variant::LilygoTqtPro: return &CONFIG_LILYGO_TQT_PRO;
+    case Variant::XiaoS3Bare: return &CONFIG_XIAO_S3_BARE;
     default: return nullptr;
   }
 }

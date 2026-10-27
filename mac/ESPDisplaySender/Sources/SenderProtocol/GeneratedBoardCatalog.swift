@@ -10,12 +10,12 @@ public enum GeneratedBoardCatalog {
         public let bootloaderAddress: Int
     }
 
-    public static let sourceSHA256 = "5bd3a715e8b47f3dcff99afe7c7c056cb342edf452561eb5551d3846b5ebc607"
+    public static let sourceSHA256 = "53cb37dc1adcda69d5256405a3215cd198a44a0d4f1fdcd7e1d79bd10e37df21"
     public static let requiredFamilies: Set<String> = ["c3", "c6", "s3", "s3-4m", "p4"]
     public static let expected: [String: Expected] = [
         "c3": Expected(chip: "esp32c3", profiles: ["gc9a01a-240"], flashBytes: [4194304], partition: "c3-4m-ota", bootloaderAddress: 0),
         "c6": Expected(chip: "esp32c6", profiles: ["st7789", "jd9853"], flashBytes: [8388608], partition: "default-8m", bootloaderAddress: 0),
-        "s3": Expected(chip: "esp32s3", profiles: ["st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"], flashBytes: [8388608, 16777216, 33554432], partition: "universal-8m-doom-saves-ota", bootloaderAddress: 0),
+        "s3": Expected(chip: "esp32s3", profiles: ["st7735-042", "xiao-s3-bare", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"], flashBytes: [8388608, 16777216, 33554432], partition: "universal-8m-doom-saves-ota", bootloaderAddress: 0),
         "s3-4m": Expected(chip: "esp32s3", profiles: ["gc9107-tqt"], flashBytes: [4194304], partition: "s3-4m-ota", bootloaderAddress: 0),
         "p4": Expected(chip: "esp32p4", profiles: ["st7703-4b", "jd9365-4c", "jd9365-34c"], flashBytes: [33554432], partition: "p4-32m-saves-ota", bootloaderAddress: 8192),
     ]
@@ -23,7 +23,7 @@ public enum GeneratedBoardCatalog {
     public static let profilesByTarget: [String: Set<String>] = [
         "c3": Set(["gc9a01a-240"]),
         "c6": Set(["st7789", "jd9853"]),
-        "s3": Set(["st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"]),
+        "s3": Set(["st7735-042", "xiao-s3-bare", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"]),
         "s3-4m": Set(["gc9107-tqt"]),
         "p4": Set(["st7703-4b", "jd9365-4c", "jd9365-34c"]),
         "p4-4b": Set(["st7703-4b"]),
@@ -57,6 +57,7 @@ public enum GeneratedBoardCatalog {
         "st7789": "ESP32-C6-LCD-1.47 (ST7789)",
         "jd9853": "ESP32-C6-Touch-LCD-1.47 (JD9853)",
         "st7735-042": "XIAO ESP32-S3 + 0.42-inch 96x54 screen",
+        "xiao-s3-bare": "XIAO ESP32-S3 (no screen)",
         "gc9107": "ESP32-S3-LCD-0.85 (GC9107)",
         "st7789-130": "ESP32-S3-LCD-1.3 (ST7789V2)",
         "st7789-154": "ESP32-S3-Touch-LCD-1.54 (ST7789)",
@@ -81,6 +82,8 @@ public enum GeneratedBoardCatalog {
 
     public static let quarterTurnProfiles: Set<String> = Set(["gc9a01a-240", "st7789", "jd9853", "st7703-4b", "jd9365-4c", "jd9365-34c", "st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch", "gc9107-tqt"])
 
+    public static let headlessProfiles: Set<String> = Set(["xiao-s3-bare"])
+
     public static let encoderProfiles: Set<String> = Set(["gc9a01-knob-128"])
 
     public static let carrierEvidenceFamilies: Set<String> = Set(["p4"])
@@ -92,6 +95,7 @@ public enum GeneratedBoardCatalog {
         "st7789": ["ESP32-C6-LCD-1.47"],
         "jd9853": ["ESP32-C6-Touch-LCD-1.47"],
         "st7735-042": ["Seeed Studio XIAO ESP32S3", "Questwise 0.42in 96x54 TFT"],
+        "xiao-s3-bare": ["Seeed Studio XIAO ESP32S3"],
         "gc9107": ["ESP32-S3-LCD-0.85"],
         "st7789-130": ["ESP32-S3-LCD-1.3", "ESP32-S3-LCD-1.3-B", "ESP32-S3-LCD-1.3-C"],
         "st7789-154": ["ESP32-S3-Touch-LCD-1.54"],

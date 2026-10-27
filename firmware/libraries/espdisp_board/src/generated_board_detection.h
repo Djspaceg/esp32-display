@@ -30,6 +30,7 @@ static constexpr I2cProbePlan GENERATED_S3_PROBES[] = {
     {8388608, 0, 47, 48, 100000, 0, 0, {0x6B, 0x00, 0x00, 0x00}, 1, -1, 0, 0, ProbeRelease::Always, false},
     {8388608, 0, 6, 7, 100000, 0, 0, {0x15, 0x00, 0x00, 0x00}, 1, 1, 20, 300, ProbeRelease::Always, true},
 };
+static constexpr SpiReadbackProbePlan GENERATED_S3_PANEL_READBACK_PROBE = {7, 9, 6, 4, 5};
 static constexpr int8_t GENERATED_S3_SENSE_PINS[] = {4};
 static constexpr CandidateRule GENERATED_S3_CANDIDATES[] = {
     {5, CandidateMatch::I2cAnyAck, 0, 0, 8388608},
@@ -40,12 +41,14 @@ static constexpr CandidateRule GENERATED_S3_CANDIDATES[] = {
     {8, CandidateMatch::I2cAnyAck, 5, 8388608, 0, 0, 0, 150},
     {10, CandidateMatch::I2cAnyAck, 5, 8388608, 0, 0, 250, 0},
     {11, CandidateMatch::I2cAnyAck, 6, 8388608, 0},
-    {14, CandidateMatch::I2cNoAck, 0, 0, 8388608},
+    {14, CandidateMatch::I2cNoAck, 0, 0, 8388608, NO_SENSE, 0, 0, {0x00, 0x00, 0x00}, 0, 0, PanelReadback::Answers},
+    {17, CandidateMatch::I2cNoAck, 0, 0, 8388608, NO_SENSE, 0, 0, {0x00, 0x00, 0x00}, 0, 0, PanelReadback::Silent},
 };
 static constexpr FamilyDetectionPlan GENERATED_S3_DETECTION = {
     GENERATED_S3_PROBES, 7, GENERATED_S3_CANDIDATES,
     sizeof(GENERATED_S3_CANDIDATES) / sizeof(GENERATED_S3_CANDIDATES[0]), ResolutionPolicy::ExactlyOne,
-    GENERATED_S3_SENSE_PINS, 1};
+    GENERATED_S3_SENSE_PINS, 1, nullptr, nullptr,
+    &GENERATED_S3_PANEL_READBACK_PROBE};
 
 static constexpr int8_t GENERATED_S3_4M_SENSE_PINS[] = {4};
 static constexpr CandidateRule GENERATED_S3_4M_CANDIDATES[] = {

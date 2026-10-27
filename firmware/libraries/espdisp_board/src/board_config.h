@@ -417,6 +417,9 @@ struct Config {
   }
   /// Brightness sink: PWM duty on this pin, or panel command 0x51 when absent.
   bool hasBacklightPin() const { return pinBl != NO_PIN; }
+  /// Whether the board has a screen at all. A board without one (panel
+  /// nullptr) runs headless: nothing reads `panel` until this says yes.
+  bool hasPanel() const { return panel != nullptr; }
 };
 
 #include "generated_board_configs.h"
@@ -576,6 +579,33 @@ static const Config CONFIG_XIAO_ST7735_042 = {
     /* adcScale */ 0,
     /* batteryEnable */ NO_PIN,
     /* chargeStatus */ NO_PIN,
+    MotionController::None,
+    /* motion X */ 0, 1,
+    /* motion Y */ 1, 1,
+    /* panelResetExio */ 0,
+    /* touchResetExio */ 0,
+    /* pinBlEnable */ NO_PIN,
+    /* backlightInverted */ false,
+};
+
+/// A bare Seeed XIAO ESP32-S3 with nothing attached (boards/s3-xiao-bare.toml):
+/// no panel, and no pin of any kind. BOOT on GPIO0 is left alone because
+/// everything the firmware does with it needs a screen, and so is the plain
+/// user LED on GPIO21. It runs headless: WiFi, serial and firmware updates.
+static const Config CONFIG_XIAO_S3_BARE = {
+    Variant::XiaoS3Bare,
+    "XIAO ESP32-S3 (no screen)",
+    &PLATFORM_ESP32_S3,
+    /* panel */ nullptr,
+    NO_PIN, NO_PIN, NO_PIN, NO_PIN, NO_PIN,  // sclk, mosi, data1..3
+    NO_PIN, NO_PIN, NO_PIN,                  // cs, dc, rst
+    /* bl    */ NO_PIN,
+    /* boot  */ NO_PIN,
+    /* led   */ NO_PIN,
+    TouchController::None,
+    NO_PIN, NO_PIN, NO_PIN, NO_PIN,
+    PowerController::None,
+    NO_PIN, 0, NO_PIN, NO_PIN,
     MotionController::None,
     /* motion X */ 0, 1,
     /* motion Y */ 1, 1,
@@ -936,6 +966,32 @@ static const Config CONFIG_P4_34C = {
 
 #include "generated_board_config_lookup.h"
 
+/// The Config a family's image runs on when no detector named the board: its
+/// platform, no panel and no pin of any kind, so nothing that might be another
+/// board's line is driven. The firmware runs it headless (WiFi, serial,
+/// updates) and CFGBOARD can still name the board.
+#define ESPDISP_HEADLESS_CONFIG(platformConfig)                              \
+  {Variant::Unknown, "unidentified board (no screen)", &platformConfig,      \
+   nullptr, NO_PIN, NO_PIN, NO_PIN, NO_PIN, NO_PIN, NO_PIN, NO_PIN, NO_PIN,  \
+   NO_PIN, NO_PIN, NO_PIN, TouchController::None, NO_PIN, NO_PIN, NO_PIN,    \
+   NO_PIN, PowerController::None, NO_PIN, 0, NO_PIN, NO_PIN,                 \
+   MotionController::None, 0, 1, 1, 1, 0, 0, NO_PIN, false}
+static const Config HEADLESS_CONFIGS[] = {
+    ESPDISP_HEADLESS_CONFIG(PLATFORM_ESP32_C3),
+    ESPDISP_HEADLESS_CONFIG(PLATFORM_ESP32_C6),
+    ESPDISP_HEADLESS_CONFIG(PLATFORM_ESP32_S3),
+    ESPDISP_HEADLESS_CONFIG(PLATFORM_ESP32_S3_4M),
+    ESPDISP_HEADLESS_CONFIG(PLATFORM_ESP32_P4),
+};
+#undef ESPDISP_HEADLESS_CONFIG
+
+inline const Config &headlessConfigFor(Platform platform) {
+  for (const Config &config : HEADLESS_CONFIGS) {
+    if (config.platform->platform == platform) return config;
+  }
+  return HEADLESS_CONFIGS[0];
+}
+
 /// The backlight wiring every carrier of one family shares, so it can be
 /// driven off before the carrier is known. `valid` is false when the family
 /// has fewer than two carriers, or when any two of its carriers wire the
@@ -1021,16 +1077,19 @@ inline DetectionResult detectFromEvidence(
     const boarddetectmodel::SenseEvidence *senses = nullptr,
     size_t senseCount = 0,
     const boarddetectmodel::PanelIdEvidence *panelId = nullptr,
-    const boarddetectmodel::TouchConfigEvidence *touchConfig = nullptr) {
+    const boarddetectmodel::TouchConfigEvidence *touchConfig = nullptr,
+    const boarddetectmodel::PanelReadbackEvidence *readback = nullptr) {
   const boarddetectmodel::Evaluation result = boarddetectmodel::evaluate(
       detectionPlanForPlatform(platform), flashBytes, evidence, evidenceCount,
-      senses, senseCount, panelId, touchConfig);
+      senses, senseCount, panelId, touchConfig, readback);
   return {(Variant)result.variantValue, result.matchedCandidates};
 }
 
 /// Resolve the S3 detector's independent profile signals. On 8 MiB flash an
 /// answer from the 0.85's codec bus is the GC9107 carrier and silence there is
-/// the XIAO's ST7735 (`codec085Bus`); each larger-flash profile has a distinct I2C
+/// a XIAO (`codec085Bus`), whose panel lines then say which: 1 when the
+/// ST7735 answered the readback (the screen XIAO), 0 when nothing did (the
+/// bare XIAO), -1 when no readback ran (`panelReadback`); each larger-flash profile has a distinct I2C
 /// bus (the T-Watch-S3's is GPIO10/11, `twatchBus`), except that the 1.3-inch and 1.9-inch carriers share GPIO47/48 and are
 /// separated by the GPIO4 sense: the 1.9's system-rail divider versus the
 /// 1.3's bare header pin. A negative gpio4Millivolts means no reading. Exactly
@@ -1043,7 +1102,8 @@ inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
                                   bool knob128Bus = false,
                                   int gpio4Millivolts = -1,
                                   bool codec085Bus = true,
-                                  bool twatchBus = false) {
+                                  bool twatchBus = false,
+                                  int panelReadback = -1) {
   // Generated probe order: the 0.85's 8 MiB codec bus first, then the 1.85C
   // bus before the 1.75C's, because the 1.75C's SDA is the 1.85C V2's
   // amplifier enable, then the T-Watch-S3's main bus, after both buses it
@@ -1064,9 +1124,18 @@ inline Variant variantFromS3Probe(uint32_t flashBytes, bool co5300Bus,
   const boarddetectmodel::SenseEvidence sense = {
       gpio4Millivolts >= 0,
       (uint16_t)(gpio4Millivolts < 0 ? 0 : gpio4Millivolts)};
+  // The readback runs only where the device would run it.
+  boarddetectmodel::PanelReadbackEvidence readback;
+  if (panelReadback >= 0 &&
+      boarddetectmodel::panelReadbackNeeded(plan, flashBytes, evidence,
+                                            plan.probeCount)) {
+    readback = boarddetectmodel::panelReadbackEvidenceFromBits(
+        panelReadback > 0 ? 0x41BB07FFu : 0u,
+        boarddetectmodel::SPI_READBACK_BITS);
+  }
   return detectFromEvidence(
              Platform::Esp32S3, flashBytes, evidence, plan.probeCount, &sense,
-             1)
+             1, nullptr, nullptr, &readback)
       .variant;
 }
 

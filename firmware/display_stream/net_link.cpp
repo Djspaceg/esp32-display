@@ -114,6 +114,12 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
   if (streamupdatesvc::ownsPanel()) {
     return;
   }
+  // A board without a screen advertises no frame protocol and has no frame
+  // buffers, so a frame that arrives anyway is refused before any parsing.
+  if (!screenPresent()) {
+    statBadLen = statBadLen + 1;
+    return;
+  }
   if (len >= 4 && memcmp(data, "ETL1", 4) == 0) {
 #if defined(ESPDISP_LARGE_TILE_STREAM)
     if (largeTileStreamEnabled()) {

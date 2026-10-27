@@ -278,7 +278,9 @@ void setup() {
   }
 #endif
   say("rescue: detected %s (%s)", cfg->name, profileToken());
-  if (pins.panel) {
+  if (!cfg->hasPanel()) {
+    say("rescue: %s has no screen; serial only", cfg->name);
+  } else if (pins.panel) {
     bringUpPanel();
   } else {
     say("rescue: panel wiring uses USB pin GPIO%d; panel left off",

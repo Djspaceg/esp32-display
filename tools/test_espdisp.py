@@ -4334,7 +4334,7 @@ def test_board_descriptor_validator():
         },
         "schema requires every descriptor section",
     )
-    check_equal(len(descriptors), 16, "all current boards have descriptors")
+    check_equal(len(descriptors), 17, "all current boards have descriptors")
     check_equal(
         sorted(
             descriptor["identity"]["profile"]
@@ -4977,11 +4977,13 @@ def test_board_descriptor_validator():
             [int(value) for value in written],
             [board_descriptor.backlight_floor_permille(item)],
             "%s's hand-written floor matches its descriptor" % symbol)
-    # Doom is a family capability, never a per-board opt-in: a board has it
-    # exactly when its family image carries the Doom runtime and WAD.
+    # Doom is a family capability, never a per-board opt-in: a board with a
+    # screen has it exactly when its family image carries the Doom runtime and
+    # WAD, and a board without one never does.
     for item in descriptors:
         check_equal(item["capabilities"]["doom"],
-                    item["family"]["requires_doom_wad"],
+                    item["family"]["requires_doom_wad"] and
+                    board_descriptor.has_panel(item),
                     "%s's Doom capability follows its family" % item["key"])
     opted_out = copy.deepcopy(
         next(item for item in descriptors if item["key"] == "s3-lcd-130"))
@@ -5285,8 +5287,9 @@ def test_universal_family_catalog_and_cli():
                 "C6 maps both runtime profiles")
     check_equal(
         espdisp.FAMILIES["s3"].profiles,
-        ("st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190",
-         "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"),
+        ("st7735-042", "xiao-s3-bare", "gc9107", "st7789-130", "st7789-154",
+         "st7789-190", "co5300", "st77916", "gc9a01-knob-128",
+         "st7789-twatch"),
         "S3 maps all runtime profiles into one family")
     check_equal(espdisp.FAMILIES["p4"].profiles,
                 ("st7703-4b", "jd9365-4c", "jd9365-34c"),
@@ -6006,6 +6009,131 @@ def test_s3_4m_family():
         "the bootstrap sketch drives the T-QT's GC9107 in BGR")
     check_equal(espdisp_bootstrap.applied_color_order(
         by_key["s3-touch-lcd-154"]), "rgb", "an ST7789 is driven in RGB")
+
+
+def test_headless_board():
+    """The bare XIAO ESP32-S3: an s3 board with no panel, told from the
+    screen XIAO by whether a panel controller answers on its SPI lines."""
+    descriptors = board_descriptor.load_repository_descriptors(
+        espdisp.REPO_ROOT)
+    by_key = {item["key"]: item for item in descriptors}
+    bare = by_key["s3-xiao-bare"]
+    screen = by_key["s3-xiao-tft-042"]
+    check_equal(bare["identity"]["target"], "s3", "the bare XIAO runs s3")
+    check_equal(bare["identity"]["profile"], "xiao-s3-bare",
+                "its profile token")
+    check(not board_descriptor.has_panel(bare), "it has no panel")
+    check(board_descriptor.has_panel(screen), "the screen XIAO has one")
+    check_equal(board_descriptor.panel_readback(bare), "silent",
+                "the bare XIAO is the board whose SPI lines stay silent")
+    check_equal(board_descriptor.panel_readback(screen), "answers",
+                "the screen XIAO is the board whose ST7735 answers")
+    check_equal(
+        [item["key"] for item in descriptors
+         if board_descriptor.panel_readback(item) != "none"],
+        ["s3-xiao-bare", "s3-xiao-tft-042"],
+        "only the two XIAOs read a panel to tell themselves apart")
+    check("xiao-s3-bare" in espdisp.FAMILIES["s3"].profiles,
+          "the s3 family image accepts the bare XIAO")
+    check_equal(espdisp.FAMILIES["s3"].hardware["xiao-s3-bare"],
+                ("Seeed Studio XIAO ESP32S3",), "hardware named")
+
+    def mutated(key, edit):
+        copies = [copy.deepcopy(item) for item in descriptors]
+        for item in copies:
+            if item["key"] == key:
+                edit(item)
+        return copies
+
+    def set_field(section, field, value):
+        return lambda item: item[section].__setitem__(field, value)
+
+    def drop_field(section, field):
+        return lambda item: item[section].pop(field, None)
+
+    check_descriptor_fails(
+        mutated("s3-xiao-bare", set_field("panel", "width", 96)),
+        "panel.bus none", "a board with no panel declares no geometry")
+    check_descriptor_fails(
+        mutated("s3-xiao-bare", set_field("carrier", "pin_sclk", 7)),
+        "panel.bus none", "a board with no panel wires no panel pins")
+    check_descriptor_fails(
+        mutated("s3-xiao-bare", set_field("backlight", "kind", "pwm")),
+        "panel.bus none", "a board with no panel has no backlight")
+    check_descriptor_fails(
+        mutated("s3-xiao-bare", set_field("touch", "controller", "cst816")),
+        "panel.bus none", "a board with no panel has no touch")
+    check_descriptor_fails(
+        mutated("s3-xiao-bare", set_field("capabilities", "doom", True)),
+        "doom", "a board with no panel cannot run Doom")
+    check_descriptor_fails(
+        mutated("c6-lcd-147", set_field("panel", "bus", "none")),
+        "panel.bus none", "a panel cannot be both described and absent")
+    check_descriptor_fails(
+        mutated("s3-xiao-tft-042", drop_field("detection", "panel_readback")),
+        "duplicate probe signature",
+        "without the panel readback the two XIAOs are one signature")
+    check_descriptor_fails(
+        mutated("s3-xiao-bare", set_field("detection", "panel_readback",
+                                          "answers")),
+        "panel_readback answers requires an SPI panel",
+        "a board with no panel cannot be the one that answers")
+    check_descriptor_fails(
+        mutated("s3-xiao-tft-042", set_field("detection", "panel_readback",
+                                             "silent")),
+        "panel_readback silent requires no panel",
+        "a board with a panel cannot be the silent one")
+    check_descriptor_fails(
+        mutated("s3-xiao-bare", set_field("detection", "panel_readback",
+                                          "maybe")),
+        "detection.panel_readback must be one of",
+        "an unknown readback value is refused")
+    check_descriptor_fails(
+        mutated("c6-lcd-147", set_field("detection", "panel_readback",
+                                        "answers")),
+        "panel_readback is only supported on s3",
+        "no other family reads a panel during detection")
+    check_descriptor_fails(
+        [copy.deepcopy(item) for item in descriptors
+         if item["key"] != "s3-xiao-tft-042"],
+        "no panel_readback answers candidate",
+        "a silent candidate needs a sibling whose panel lines it reads")
+
+    outputs = espdisp.generate_board_descriptors.expected_outputs(
+        espdisp.REPO_ROOT)
+    detection = outputs[
+        "firmware/libraries/espdisp_board/src/generated_board_detection.h"]
+    check("GENERATED_S3_PANEL_READBACK_PROBE = {7, 9, 6, 4, 5};" in detection,
+          "the readback probe drives the screen XIAO's SCLK, SDA, CS, DC, RST")
+    check("PanelReadback::Answers" in detection and
+          "PanelReadback::Silent" in detection,
+          "both XIAO candidates carry their readback requirement")
+    check("&GENERATED_S3_PANEL_READBACK_PROBE" in detection,
+          "the s3 plan points at its readback probe")
+    configs = outputs[
+        "firmware/libraries/espdisp_board/src/generated_board_configs.h"]
+    check(bare["panel"]["symbol"] not in configs,
+          "no PanelConfig is generated for an absent panel")
+    swift = outputs[
+        "mac/ESPDisplaySender/Sources/SenderProtocol/GeneratedBoardCatalog.swift"]
+    check('public static let headlessProfiles: Set<String> = '
+          'Set(["xiao-s3-bare"])' in swift,
+          "the app learns which profiles have no screen")
+    check('"xiao-s3-bare": PanelGeometry' not in swift,
+          "a board with no screen has no geometry to stream to")
+    python_catalog = outputs["tools/generated_board_catalog.py"]
+    check("HEADLESS_PROFILES = ('xiao-s3-bare',)" in python_catalog,
+          "the tools learn which profiles have no screen")
+    check_equal(espdisp.generated_board_catalog.HEADLESS_PROFILES,
+                ("xiao-s3-bare",), "the committed catalog names it")
+
+    # The bootstrap tool tunes a panel; a board without one is never its
+    # candidate, so a silent 8 MiB codec bus still selects the screen XIAO.
+    s3 = [item for item in descriptors if item["identity"]["target"] == "s3"]
+    selected, safe = espdisp.bootstrap._choose_candidate(
+        s3, {(42, 41): []}, set(), 8388608, None, BootstrapFakePrompter({}))
+    check_equal(selected["key"], "s3-xiao-tft-042",
+                "bootstrap never offers the board without a panel")
 
 
 def test_family_resolution_and_discovery():
@@ -9458,6 +9586,7 @@ def main():
     test_board_descriptor_validator()
     test_universal_family_catalog_and_cli()
     test_s3_4m_family()
+    test_headless_board()
     test_compile_wifi_config_staging()
     test_s3_doom_build_contract()
     test_p4_link_drops_usb_device_stack()

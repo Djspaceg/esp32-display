@@ -85,6 +85,18 @@ struct PanelSnapshot: Identifiable, Equatable {
             }
         }
     }
+    /// Whether a reported board profile is one with no screen (the bare XIAO
+    /// ESP32-S3), from the board descriptors. An unknown or absent profile
+    /// is not taken to have none.
+    static func profileHasNoScreen(_ profile: String?) -> Bool {
+        guard let profile else { return false }
+        return GeneratedBoardCatalog.headlessProfiles.contains(profile)
+    }
+
+    /// The board has no screen: nothing to stream to, capture for, rotate or
+    /// dim. It is still flashed, set up for WiFi, restarted and updated.
+    var hasNoScreen: Bool { Self.profileHasNoScreen(profile) }
+
     /// The board has shown it has a knob this launch: by reporting a knob
     /// profile, or by sending a knob gesture. Kept when `profile` is cleared
     /// with discovery, because the knob keeps working over the session.

@@ -122,6 +122,11 @@ RESOLUTION_ENUMS = {
     "first_match": "ResolutionPolicy::FirstMatch",
     "exactly_one": "ResolutionPolicy::ExactlyOne",
 }
+READBACK_ENUMS = {
+    "none": "PanelReadback::NotChecked",
+    "answers": "PanelReadback::Answers",
+    "silent": "PanelReadback::Silent",
+}
 RELEASE_ENUMS = {
     "never": "ProbeRelease::Never",
     "always": "ProbeRelease::Always",
@@ -193,11 +198,12 @@ def render_variants(descriptors: Sequence[Dict[str, Any]]) -> str:
             % (identity["variant"], identity["variant_value"])
         )
     lines.append("};\n\n")
-    # Doom is the family's: the validator has required capabilities.doom to
-    # equal family.requires_doom_wad, and this reads the family fact.
+    # Doom is the family's on every board with a screen: the validator has
+    # required capabilities.doom to equal family.requires_doom_wad there, and
+    # to be false on a board without one.
     doom = [
         "variant == Variant::%s" % item["identity"]["variant"]
-        for item in ordered if item["family"]["requires_doom_wad"]
+        for item in ordered if item["capabilities"]["doom"]
     ]
     lines.append("constexpr bool supportsDoom(Variant variant) {\n")
     lines.append("  return %s;\n" % (" || ".join(doom) if doom else "false"))
@@ -483,7 +489,9 @@ def render_configs(descriptors: Sequence[Dict[str, Any]]) -> str:
         # Carriers may share one panel profile; the validator has already
         # required every sharer to state identical panel facts.
         symbol = descriptor["panel"]["symbol"]
-        if symbol in emitted_panels:
+        # A board with no panel has no PanelConfig; its Config's panel is null.
+        if symbol in emitted_panels or not board_descriptor.has_panel(
+                descriptor):
             continue
         emitted_panels.add(symbol)
         lines.append(_panel_initializer(descriptor))
@@ -627,6 +635,18 @@ def render_detection(
                 % (prefix, touch["sda"], touch["scl"],
                    ", ".join("0x%02X" % value for value in padded),
                    len(addresses)))
+        readback_owner = next(
+            (item for item in family
+             if board_descriptor.panel_readback(item) == "answers"), None)
+        if readback_owner is not None:
+            # The validator has required every answering candidate of the
+            # family to share these lines.
+            lines.append(
+                "static constexpr SpiReadbackProbePlan "
+                "GENERATED_%s_PANEL_READBACK_PROBE = {%s};\n"
+                % (prefix, ", ".join(
+                    "%d" % pin for pin in
+                    board_descriptor.panel_readback_pins(readback_owner))))
         if sense_pins:
             lines.append(
                 "static constexpr int8_t GENERATED_%s_SENSE_PINS[] = {%s};\n"
@@ -647,13 +667,17 @@ def render_detection(
                     sense_pins.index(sense_pin), sense_min, sense_max)
             panel_id = detection_panel_id(descriptor)
             touch_resolution = detection_touch_resolution(descriptor)
-            if panel_id or touch_resolution:
+            readback = board_descriptor.panel_readback(descriptor)
+            checks_readback = readback != "none"
+            if panel_id or touch_resolution or checks_readback:
                 if not sense_suffix:
                     sense_suffix = ", NO_SENSE, 0, 0"
                 sense_suffix += ", {%s}" % ", ".join(
                     "0x%02X" % value for value in (panel_id or (0, 0, 0)))
-            if touch_resolution:
-                sense_suffix += ", %d, %d" % touch_resolution
+            if touch_resolution or checks_readback:
+                sense_suffix += ", %d, %d" % (touch_resolution or (0, 0))
+            if checks_readback:
+                sense_suffix += ", %s" % READBACK_ENUMS[readback]
             lines.append(
                 "    {%d, %s, %d, %d, %d%s},\n"
                 % (
@@ -672,13 +696,17 @@ def render_detection(
         if sense_pins:
             sense_ref = ",\n    GENERATED_%s_SENSE_PINS, %d" % (
                 prefix, len(sense_pins))
-        if dsi or touch_checked:
+        if dsi or touch_checked or readback_owner is not None:
             if not sense_ref:
                 sense_ref = ",\n    nullptr, 0"
             sense_ref += (", &GENERATED_%s_DSI_ID_PROBE" % prefix
                           if dsi else ", nullptr")
         if touch_checked:
             sense_ref += ", &GENERATED_%s_TOUCH_CONFIG_PROBE" % prefix
+        elif readback_owner is not None:
+            sense_ref += ", nullptr"
+        if readback_owner is not None:
+            sense_ref += ",\n    &GENERATED_%s_PANEL_READBACK_PROBE" % prefix
         lines.append(
             "static constexpr FamilyDetectionPlan GENERATED_%s_DETECTION = {\n"
             "    %s, %d, GENERATED_%s_CANDIDATES,\n"
@@ -788,7 +816,13 @@ def render_python_catalog(
                 family["requires_doom_wad"], hardware, family["blurb"],
             )
         )
-    lines.append("}\n\nLEGACY_TARGET_PROFILES = {\n")
+    # Boards with no screen: nothing to stream to, configure or tune on glass.
+    headless = tuple(
+        item["identity"]["profile"]
+        for target in board_descriptor.FAMILY_KEYS
+        for item in grouped[target] if not board_descriptor.has_panel(item))
+    lines.append("}\n\nHEADLESS_PROFILES = %s\n" % _tuple(headless))
+    lines.append("\nLEGACY_TARGET_PROFILES = {\n")
     for family in grouped.values():
         for descriptor in family:
             for legacy in descriptor["identity"]["legacy_targets"]:
@@ -857,6 +891,9 @@ def render_swift_catalog(
         for descriptor in grouped[target]:
             profile = descriptor["identity"]["profile"]
             panel = descriptor["panel"]
+            # A board with no screen has no geometry; headlessProfiles names it.
+            if not board_descriptor.has_panel(descriptor):
+                continue
             lines.append(
                 "        %s: PanelGeometry(width: %d, height: %d),\n"
                 % (_q(profile), panel["width"], panel["height"])
@@ -892,6 +929,17 @@ def render_swift_catalog(
         "    public static let quarterTurnProfiles: Set<String> = Set(%s)\n\n"
         % _swift_array(quarter_turns)
     )
+    # Boards with no screen. The app lists them as devices without one:
+    # flashable, WiFi-configurable, restartable, and nothing to stream to.
+    headless = [
+        descriptor["identity"]["profile"]
+        for target in board_descriptor.FAMILY_KEYS
+        for descriptor in grouped[target]
+        if not board_descriptor.has_panel(descriptor)
+    ]
+    lines.append(
+        "    public static let headlessProfiles: Set<String> = Set(%s)\n\n"
+        % _swift_array(headless))
     # Boards with a knob (encoder lines on the carrier). The knob drives the
     # Mac's volume and mute through media keys whatever the touch preset, so
     # the app offers the Accessibility grant on these boards' pages.

@@ -311,6 +311,7 @@ int main() {
       const board::Config &cfg = board::configFor(identity.variant);
       const bool want = board::supportsDoom(identity.variant) &&
                         cfg.platform->usePsramFrameBuffers &&
+                        cfg.hasPanel() &&
                         cfg.panel->width >= RENDER_WIDTH &&
                         cfg.panel->height >= RENDER_HEIGHT;
       CHECK(quakeSupportsBoard(identity.variant) == want);
@@ -375,6 +376,8 @@ int main() {
     }
     // Every board has one, so no caller falls back to another board's.
     for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+      // A board without a screen has no glass to calibrate.
+      if (!board::configFor(identity.variant).hasPanel()) continue;
       CHECK(board::touchCalibrationFor(identity.variant).panelShort > 0);
     }
   }

@@ -398,6 +398,11 @@ static void processConfigLine(char *line) {
       configSerial().println("CFGERR expected: CFGROT 0|1|2|3");
       return;
     }
+    if (!screenPresent()) {
+      configSerial().printf("CFGERR rotation unsupported: %s has no "
+                            "screen\n", bcfg->name);
+      return;
+    }
     if ((want & 1) != 0 && !bcfg->panel->supportsCommandRotation) {
       configSerial().printf("CFGERR rotation %d unsupported by %s (%ux%u); "
                     "only 0 and 2 apply here\n",

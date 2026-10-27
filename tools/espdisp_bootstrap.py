@@ -592,6 +592,10 @@ def _choose_candidate(
     requested: Optional[str],
     prompter,
 ) -> Tuple[Dict[str, Any], Sequence[Dict[str, Any]]]:
+    # Bootstrap discovers and tunes a panel; a board with none (panel.bus
+    # none) is never what it is looking at.
+    candidates = [
+        item for item in candidates if item["panel"]["bus"] != "none"]
     by_key = {item["key"]: item for item in candidates}
     states = {
         candidate["key"]: _candidate_evidence_state(

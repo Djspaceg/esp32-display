@@ -165,6 +165,7 @@ int main() {
   int bottomLayouts = 0, compactLayouts = 0;
   for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
     const board::Config &cfg = board::configFor(identity.variant);
+    if (!cfg.hasPanel()) continue;  // no screen, nothing to lay out
     const bool round = cfg.panel->roundDisplay;
     const bool square = cfg.panel->width == cfg.panel->height;
     for (int landscape = 0; landscape <= (square ? 0 : 1); ++landscape) {

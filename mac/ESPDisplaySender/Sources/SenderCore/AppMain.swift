@@ -469,7 +469,8 @@ public enum ESPDisplaySenderApp {
                 source: DeviceSession.Source? = nil,
                 audioDescriptor: AudioStreamDescriptor? = nil,
                 allowUnowned: Bool = false,
-                provisional: Bool = false
+                provisional: Bool = false,
+                headless: Bool = false
             ) {
                 let makeAudioSession: (AudioStreamDescriptor) -> PanelAudioSession = {
                     descriptor in
@@ -496,6 +497,7 @@ public enum ESPDisplaySenderApp {
                     audioSessionFactory: makeAudioSession,
                     source: source ?? sourceFor(name),
                     picker: picker, fps: streaming.fps,
+                    headless: headless,
                     onStatus: { status in
                         Task { @MainActor in
                             panelManager.update(status, sessionID: id)
@@ -568,8 +570,15 @@ public enum ESPDisplaySenderApp {
                         where panelManager.shouldLaunchDiscoveredService(device.name)
                             && !registry.shouldSkip(device.name)
                     {
+                        // A device with no screen gets a session all the same:
+                        // heartbeats, telemetry, restart and updates ride it.
+                        // Its sender never sends a frame, so the geometry it
+                        // is built with is only the type's default.
+                        let headless = panelManager.hasNoScreen(device.name)
+                            || PanelSnapshot.profileHasNoScreen(device.metadata.profile)
                         guard let geometry = panelManager.geometry(of: device.name)
                             ?? device.geometry
+                            ?? (headless ? PanelGeometry.panel172x320 : nil)
                         else {
                             print("not streaming discovered device \"\(device.name)\""
                                 + " because its screen size is unknown")
@@ -595,7 +604,8 @@ public enum ESPDisplaySenderApp {
                             source: currentSources[device.name]?
                                 .sessionSource(defaultDisplay: opts.displayName),
                             audioDescriptor: device.metadata.audioDescriptor,
-                            provisional: true)
+                            provisional: true,
+                            headless: headless)
                     }
                 }
                 registry.onRetryDue = { name in

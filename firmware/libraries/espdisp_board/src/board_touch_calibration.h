@@ -19,8 +19,8 @@ inline touchmap::Calibration touchCalibrationFor(Variant variant) {
                                  facts->rotateClockwise};
   }
   const Config &cfg = configFor(variant);
-  const int16_t w = (int16_t)cfg.panel->width;
-  const int16_t h = (int16_t)cfg.panel->height;
+  const int16_t w = cfg.hasPanel() ? (int16_t)cfg.panel->width : 0;
+  const int16_t h = cfg.hasPanel() ? (int16_t)cfg.panel->height : 0;
   return touchmap::Calibration{w < h ? w : h, w < h ? h : w, false, false,
                                true};
 }

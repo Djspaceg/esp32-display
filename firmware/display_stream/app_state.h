@@ -31,6 +31,18 @@ String defaultDeviceName();
 extern board::Variant boardVariant;
 extern const board::Config *bcfg;
 
+/// Whether this board has a working screen. A board without one (the bare
+/// XIAO, any board no detector could name, or a panel whose init failed)
+/// runs headless: WiFi, the serial command set and firmware updates, and
+/// nothing that draws, lights or reads a panel. Every drawing entry point
+/// returns early on false, so no path can reach a panel that is not there.
+extern bool screenAbsent;
+inline bool screenPresent() {
+  return !screenAbsent && bcfg != nullptr && bcfg->hasPanel();
+}
+/// The panel did not come up: run headless from here on, with no geometry.
+void markScreenAbsent();
+
 /// Runtime panel geometry. setup() assigns these immediately after one physical
 /// profile has been resolved and before frame buffers or protocol state exist.
 extern bandproto::Geometry PANEL_GEOMETRY;

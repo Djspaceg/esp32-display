@@ -40,6 +40,23 @@ void applyPendingControl() {
   portEXIT_CRITICAL(&controlMux);
 
   if (hasCommand) {
+    // Without a screen only Restart means anything: brightness, flip,
+    // rotation, power and identify all act on the panel. None of their
+    // capabilities is advertised, so this answers a sender that sends one
+    // anyway with the same refusal a fixed backlight gets.
+    if (!screenPresent() &&
+        command.opcode != deviceproto::ControlOpcode::Restart) {
+      Serial.printf("network: control %u refused (no screen)\n",
+                    (unsigned)command.opcode);
+      portENTER_CRITICAL(&controlMux);
+      controls.markApplied(command.sequence);
+      portEXIT_CRITICAL(&controlMux);
+      sendControlAck(command, 1);
+      sendDeviceInfo();
+      hasCommand = false;
+    }
+  }
+  if (hasCommand) {
     uint8_t ackStatus = 0;
     switch (command.opcode) {
       case deviceproto::ControlOpcode::Brightness:

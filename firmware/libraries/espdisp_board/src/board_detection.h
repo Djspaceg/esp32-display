@@ -18,6 +18,12 @@
 // controller's config. It is the only runtime difference between two
 // carriers that share a PCB and a panel controller but not the glass (the
 // 3.4C and 4C). The register is read passively over I2C; nothing is written.
+//
+// A candidate may also require that an SPI panel controller answers, or that
+// nothing does, on one family-wide set of panel lines. It separates the two
+// XIAO ESP32-S3 boards, whose I2C buses are equally silent: the screen XIAO's
+// ST7735 drives its SDA line in reply to RDDID, while on a bare XIAO the line
+// only holds the level the host last left on it.
 #pragma once
 
 #include <stddef.h>
@@ -84,6 +90,15 @@ struct I2cProbePlan {
 /// No analog sense guard on this candidate.
 static constexpr uint8_t NO_SENSE = 255;
 
+/// What a candidate requires of the family's SPI panel readback.
+enum class PanelReadback : uint8_t {
+  NotChecked,
+  /// A panel controller drove the data line in reply.
+  Answers,
+  /// The read completed and nothing drove the line.
+  Silent,
+};
+
 struct CandidateRule {
   uint8_t variantValue;
   CandidateMatch match;
@@ -100,6 +115,8 @@ struct CandidateRule {
   /// The GT9xx config resolution this candidate requires; 0x0 = not checked.
   uint16_t touchWidth = 0;
   uint16_t touchHeight = 0;
+  /// What the family's SPI panel readback must have found.
+  PanelReadback panelReadback = PanelReadback::NotChecked;
 };
 
 /// One analog sense reading, indexed like FamilyDetectionPlan::sensePins.
@@ -169,6 +186,57 @@ inline TouchConfigEvidence touchConfigEvidenceFromRead(bool ok,
   return evidence;
 }
 
+/// The SPI panel lines a readback drives: the panel's clock, its one data
+/// line (written, then left floating and read), chip select, data/command and
+/// reset. Every readback candidate in a family shares them; on a board whose
+/// panel is absent they are unconnected pads.
+struct SpiReadbackProbePlan {
+  int8_t sclk;
+  int8_t sda;
+  int8_t cs;
+  int8_t dc;
+  int8_t rst;
+};
+
+/// MIPI DCS "read display ID". In the ST7735's 4-line serial mode the reply
+/// comes back on SDA after one dummy clock.
+static const uint8_t SPI_READBACK_COMMAND = 0x04;
+/// Bits clocked in after the command: the dummy bit, the three ID bytes and
+/// seven more, exactly as the screen XIAO's bench read was taken.
+static const uint8_t SPI_READBACK_BITS = 32;
+/// The bench read's timing: reset held low 20 ms, 150 ms before the command,
+/// 50 us half periods while writing and 200 us of settling either side of
+/// each read edge. The line is read floating: on the bench, with the ESP32's
+/// own pull-up or pull-down enabled the screen XIAO's reply read as all ones
+/// or all zeros, the same as a bare XIAO's.
+static const uint16_t SPI_READBACK_RESET_LOW_MS = 20;
+static const uint16_t SPI_READBACK_RESET_WAIT_MS = 150;
+static const uint16_t SPI_READBACK_WRITE_HALF_US = 50;
+static const uint16_t SPI_READBACK_READ_SETTLE_US = 200;
+
+/// The bits one readback clocked in. Unread when the read could not run.
+struct PanelReadbackEvidence {
+  bool read = false;
+  bool answered = false;
+  uint32_t bits = 0;
+};
+
+/// A floating line nobody drives keeps the level the host left on it, so
+/// every bit it returns is the same. A reply with both levels in it was
+/// driven by something on the far end: a panel controller answered.
+/// `bits` holds the first bit clocked in as its most significant of
+/// `count`; a count outside 1..32 is no reading.
+inline PanelReadbackEvidence panelReadbackEvidenceFromBits(uint32_t bits,
+                                                           uint8_t count) {
+  PanelReadbackEvidence evidence;
+  if (count == 0 || count > 32) return evidence;
+  const uint32_t mask = count == 32 ? 0xFFFFFFFFu : ((1u << count) - 1u);
+  evidence.read = true;
+  evidence.bits = bits & mask;
+  evidence.answered = evidence.bits != 0 && evidence.bits != mask;
+  return evidence;
+}
+
 struct FamilyDetectionPlan {
   const I2cProbePlan *probes;
   uint8_t probeCount;
@@ -179,7 +247,18 @@ struct FamilyDetectionPlan {
   uint8_t senseCount = 0;
   const DsiIdProbePlan *dsiIdProbe = nullptr;
   const TouchConfigProbePlan *touchConfigProbe = nullptr;
+  const SpiReadbackProbePlan *panelReadbackProbe = nullptr;
 };
+
+/// The panel-readback half of a candidate. A candidate that checks nothing
+/// passes; the others need a completed read with the answer they name.
+inline bool panelReadbackMatches(const CandidateRule &candidate,
+                                 const PanelReadbackEvidence *readback) {
+  if (candidate.panelReadback == PanelReadback::NotChecked) return true;
+  if (readback == nullptr || !readback->read) return false;
+  return readback->answered ==
+         (candidate.panelReadback == PanelReadback::Answers);
+}
 
 /// Nominal millivolts for a raw 12-bit sample at 12 dB attenuation (about
 /// 0-3100 mV full scale). Used only when the chip carries no ADC calibration
@@ -431,6 +510,25 @@ inline bool candidateMatches(const CandidateRule &candidate,
   return false;
 }
 
+/// Whether the family's SPI panel readback should run after the I2C probes:
+/// only while a candidate that checks it can still match. The readback drives
+/// one board's panel lines, so it never runs on a board the probes have
+/// already placed elsewhere (an answering 0.85 codec bus, larger flash).
+inline bool panelReadbackNeeded(const FamilyDetectionPlan &plan,
+                                uint32_t flashBytes,
+                                const ProbeEvidence *evidence,
+                                size_t evidenceCount) {
+  if (plan.panelReadbackProbe == nullptr) return false;
+  for (uint8_t i = 0; i < plan.candidateCount; ++i) {
+    const CandidateRule &candidate = plan.candidates[i];
+    if (candidate.panelReadback != PanelReadback::NotChecked &&
+        candidateMatches(candidate, flashBytes, evidence, evidenceCount)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 inline Evaluation evaluate(const FamilyDetectionPlan &plan,
                            uint32_t flashBytes,
                            const ProbeEvidence *evidence,
@@ -438,7 +536,8 @@ inline Evaluation evaluate(const FamilyDetectionPlan &plan,
                            const SenseEvidence *senses = nullptr,
                            size_t senseCount = 0,
                            const PanelIdEvidence *panelId = nullptr,
-                           const TouchConfigEvidence *touchConfig = nullptr) {
+                           const TouchConfigEvidence *touchConfig = nullptr,
+                           const PanelReadbackEvidence *readback = nullptr) {
   uint8_t selected = 0;
   uint8_t matches = 0;
   for (uint8_t i = 0; i < plan.candidateCount; ++i) {
@@ -446,7 +545,8 @@ inline Evaluation evaluate(const FamilyDetectionPlan &plan,
     if (!candidateMatches(candidate, flashBytes, evidence, evidenceCount) ||
         !senseMatches(candidate, senses, senseCount) ||
         !panelIdMatches(plan, candidate, panelId) ||
-        !touchConfigMatches(candidate, touchConfig)) {
+        !touchConfigMatches(candidate, touchConfig) ||
+        !panelReadbackMatches(candidate, readback)) {
       continue;
     }
     if (matches == 0) selected = candidate.variantValue;

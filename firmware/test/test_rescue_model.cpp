@@ -170,7 +170,8 @@ int main() {
       }
       ++profiles;
     }
-    CHECK(profiles == 16);
+    // Including the bare XIAO, whose plan is clear because it has no pins.
+    CHECK(profiles == 17);
 
     board::Config onUsb = board::CONFIG_TOUCH_ST7789;
     onUsb.pinSclk = 19;
@@ -386,6 +387,7 @@ int main() {
   {
     for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
       const board::Config &cfg = board::configFor(identity.variant);
+      if (!cfg.hasPanel()) continue;  // no screen to draw RESCUE on
       const rescuemodel::Screen screen = rescuemodel::layout(
           cfg.panel->width, cfg.panel->height, cfg.panel->roundDisplay,
           cfg.name, identity.profile);
@@ -429,6 +431,7 @@ int main() {
     snprintf(warning, sizeof(warning), "CFGBOARD %s", longestToken);
     for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
       const board::Config &cfg = board::configFor(identity.variant);
+      if (!cfg.hasPanel()) continue;
       const rescuemodel::Screen screen = rescuemodel::layout(
           cfg.panel->width, cfg.panel->height, cfg.panel->roundDisplay,
           cfg.name, identity.profile, warning);

@@ -430,9 +430,15 @@ struct PanelDetailView: View {
         // firmware. Network credentials, touch bindings and the screensaver are
         // set once and left, and the audio and frame counters are diagnostics.
         Form {
-            heroSection
-            sourceSection
-            displaySection
+            // A board with no screen has no picture, source or screen settings
+            // to offer: it says so once, with the facts the hero would carry.
+            if panel.hasNoScreen {
+                noScreenSection
+            } else {
+                heroSection
+                sourceSection
+                displaySection
+            }
             firmwareSection
             connectionSection
             // Gated on the panel actually having an input this app can
@@ -600,6 +606,30 @@ struct PanelDetailView: View {
                 .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 6, trailing: 0))
         }
     }
+
+    /// What a board without a screen shows in place of the hero, the source
+    /// and the screen settings: what it is, and what can be done with it.
+    private var noScreenSection: some View {
+        Section {
+            ForEach(heroFacts) { fact in
+                LabeledContent(fact.label) {
+                    Text(fact.value)
+                        .foregroundStyle(fact.isMuted ? .secondary : .primary)
+                }
+            }
+        } header: {
+            Text("No screen")
+        } footer: {
+            Text(Self.noScreenExplanation)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Why a board without a screen offers no picture, source or screen
+    /// controls, and what it does offer.
+    static let noScreenExplanation =
+        "This board has no screen, so nothing is captured or sent to it. "
+            + "Its WiFi, firmware updates and restart work as on any other board."
 
     /// The facts about the board itself that used to be spread over four
     /// sections - or, for the model and the USB device, nowhere at all.

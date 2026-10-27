@@ -68,6 +68,11 @@ final class DeviceSession {
 
     let id: UUID
     let name: String
+    /// The device has no screen (its profile is in
+    /// `GeneratedBoardCatalog.headlessProfiles`). The session still keeps the
+    /// link: heartbeats, telemetry, restart and firmware updates all ride it.
+    /// It never captures and never sends a frame.
+    let headless: Bool
     /// The panel's IP as this session's socket resolved it, or nil before the
     /// connection is ready.
     ///
@@ -159,10 +164,12 @@ final class DeviceSession {
         audioSessionFactory: ((AudioStreamDescriptor) -> PanelAudioSession)? = nil,
         source: Source, picker: PickerSource?, fps: Int,
         linkTiming: LinkSupervisor.Timing = .standard,
+        headless: Bool = false,
         onStatus: ((Status) -> Void)? = nil,
         onPreview: ((CGImage, Bool) -> Void)? = nil
     ) {
         self.id = id
+        self.headless = headless
         self.linkTiming = linkTiming
         self.name = name
         self.sender = sender
@@ -738,6 +745,8 @@ final class DeviceSession {
         let linkSupervision = Task { [weak self] in await self?.superviseLink() }
         if let override = captureLoopOverrideForTesting {
             await override()
+        } else if headless {
+            await superviseHeadless()
         } else {
             await superviseCapture()
         }
@@ -795,6 +804,21 @@ final class DeviceSession {
         guard shouldPark(silentFor: age) else { return (false, nil) }
         guard let waitingSince else { return (false, reconnectsFinished) }
         return (!reconnectInFlight && reconnectsFinished != waitingSince, waitingSince)
+    }
+
+    /// What a device with no screen shows instead of a capture state.
+    static let headlessStatus = CaptureStatus.suspended(
+        "No screen. Nothing is captured or sent to this device.")
+
+    /// The headless counterpart of `superviseCapture`: nothing to capture,
+    /// so it only reports, on the same five-second cadence, until the session
+    /// stops. The link task beside it keeps the device reachable.
+    private func superviseHeadless() async {
+        setCaptureStatus(Self.headlessStatus)
+        while !isStopped && !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            reportProgress()
+        }
     }
 
     /// Stands in for `superviseCapture` in tests, which cannot drive

@@ -216,6 +216,12 @@ macros = []
 # ES7210 0x40, with 4.7K pull-ups on GPIO42/41) do not answer; the 0.85 claims
 # the same probe with i2c_any_ack. GPIO41/42 are the XIAO's unused D12/D11
 # pads.
+# The bare XIAO (s3-xiao-bare) is silent on that bus too, so this board is
+# also the one whose panel answers: after a reset on RES, an RDDID (04h) read
+# on SDA, left floating, returns the ST7735's bits (41BB07FF on the bench
+# unit, 2026-10-27; with the ESP32's pull-up or pull-down on, the line reads
+# the pull instead), where a bare XIAO's SDA returns only the level last
+# driven on it.
 order = 80
 resolution = "exactly_one"
 no_match = "unknown"
@@ -232,3 +238,4 @@ reset_pin = -1
 reset_low_ms = 0
 reset_release_wait_ms = 0
 release = "always"
+panel_readback = "answers"

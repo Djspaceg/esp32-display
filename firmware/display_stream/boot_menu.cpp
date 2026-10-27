@@ -428,6 +428,8 @@ void handleBootMenuTap(int16_t x, int16_t y, uint32_t pressStartedAt) {
 }
 
 bool runBootMenuIfDue(bool requested) {
+  // The menu is a screen; a board without one boots straight on.
+  if (!screenPresent()) return false;
   const bool hasInput = touchAvailable || bcfg->hasBootButton();
   const bootmenu::ResetKind reset = bootResetKind();
   // Only read a game's data when the menu could open at all, so automatic

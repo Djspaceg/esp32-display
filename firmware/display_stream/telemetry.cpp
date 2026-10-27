@@ -46,7 +46,28 @@ static uint32_t lastBatteryAt = 0;
 // Advertised capabilities. Runtime rather than a constant because CAP_TOUCH
 // depends on the hardware, and the sender uses these bits to decide which
 // controls to offer - a panel without touch should not show touch actions.
+// The update paths, offered together or not at all: only when OTA actually
+// came up, not merely because this build contains the code and not merely
+// because a password is stored, so nothing offers a path that would time out.
+// The stream-channel path is armed from the same stored password.
+static uint32_t updateCapabilities() {
+  if (!otapolicy::advertisesCapability(currentOtaStatus())) return 0;
+  return deviceproto::CAP_OTA |
+         (streamupdatesvc::armed() ? deviceproto::CAP_STREAM_UPDATE : 0u);
+}
+
+// What a board without a screen can do: restart, report telemetry, update,
+// and, where it has one, report a battery. Every other bit is a screen's
+// (brightness, flip, rotate, power, sleep, idle text, identify, frames) or its
+// inputs' (touch, the input map), so none is offered.
+static uint32_t headlessCapabilities() {
+  return deviceproto::CAP_RESTART | deviceproto::CAP_TELEMETRY |
+         (batteryAvailable ? deviceproto::CAP_BATTERY : 0u) |
+         updateCapabilities();
+}
+
 uint32_t deviceCapabilities() {
+  if (!screenPresent()) return headlessCapabilities();
   // Long press rides with touch rather than being its own condition: the same
   // classifier produces both, so a panel whose controller answered can report
   // holds. It is a separate bit so a sender can tell this firmware from an
@@ -101,19 +122,7 @@ uint32_t deviceCapabilities() {
          // backend without validation as defense in depth behind this bit.
          | (bcfg->panel->supportsCommandRotation
                 ? deviceproto::CAP_ROTATE : 0u)
-         // Only when OTA actually came up, not merely because this build
-         // contains the code and not merely because a password is stored: a
-         // panel that is not listening advertises no OTA, so nothing offers an
-         // update path that would time out. advertisesCapability owns that rule.
-         | (otapolicy::advertisesCapability(currentOtaStatus())
-                ? deviceproto::CAP_OTA
-                : 0u)
-         // Armed from the same stored password in the same call, so the two
-         // update paths are offered together or not at all.
-         | (otapolicy::advertisesCapability(currentOtaStatus()) &&
-                    streamupdatesvc::armed()
-                ? deviceproto::CAP_STREAM_UPDATE
-                : 0u);
+         | updateCapabilities();
 }
 
 

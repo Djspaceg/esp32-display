@@ -56,11 +56,34 @@ extension PanelManager {
     }
 
     /// One rule drives disabled state, help text, refusal, and dispatch.
+    /// Why a screen-only control is off on a board without a screen.
+    static let noScreenReason =
+        "This device has no screen, so there is nothing to show, dim, turn "
+            + "or blink."
+
+    /// Operations that act on a screen: what is shown, how bright, which way
+    /// up, whether it is on, and the identify blink (the backlight's, or an LED
+    /// that a board without a screen does not have). Restart, rename, the OTA
+    /// password and both kinds of firmware update work on any board.
+    static func needsScreen(_ operation: Operation) -> Bool {
+        switch operation {
+        case .brightness, .brightnessLevel, .brightnessLevels, .flip, .rotate,
+             .automaticRotation, .power, .identify, .streaming:
+            return true
+        case .restart, .rename, .otaPassword, .firmwareUpdate,
+             .wirelessFirmwareUpdate:
+            return false
+        }
+    }
+
     func operationAvailability(
         _ serviceName: String, operation: Operation
     ) -> OperationAvailability {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }) else {
             return .unavailable("This device is not known yet.")
+        }
+        if panel.hasNoScreen, Self.needsScreen(operation) {
+            return .unavailable(Self.noScreenReason)
         }
         let requirement = Self.requirement(for: operation)
         let paths = availablePaths(

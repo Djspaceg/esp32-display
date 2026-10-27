@@ -27,6 +27,7 @@ static constexpr GeneratedTouchCalibration GENERATED_TOUCH_CALIBRATIONS[] = {
     {Variant::XiaoSt7735, 54, 96, false, false, true},
     {Variant::LilygoTwatchS3, 240, 240, false, false, true},
     {Variant::LilygoTqtPro, 128, 128, false, false, true},
+    {Variant::XiaoS3Bare, 0, 0, false, false, false},
 };
 
 inline const GeneratedTouchCalibration *generatedTouchCalibration(

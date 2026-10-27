@@ -17,6 +17,8 @@ struct GamesDataRow: View {
     /// the firmware sheet's target takes it.
     @MainActor
     static func isOffered(for panel: PanelSnapshot, manager: PanelManager) -> Bool {
+        // Games need a screen to play on.
+        if panel.hasNoScreen { return false }
         let chip = panel.chip ?? manager.usbUpdateDevice(for: panel.serviceName)?.chip
         return chip == QuakePak.p4Chip || chip == QuakePak.s3Chip
     }

@@ -61,6 +61,8 @@ int16_t PANEL_H = 0;
 size_t FRAME_BYTES = 0;
 
 void configurePanelGeometry(const board::Config &config) {
+  // No screen, no frame: the geometry stays 0x0 and nothing allocates one.
+  if (!config.hasPanel()) return;
   PANEL_GEOMETRY = {config.panel->width, config.panel->height};
   PANEL_W = (int16_t)PANEL_GEOMETRY.width;
   PANEL_H = (int16_t)PANEL_GEOMETRY.height;
@@ -69,12 +71,23 @@ void configurePanelGeometry(const board::Config &config) {
 
 esp_lcd_panel_handle_t panel = nullptr;
 
+bool screenAbsent = false;
+
+void markScreenAbsent() {
+  screenAbsent = true;
+  PANEL_GEOMETRY = {0, 0};
+  PANEL_W = 0;
+  PANEL_H = 0;
+  FRAME_BYTES = 0;
+}
+
 // Whether this board speaks the tile-stream protocol instead of packed
 // bands: by capability (tileproto::panelCanStreamTiles: square glass, a grid
 // the protocol carries, PSRAM), in the image that carries the tile path (the
 // S3's). Never a list of boards.
 bool tileStreamEnabled() {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
+  if (!screenPresent()) return false;
   return tileproto::panelCanStreamTiles(bcfg->panel->width,
                                         bcfg->panel->height,
                                         bcfg->platform->usePsramFrameBuffers);
@@ -137,6 +150,7 @@ volatile uint32_t statDrawErrors = 0;
 // boardpanel::init so display_test exercises the identical path - a bring-up
 // test that constructs the panel its own way can pass while this is broken.
 bool initDisplay() {
+  if (!screenPresent()) return false;
   return boarddisplay::init(*bcfg, SPI2_HOST, FRAME_BYTES,
                             onColorTransDone, nullptr, nullptr, &panel);
 }

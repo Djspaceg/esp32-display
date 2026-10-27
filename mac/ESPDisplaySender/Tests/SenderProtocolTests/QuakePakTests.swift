@@ -140,6 +140,11 @@ final class QuakePakTests: XCTestCase {
         for family in ["s3", "p4"] {
             let chip = family == "s3" ? QuakePak.s3Chip : QuakePak.p4Chip
             for profile in GeneratedBoardCatalog.profilesByTarget[family] ?? [] {
+                // A board with no screen has no frame to hold: never offered.
+                if GeneratedBoardCatalog.headlessProfiles.contains(profile) {
+                    XCTAssertFalse(QuakePak.supports(chip: chip, profile: profile), profile)
+                    continue
+                }
                 let geometry = try! XCTUnwrap(GeneratedBoardCatalog.geometryByProfile[profile])
                 let holds = geometry.width >= 320 && geometry.height >= 240
                 XCTAssertEqual(QuakePak.supports(chip: chip, profile: profile), holds, profile)

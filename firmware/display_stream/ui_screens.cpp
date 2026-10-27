@@ -75,6 +75,7 @@ static int infoBarGlyphScale(const char *text, int frameWidth) {
 // Compose the idle card over the (pristine) last frame in bufA and push it.
 // Text position moves on every draw to avoid burn-in.
 void drawIdleScreen() {
+  if (!screenPresent()) return;
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   return;
 #endif
@@ -315,6 +316,7 @@ static void drawWifiControl(int width, int height,
 }
 
 void drawWifiSelectorScreen() {
+  if (!screenPresent()) return;
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   return;
 #endif
@@ -430,6 +432,7 @@ void drawWifiSelectorScreen() {
 void drawBootMenuScreen(const char *const *labels, size_t count,
                         size_t selected, const char *title,
                         const char *message) {
+  if (!screenPresent()) return;
   // No CONFIG_IDF_TARGET_ESP32C3 guard: a C3 image carries no game, so
   // ESPDISP_BOOT_MENU_RUNTIME is undefined there and this function does not
   // exist to be called.
@@ -493,6 +496,7 @@ void drawBootMenuScreen(const char *const *labels, size_t count,
 #endif  // ESPDISP_BOOT_MENU_RUNTIME
 
 void openWifiSelector() {
+  if (!screenPresent()) return;
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   Serial.println("wifi selector unavailable on compact C3 framebuffer");
   return;
@@ -652,6 +656,7 @@ bool handleSurveyTap(int16_t x, int16_t y) {
 // facts under it. Laid out by wifistatus::layout() for this glass. Redrawn
 // every 500 ms by loop() while surveyActive.
 void drawSurveyScreen() {
+  if (!screenPresent()) return;
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   return;
 #endif
@@ -822,6 +827,7 @@ const char *defaultInfoBarText() {
 // else uninterrupted, which is the entire point of this being a bar and not
 // a card.
 void showInfoBar(const char *text) {
+  if (!screenPresent()) return;
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   (void)text;
   return;
@@ -867,6 +873,10 @@ void showInfoBar(const char *text) {
 // - which is exactly what makes "just redraw bufA's rows" a correct revert
 // rather than a stale snapshot.
 void clearInfoBarIfExpired() {
+  if (!screenPresent()) {
+    infoBarUntil = 0;
+    return;
+  }
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   infoBarUntil = 0;
   return;
@@ -913,6 +923,7 @@ void clearInfoBarIfExpired() {
 // its declaration comment), so this is a correct base regardless of which
 // run triggered the call.
 void redrawInfoBarOverRun() {
+  if (!screenPresent()) return;
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   return;
 #endif
@@ -980,6 +991,7 @@ void drawTouchMarker(int16_t x, int16_t y) {
 // throughout.
 // percent < 0 draws no bar, for the states where there is no meaningful figure.
 void drawOtaScreen(const char *headline, int percent) {
+  if (!screenPresent()) return;
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
   (void)headline;
   (void)percent;

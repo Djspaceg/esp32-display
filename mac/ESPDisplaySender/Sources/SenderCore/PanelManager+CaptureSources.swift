@@ -180,6 +180,11 @@ extension PanelManager {
         panels.first { $0.serviceName == serviceName }?.geometry
     }
 
+    /// Whether the device's board has no screen, as far as this app has heard.
+    func hasNoScreen(_ serviceName: String) -> Bool {
+        panels.first { $0.serviceName == serviceName }?.hasNoScreen ?? false
+    }
+
     private func transformRegion(
         for serviceName: String,
         _ transform: (RegionSpec, PanelGeometry?, CGSize) -> RegionSpec
@@ -269,7 +274,9 @@ extension PanelManager {
         guard previewVisible,
             let name = selectedServiceName,
             sessions[name] == nil,
-            let panel = panels.first(where: { $0.serviceName == name })
+            let panel = panels.first(where: { $0.serviceName == name }),
+            // Nothing to preview for a device with no screen.
+            !panel.hasNoScreen
         else {
             previewDriver.stop()
             return

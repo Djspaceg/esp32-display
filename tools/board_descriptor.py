@@ -204,7 +204,17 @@ DETECTION_KINDS = {
 DSI_DETECTION_KINDS = {"dsi_panel_id", "dsi_panel_id_other"}
 DETECTION_RESOLUTIONS = {"first_match", "exactly_one"}
 PROBE_RELEASES = {"never", "always", "on_success_no_ack"}
-PANEL_BUSES = {"spi", "qspi", "mipi_dsi"}
+# "none" is a board with no panel at all (the bare XIAO ESP32-S3): the
+# firmware runs it headless and the app lists it as a device without a screen.
+PANEL_BUSES = {"spi", "qspi", "mipi_dsi", "none"}
+# What a candidate requires of its family's SPI panel readback: a controller
+# answering on the panel lines, nothing answering there, or no readback.
+PANEL_READBACKS = ("none", "answers", "silent")
+# Carrier lines that only exist to drive a panel, which a board with no panel
+# therefore never declares.
+PANEL_CARRIER_PINS = (
+    "pin_sclk", "pin_mosi", "pin_data1", "pin_data2", "pin_data3", "pin_cs",
+    "pin_dc", "pin_rst", "pin_bl")
 TOUCH_CONTROLLERS = {
     "none", "axs5106l", "cst9217", "cst816", "gt911", "ft6336"}
 POWER_CONTROLLERS = {"none", "axp2101", "battery_adc"}
@@ -231,6 +241,9 @@ OPTIONAL_FIELDS = {
     "detection.sense_max_mv": 0,
     "detection.panel_id": [],
     "detection.touch_resolution": [],
+    # PANEL_READBACKS: whether this candidate needs the family's SPI panel
+    # readback to have found a controller answering, or nothing.
+    "detection.panel_readback": "none",
     # The ES8311 DAC level from the vendor's reference code, on Espressif's
     # es8311 driver percent scale. Absent (0) keeps the firmware default.
     "audio.dac_volume_percent": 0,
@@ -406,13 +419,105 @@ def _validate_motion(descriptor: Dict[str, Any]) -> None:
 
 
 def _validate_doom_capability(descriptor: Dict[str, Any]) -> None:
-    """Doom is a family capability, never a per-board opt-in."""
-    if descriptor["capabilities"]["doom"] != \
-            descriptor["family"]["requires_doom_wad"]:
+    """Doom is a family capability, never a per-board opt-in: a board with a
+    screen runs it exactly when its family image carries it, and a board
+    without one never does."""
+    expected = (descriptor["family"]["requires_doom_wad"] and
+                has_panel(descriptor))
+    if descriptor["capabilities"]["doom"] != expected:
         raise DescriptorError(
-            "%s: capabilities.doom must equal family.requires_doom_wad: a "
-            "board runs Doom exactly when its family image carries it"
+            "%s: capabilities.doom must equal family.requires_doom_wad on a "
+            "board with a panel, and be false without one: a board runs Doom "
+            "exactly when its family image carries it and it has a screen"
             % _source_name(descriptor))
+
+
+def has_panel(descriptor: Dict[str, Any]) -> bool:
+    """Whether the board has a panel at all (panel.bus is not none)."""
+    return descriptor["panel"]["bus"] != "none"
+
+
+def panel_readback(descriptor: Dict[str, Any]) -> str:
+    """What the candidate needs of the SPI panel readback: PANEL_READBACKS."""
+    return descriptor["detection"].get(
+        "panel_readback", OPTIONAL_FIELDS["detection.panel_readback"])
+
+
+def panel_readback_pins(descriptor: Dict[str, Any]) -> Tuple[int, ...]:
+    """The (SCLK, SDA, CS, DC, RST) lines an answering board's panel uses."""
+    carrier = descriptor["carrier"]
+    return tuple(carrier[key] for key in (
+        "pin_sclk", "pin_mosi", "pin_cs", "pin_dc", "pin_rst"))
+
+
+def _validate_absent_panel(descriptor: Dict[str, Any]) -> None:
+    """A board with panel.bus none declares nothing a panel would need."""
+    if has_panel(descriptor):
+        return
+    source = _source_name(descriptor)
+    panel = descriptor["panel"]
+    for field, value in panel.items():
+        if field in ("bus", "symbol", "profile", "driver", "color_order",
+                     "data_endian", "pixel_depth"):
+            continue
+        if value not in (0, False):
+            raise DescriptorError(
+                "%s: panel.bus none declares no panel, so panel.%s must be "
+                "0 or false" % (source, field))
+    if panel["symbol"] != "PANEL_NONE" or panel["driver"] != "None":
+        raise DescriptorError(
+            "%s: panel.bus none takes symbol PANEL_NONE and driver None"
+            % source)
+    carrier = descriptor["carrier"]
+    for key in PANEL_CARRIER_PINS:
+        if carrier[key] != -1:
+            raise DescriptorError(
+                "%s: panel.bus none wires no panel, so carrier.%s must be -1"
+                % (source, key))
+    if optional_pin(descriptor, "carrier.pin_panel_power") != -1:
+        raise DescriptorError(
+            "%s: panel.bus none has no panel rail to switch" % source)
+    if descriptor["backlight"]["kind"] != "none" or \
+            descriptor["backlight"]["enable_pin"] != -1:
+        raise DescriptorError(
+            "%s: panel.bus none has no backlight" % source)
+    if descriptor["touch"]["controller"] != "none":
+        raise DescriptorError(
+            "%s: panel.bus none has no glass to touch" % source)
+    if descriptor["reset"]["expander"] != "none":
+        raise DescriptorError(
+            "%s: panel.bus none has no panel reset to expand" % source)
+    if descriptor["orientation"]["quarter_turns"] != [0] or \
+            descriptor["orientation"]["mirror_x_supported"]:
+        raise DescriptorError(
+            "%s: panel.bus none has nothing to rotate or mirror" % source)
+
+
+def _validate_panel_readback(descriptor: Dict[str, Any]) -> None:
+    """A readback candidate is an s3 board with either an SPI panel that can
+    answer on its own lines, or no panel at all."""
+    source = _source_name(descriptor)
+    readback = panel_readback(descriptor)
+    if readback not in PANEL_READBACKS:
+        raise DescriptorError(
+            "%s: detection.panel_readback must be one of %s"
+            % (source, ", ".join(PANEL_READBACKS)))
+    if readback == "none":
+        return
+    if descriptor["identity"]["target"] != "s3":
+        raise DescriptorError(
+            "%s: detection.panel_readback is only supported on s3" % source)
+    if readback == "answers":
+        panel = descriptor["panel"]
+        if panel["bus"] != "spi" or any(
+                pin < 0 for pin in panel_readback_pins(descriptor)):
+            raise DescriptorError(
+                "%s: panel_readback answers requires an SPI panel with SCLK, "
+                "MOSI, CS, DC and RST wired" % source)
+    elif has_panel(descriptor):
+        raise DescriptorError(
+            "%s: panel_readback silent requires no panel (panel.bus none)"
+            % source)
 
 
 def usb_host(descriptor: Dict[str, Any]) -> str:
@@ -695,6 +800,7 @@ def _validate_detection(descriptor: Dict[str, Any]) -> None:
 
     _validate_dsi_detection(descriptor, kind)
     _validate_touch_resolution(descriptor)
+    _validate_panel_readback(descriptor)
     is_i2c = kind.startswith("i2c_")
     if is_i2c:
         _expect_int_range(descriptor, "detection.sda", 0, 127)
@@ -1294,7 +1400,7 @@ def validate_descriptors(
     variants: Dict[str, str] = {}
     variant_values: Dict[int, str] = {}
     detection_signatures: Dict[
-        Tuple[Any, ...], List[Tuple[str, Tuple[int, int, int]]]] = {}
+        Tuple[Any, ...], List[Tuple[str, Tuple[int, int, int], str]]] = {}
     family_contracts: Dict[str, Tuple[Any, ...]] = {}
     generated_by_family: Dict[str, List[str]] = {}
     detection_orders: Dict[Tuple[str, int], str] = {}
@@ -1428,18 +1534,21 @@ def validate_descriptors(
 
         # Two candidates may share one probe signature only when both carry a
         # sense guard on the same pin with disjoint windows, so the analog
-        # reading can never select both.
+        # reading can never select both, or when one needs the family's panel
+        # readback to answer and the other needs it silent.
         signature = _detection_signature(descriptor)
         sense = detection_sense(descriptor)
-        for other_source, other_sense in detection_signatures.get(
-                signature, []):
-            if not _sense_windows_disjoint(sense, other_sense):
+        readback = panel_readback(descriptor)
+        for other_source, other_sense, other_readback in \
+                detection_signatures.get(signature, []):
+            if not _sense_windows_disjoint(sense, other_sense) and \
+                    {readback, other_readback} != {"answers", "silent"}:
                 raise DescriptorError(
                     "%s: duplicate probe signature already claimed by %s"
                     % (source, other_source)
                 )
         detection_signatures.setdefault(signature, []).append(
-            (source, sense))
+            (source, sense, readback))
 
         capacity = descriptor["capacity"]["minimum_flash_bytes"]
         layout = descriptor["family"]["common_layout_bytes"]
@@ -1476,10 +1585,13 @@ def validate_descriptors(
         _expect_identifier(descriptor, "panel.symbol")
         _expect_identifier(descriptor, "panel.profile")
         _expect_identifier(descriptor, "panel.driver")
+        _validate_absent_panel(descriptor)
+        # A panel has at least one pixel; an absent one has none.
+        smallest = 1 if has_panel(descriptor) else 0
         panel_width = _expect_int_range(
-            descriptor, "panel.width", 1, 65535)
+            descriptor, "panel.width", smallest, 65535)
         panel_height = _expect_int_range(
-            descriptor, "panel.height", 1, 65535)
+            descriptor, "panel.height", smallest, 65535)
         memory_width = _expect_int_range(
             descriptor, "panel.memory_width", 0, 65535)
         memory_height = _expect_int_range(
@@ -1650,6 +1762,7 @@ def validate_descriptors(
                     % (_source_name(owner),
                        " ".join("%02X" % value for value in panel_id)))
 
+    _validate_panel_readback_families(descriptors)
     _validate_amp_pins_before_identification(descriptors)
     if len(descriptors) >= 3:
         for target in sorted(family_contracts):
@@ -1660,6 +1773,33 @@ def validate_descriptors(
                     "proof; found %d" % (target, len(generated))
                 )
     return descriptors
+
+
+def _validate_panel_readback_families(
+    descriptors: Sequence[Dict[str, Any]],
+) -> None:
+    """One readback serves a whole family, so its answering candidates share
+    their panel lines, and a silent candidate has an answering one whose
+    lines it is read on (with nothing on them, it is the board without)."""
+    answers: Dict[str, Tuple[Tuple[int, ...], str]] = {}
+    for descriptor in descriptors:
+        if panel_readback(descriptor) != "answers":
+            continue
+        target = descriptor["identity"]["target"]
+        pins = panel_readback_pins(descriptor)
+        if target in answers and answers[target][0] != pins:
+            raise DescriptorError(
+                "%s: panel_readback answers pins differ from %s"
+                % (_source_name(descriptor), answers[target][1]))
+        answers.setdefault(target, (pins, _source_name(descriptor)))
+    for descriptor in descriptors:
+        if panel_readback(descriptor) != "silent":
+            continue
+        if descriptor["identity"]["target"] not in answers:
+            raise DescriptorError(
+                "%s: family %s has no panel_readback answers candidate whose "
+                "panel lines this board is read on"
+                % (_source_name(descriptor), descriptor["identity"]["target"]))
 
 
 def grouped_by_family(
