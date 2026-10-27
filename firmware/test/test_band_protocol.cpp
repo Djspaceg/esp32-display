@@ -4290,16 +4290,12 @@ int main() {
       if (identity.variant == Variant::LilygoTqtPro) continue;
       CHECK(!board::configFor(identity.variant).hasKey());
     }
-    // LilyGO's earlier GC9107 glass: BGR, no inversion, 40 MHz, mode 0.
+    // LilyGO's earlier GC9107 glass: RGB, no inversion, 40 MHz, mode 0.
     CHECK(t.panel->driver == board::PanelDriver::Gc9107);
     CHECK(t.panel->profile == board::PanelProfile::Gc9107Tqt_128x128);
     CHECK(t.panel->bus == board::PanelBus::Spi);
     CHECK(t.panel->width == 128 && t.panel->height == 128);
-    // Inversion off; BGR. Measured on the glass, 2026-10-27: with RGB
-    // (MADCTL 0x00) red never appeared on screen, so red and blue were
-    // swapped. LilyGO's current old_panel rotation table writes BGR too.
-    CHECK(!t.panel->invertColor);
-    CHECK(t.panel->colorBgr);
+    CHECK(!t.panel->invertColor && !t.panel->colorBgr);
     CHECK(!t.panel->roundDisplay);
     CHECK(t.panel->pixelClockHz == 40 * 1000 * 1000);
     CHECK(t.panel->spiMode == 0);
@@ -4382,11 +4378,13 @@ int main() {
 
   // --- Colour order follows the descriptor ---------------------------------
   {
-    // Every GC9107 and ST7735 glass takes BGR, the T-QT's included, and
-    // every other panel RGB; the descriptor says which, and none moved.
+    // Every GC9107 and ST7735 glass before the T-QT's took BGR and every
+    // other panel RGB; the descriptor now says which, and none moved.
+    using board::Variant;
     for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
       if (!board::configFor(identity.variant).hasPanel()) continue;
       const board::PanelConfig &panel = *board::configFor(identity.variant).panel;
+      if (identity.variant == Variant::LilygoTqtPro) continue;
       const bool driverWasBgr = panel.driver == board::PanelDriver::Gc9107 ||
                                 panel.driver == board::PanelDriver::St7735;
       CHECK(panel.colorBgr == driverWasBgr);

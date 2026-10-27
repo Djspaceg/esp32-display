@@ -80,7 +80,7 @@ static constexpr PanelConfig PANEL_GC9107_TQT_128X128 = {
     false, false, true,
     0, 0, 0, 0, 0,
     0, 0, 0,
-    false, true, true};
+    false, false, true};
 static constexpr PanelConfig PANEL_ST7789V3_240X240 = {
     PanelProfile::St7789V3_240x240, PanelDriver::St7789, PanelBus::Spi,
     240, 240, 240, 320,

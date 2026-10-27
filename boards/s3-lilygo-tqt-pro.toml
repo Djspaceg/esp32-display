@@ -65,10 +65,12 @@ minimum_flash_bytes = 4194304
 # 0x20) and GC9A01_Rotation.h (column 2, row 1 in plain and MX|MY, column 1,
 # row 2 in the MV states). LilyGO's 2024 factory sketch draws upright at
 # setRotation(0), plain MADCTL, so orientation_offset is 0.
-# Colour order BGR, as LilyGO's extras/old_panel/GC9A01_Rotation.h writes
-# (TFT_MAD_BGR). Seen on the glass, 2026-10-27: with RGB (MADCTL 0x00, what
-# LilyGO's 2024 lib/TFT_eSPI wrote) red never appeared anywhere on screen,
-# red and blue swapped.
+# Colour order: the image this unit shipped with was built from LilyGO's
+# 2024 lib/TFT_eSPI (repo commit 3f31e59), whose GC9A01_Defines.h sets
+# TFT_MAD_COLOR_ORDER to TFT_MAD_RGB, so its MADCTL is 0x00: RGB. The 2026
+# extras/old_panel/GC9A01_Rotation.h writes TFT_MAD_BGR instead; the earlier
+# build is the one measured against this glass, so RGB stands until a red
+# fill on the glass says otherwise.
 # LilyGO's TFT_eSPI setup clocks it at 40 MHz.
 # The GC9107 datasheet gives 128x160 of memory, but LilyGO's own window
 # (columns 2..129) runs past column 127, so the memory is taken as the
@@ -90,7 +92,7 @@ orientation_offset = 0
 invert_color = false
 round_display = false
 supports_command_rotation = true
-color_order = "bgr"
+color_order = "rgb"
 data_endian = "big"
 pixel_depth = 16
 dsi_data_lanes = 0

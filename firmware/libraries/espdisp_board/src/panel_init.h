@@ -347,8 +347,8 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
 
   esp_lcd_panel_dev_config_t panel_config = {};
   panel_config.reset_gpio_num = cfg.pinRst;
-  // The descriptor's color_order: BGR on every GC9107 and ST7735 glass so
-  // far, RGB on the others.
+  // The descriptor's color_order. Every GC9107 and ST7735 glass but the
+  // T-QT's takes BGR; the T-QT's is RGB (LilyGO's MADCTL 0x00).
   panel_config.rgb_ele_order = cfg.panel->colorBgr
                                    ? LCD_RGB_ELEMENT_ORDER_BGR
                                    : LCD_RGB_ELEMENT_ORDER_RGB;
