@@ -115,11 +115,12 @@ static volatile bool pendingLandscape = false;   // orientation for the pending 
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 // ---- Tile stream (CAP_TILE_STREAM, tile_protocol.h) ----------------------
-// The band protocol's successor on this board: a 30x30 grid of 16x16 tiles,
-// only dirty runs travel, each raw / RLE565 / BC1. S3-compile-gated AND
-// variant-gated at runtime (tileStreamEnabled()) - the C6 binary carries
-// none of this. Bit 15 of the header's third/fourth bytes means TILE packet
-// on this board and PACKED BAND packet everywhere else; the two layouts are
+// The band protocol's successor on square S3 panels: a grid of 16x16 tiles
+// (30x30 on the 466 panel), only dirty runs travel, each raw / RLE565 / BC1.
+// S3-compile-gated AND capability-gated at runtime (tileStreamEnabled()) -
+// the C6 binary carries none of this. Bit 15 of the header's third/fourth
+// bytes means TILE packet on a tile board and PACKED BAND packet everywhere
+// else; the two layouts are
 // byte-ambiguous past the flag, which is why the board advertises exactly
 // one of CAP_TILE_STREAM / CAP_COMPRESSED_BANDS, never both - see
 // deviceCapabilities().

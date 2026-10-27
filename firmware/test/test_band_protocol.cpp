@@ -4069,8 +4069,8 @@ int main() {
 
     // 128x128 produces a band layout the packed-band wire format carries
     // exactly, in both orientations - the link between the board table and the
-    // protocol. (Tile streaming stays limited to the AmoledCo5300 elsewhere, so
-    // this board uses the packed-band path.)
+    // protocol. (Its square glass also takes the tile stream, which is what
+    // it advertises; the band layout stays valid for senders without tiles.)
     const Geometry g = {gc.panel->width, gc.panel->height};
     CHECK(g.valid());
     CHECK(g.maxBandCount() <= MAX_BANDS);
@@ -7057,6 +7057,31 @@ int main() {
     CHECK(!tileproto::panelCanStreamTiles(720, 720, true));  // > 32 columns
     CHECK(!tileproto::panelCanStreamTiles(466, 466, false)); // no PSRAM
     CHECK(!tileproto::panelCanStreamTiles(0, 0, true));
+    // Which boards that makes, pinned: every square S3 panel the grid
+    // carries, and the 1.9 (170x320) and the XIAO (96x54) stay on bands.
+    {
+      std::vector<board::Variant> tiles;
+      for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+        if (identity.platform != board::Platform::Esp32S3) continue;
+        const board::Config &cfg = board::configFor(identity.variant);
+        if (tileproto::panelCanStreamTiles(
+                cfg.panel->width, cfg.panel->height,
+                cfg.platform->usePsramFrameBuffers)) {
+          tiles.push_back(identity.variant);
+        }
+      }
+      const board::Variant want[] = {
+          board::Variant::AmoledCo5300, board::Variant::LcdSt77916,
+          board::Variant::LcdGc9107, board::Variant::TouchSt7789,
+          board::Variant::LcdSt7789_130, board::Variant::ElecrowKnob128,
+          board::Variant::LilygoTwatchS3};
+      CHECK(tiles.size() == sizeof(want) / sizeof(want[0]));
+      for (board::Variant v : want) {
+        bool found = false;
+        for (board::Variant t : tiles) found = found || t == v;
+        CHECK(found);
+      }
+    }
     // Whatever qualifies is exactly what TileGeometry says the wire carries.
     for (uint16_t side = 16; side <= 640; side += 16) {
       const tileproto::TileGeometry grid = {side, side};
@@ -7333,11 +7358,9 @@ int main() {
       // The hold the watch's player meant as "about 3 seconds" measured
       // 2560 ms on the board: it must leave Doom, not go back a menu.
       CHECK(doom_menu_key_exit_due(2560));
-      // And the exit lands well before the PMU's 4 s power-off, with a
-      // second to spare.
+      // And the exit lands at least a second before the PMU's 4 s
+      // power-off (REG 27H on the watch).
       CHECK(DOOM_MENU_KEY_EXIT_MS + 1000u < 4000u);
-      // Exit lands before the PMU's own hold-to-power-off (4 s on the watch).
-      CHECK(DOOM_MENU_KEY_EXIT_MS < 4000u);
     }
 
     // The PWR key fires while held: its down edge holds Fire, its up edge

@@ -4,8 +4,8 @@
 // mirrors this arithmetic in TileProtocol.swift; both suites assert the
 // wire independently, never via a shared fixture.
 //
-// This is the successor to the band protocol for square AMOLED panels
-// (advertised by CAP_TILE_STREAM, gated on board::Variant::AmoledCo5300):
+// This is the successor to the band protocol for square panels (advertised
+// by CAP_TILE_STREAM on every board panelCanStreamTiles() accepts):
 // instead of full-width one-row bands, the frame is a grid of 16x16 tiles
 // and only dirty tiles travel, each run of adjacent dirty tiles encoded
 // with whichever codec is smallest (raw, RLE565, or BC1). Panels without

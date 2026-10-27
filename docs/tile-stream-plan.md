@@ -121,10 +121,12 @@ All file references are to the repo as of commit `5a9c24b3`.
   (next free after `CAP_POWER`). Mirrored as
   `DeviceProtocol.Capabilities.tileStream` (Swift) with the bit value pinned
   in both test suites, like `CAP_ROTATE`/`CAP_POWER` are.
-- Firmware advertises it only when `bcfg->variant == board::Variant::AmoledCo5300`.
-  Gate on the variant, not `panelW == panelH`: the scoping is "this board
-  family (S3 + square)", and a hypothetical future square C6 board must not
-  inherit it implicitly.
+- Firmware advertises it on every board that can take it
+  (`tileproto::panelCanStreamTiles`: square glass whose grid the protocol
+  carries, PSRAM, on the S3 image that carries the tile path). It began on the
+  AmoledCo5300 alone; since 2.1.0 features follow board capability, never a
+  list of boards, so every square S3 panel takes it and a C6 never does (its
+  image carries no tile path).
 - The Mac sends tile-stream packets only to a panel advertising the bit;
   every other pairing takes the existing band path, byte-identical. This is
   the same additive-capability pattern `CAP_COMPRESSED_BANDS` shipped with —
