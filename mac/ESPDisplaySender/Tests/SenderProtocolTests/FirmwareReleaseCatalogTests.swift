@@ -112,7 +112,7 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
             family: "s3", chip: "esp32s3", profile: "co5300",
             partition: "universal-8m-doom-saves-ota"))
         XCTAssertEqual(s3.family, "s3")
-        XCTAssertEqual(s3.profiles, ["st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"])
+        XCTAssertEqual(s3.profiles, ["st7735-042", "xiao-s3-bare", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"])
 
         // The T-QT shares the S3 chip but has its own family and table.
         let tqt = try catalog.entry(for: .init(
@@ -231,7 +231,7 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
         let profiles: [String: [String]] = [
             "c3": ["gc9a01a-240"],
             "c6": ["st7789", "jd9853"],
-            "s3": ["st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"],
+            "s3": ["st7735-042", "xiao-s3-bare", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"],
             "s3-4m": ["gc9107-tqt"],
             "p4": ["st7703-4b", "jd9365-4c", "jd9365-34c"],
         ]
