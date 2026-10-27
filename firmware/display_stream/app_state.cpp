@@ -71,10 +71,8 @@ void configurePanelGeometry(const board::Config &config) {
 
 esp_lcd_panel_handle_t panel = nullptr;
 
-bool screenAbsent = false;
-
 void markScreenAbsent() {
-  screenAbsent = true;
+  screenAbsentFlag() = true;
   PANEL_GEOMETRY = {0, 0};
   PANEL_W = 0;
   PANEL_H = 0;

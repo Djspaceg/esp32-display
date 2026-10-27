@@ -95,7 +95,11 @@ struct PanelSnapshot: Identifiable, Equatable {
 
     /// The board has no screen: nothing to stream to, capture for, rotate or
     /// dim. It is still flashed, set up for WiFi, restarted and updated.
-    var hasNoScreen: Bool { Self.profileHasNoScreen(profile) }
+    var hasNoScreen: Bool { reportedNoScreen || Self.profileHasNoScreen(profile) }
+    /// The firmware announced `res=0x0`: no screen, whatever its profile says
+    /// (an unidentified board reports `auto`; a board whose panel did not come
+    /// up reports its own). Discovery-scoped like `geometry`.
+    var reportedNoScreen = false
 
     /// The board has shown it has a knob this launch: by reporting a knob
     /// profile, or by sending a knob gesture. Kept when `profile` is cleared

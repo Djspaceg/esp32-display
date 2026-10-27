@@ -221,11 +221,22 @@ struct PanelReadbackEvidence {
   uint32_t bits = 0;
 };
 
-/// A floating line nobody drives keeps the level the host left on it, so
-/// every bit it returns is the same. A reply with both levels in it was
-/// driven by something on the far end: a panel controller answered.
-/// `bits` holds the first bit clocked in as its most significant of
-/// `count`; a count outside 1..32 is no reading.
+/// Level changes between successive bits of a reading.
+inline uint8_t readbackTransitions(uint32_t bits, uint8_t count) {
+  uint8_t transitions = 0;
+  for (uint8_t i = 1; i < count; ++i) {
+    if (((bits >> i) & 1u) != ((bits >> (i - 1)) & 1u)) ++transitions;
+  }
+  return transitions;
+}
+
+/// A floating line nobody drives keeps the level the host left on it, or at
+/// most drifts slowly to the other one (leakage, a finger): one level change
+/// at most. A controller's reply changes level again and again (the screen
+/// XIAO's bench readings 41BB07FF, 41800000 and 41BBFFFF have 4 to 10), so
+/// two or more changes is a panel answering. `bits` holds the first bit
+/// clocked in as its most significant of `count`; a count outside 1..32 is no
+/// reading.
 inline PanelReadbackEvidence panelReadbackEvidenceFromBits(uint32_t bits,
                                                            uint8_t count) {
   PanelReadbackEvidence evidence;
@@ -233,7 +244,7 @@ inline PanelReadbackEvidence panelReadbackEvidenceFromBits(uint32_t bits,
   const uint32_t mask = count == 32 ? 0xFFFFFFFFu : ((1u << count) - 1u);
   evidence.read = true;
   evidence.bits = bits & mask;
-  evidence.answered = evidence.bits != 0 && evidence.bits != mask;
+  evidence.answered = readbackTransitions(evidence.bits, count) >= 2;
   return evidence;
 }
 

@@ -57,12 +57,15 @@ static uint32_t updateCapabilities() {
 }
 
 // What a board without a screen can do: restart, report telemetry, update,
-// and, where it has one, report a battery. Every other bit is a screen's
-// (brightness, flip, rotate, power, sleep, idle text, identify, frames) or its
-// inputs' (touch, the input map), so none is offered.
+// and, where it has them, report a battery and blink an addressable LED to
+// identify itself. Every other bit is a screen's (brightness, flip, rotate,
+// power, sleep, idle text, frames) or its inputs' (touch, the input map), so
+// none is offered.
 static uint32_t headlessCapabilities() {
   return deviceproto::CAP_RESTART | deviceproto::CAP_TELEMETRY |
          (batteryAvailable ? deviceproto::CAP_BATTERY : 0u) |
+         // setup() builds the LED driver on every board that has one.
+         (bcfg->hasRgbLed() ? deviceproto::CAP_IDENTIFY : 0u) |
          updateCapabilities();
 }
 

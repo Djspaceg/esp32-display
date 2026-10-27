@@ -40,12 +40,16 @@ void applyPendingControl() {
   portEXIT_CRITICAL(&controlMux);
 
   if (hasCommand) {
-    // Without a screen only Restart means anything: brightness, flip,
-    // rotation, power and identify all act on the panel. None of their
-    // capabilities is advertised, so this answers a sender that sends one
-    // anyway with the same refusal a fixed backlight gets.
-    if (!screenPresent() &&
-        command.opcode != deviceproto::ControlOpcode::Restart) {
+    // Without a screen only Restart means anything, and Identify where an
+    // addressable LED can still blink: brightness, flip, rotation and power
+    // act on the panel. None of their capabilities is advertised, so this
+    // answers a sender that sends one anyway with the same refusal a fixed
+    // backlight gets.
+    const bool headlessAllowed =
+        command.opcode == deviceproto::ControlOpcode::Restart ||
+        (command.opcode == deviceproto::ControlOpcode::Identify &&
+         bcfg->hasRgbLed());
+    if (!screenPresent() && !headlessAllowed) {
       Serial.printf("network: control %u refused (no screen)\n",
                     (unsigned)command.opcode);
       portENTER_CRITICAL(&controlMux);

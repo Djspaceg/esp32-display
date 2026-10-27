@@ -2878,6 +2878,14 @@ int main() {
       CHECK(low.read && !low.answered);
       const auto high = panelReadbackEvidenceFromBits(0xFFFFFFFFu, 32);
       CHECK(high.read && !high.answered);
+      // The other readings the screen XIAO's bench unit returned.
+      CHECK(panelReadbackEvidenceFromBits(0x41800000u, 32).answered);
+      CHECK(panelReadbackEvidenceFromBits(0x41BBFFFFu, 32).answered);
+      // A floating pad drifting once from the level it was left at is still
+      // nothing answering, either way.
+      CHECK(!panelReadbackEvidenceFromBits(0x00000FFFu, 32).answered);
+      CHECK(!panelReadbackEvidenceFromBits(0xFFFFF000u, 32).answered);
+      CHECK(!panelReadbackEvidenceFromBits(0x00000001u, 32).answered);
       // Only the clocked bits count: eight high bits are still uniform.
       CHECK(!panelReadbackEvidenceFromBits(0x000000FFu, 8).answered);
       CHECK(panelReadbackEvidenceFromBits(0x00000081u, 8).answered);

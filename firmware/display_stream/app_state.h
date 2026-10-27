@@ -36,9 +36,12 @@ extern const board::Config *bcfg;
 /// runs headless: WiFi, the serial command set and firmware updates, and
 /// nothing that draws, lights or reads a panel. Every drawing entry point
 /// returns early on false, so no path can reach a panel that is not there.
-extern bool screenAbsent;
+inline bool &screenAbsentFlag() {
+  static bool absent = false;
+  return absent;
+}
 inline bool screenPresent() {
-  return !screenAbsent && bcfg != nullptr && bcfg->hasPanel();
+  return !screenAbsentFlag() && bcfg != nullptr && bcfg->hasPanel();
 }
 /// The panel did not come up: run headless from here on, with no geometry.
 void markScreenAbsent();

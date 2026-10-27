@@ -57,6 +57,11 @@ public struct ServiceMetadata: Hashable, Sendable {
     /// `res`, once it has been believed - see `PanelGeometry.isStreamable` for
     /// what "believed" means and why an implausible size becomes nil here.
     public let geometry: PanelGeometry?
+    /// `res=0x0`: the firmware says this board has no screen (a board whose
+    /// descriptor has none, one no detector could name, or one whose panel did
+    /// not come up). Distinct from a missing or implausible `res`, which says
+    /// nothing.
+    public let reportsNoScreen: Bool
     /// `fw`. See the note above about EINF being the authority.
     public let firmwareVersion: String?
     /// `src`. Which build of `fw` this is; nil from firmware predating the
@@ -94,10 +99,12 @@ public struct ServiceMetadata: Hashable, Sendable {
         ssid: String? = nil,
         capabilities: DeviceProtocol.Capabilities? = nil,
         frameProtocolVersion: Int? = nil,
-        audioDescriptor: AudioStreamDescriptor? = nil
+        audioDescriptor: AudioStreamDescriptor? = nil,
+        reportsNoScreen: Bool = false
     ) {
         self.name = name
         self.geometry = geometry
+        self.reportsNoScreen = reportsNoScreen
         self.firmwareVersion = firmwareVersion
         self.firmwareSource = firmwareSource
         self.chip = chip
@@ -145,6 +152,7 @@ public struct ServiceMetadata: Hashable, Sendable {
         self.partition = Self.nonEmpty(records["partition"])
         self.ssid = Self.nonEmpty(records["ssid"])
         self.geometry = Self.parseResolution(records["res"])
+        self.reportsNoScreen = records["res"] == Self.noScreenResolution
         let capabilities = Self.parseCapabilities(records["caps"])
         self.capabilities = capabilities
         self.frameProtocolVersion = Self.parseUnsignedDecimal(records["proto"])
@@ -195,6 +203,9 @@ public struct ServiceMetadata: Hashable, Sendable {
     /// then strict about the result, because a geometry taken from here drives
     /// band arithmetic and frame allocation on every frame. See
     /// `PanelGeometry.isStreamable` for the bounds and where they come from.
+    /// The `res` a board with no screen announces.
+    public static let noScreenResolution = "0x0"
+
     static func parseResolution(_ value: String?) -> PanelGeometry? {
         guard let value else { return nil }
         let parts = value.split(separator: "x", omittingEmptySubsequences: false)

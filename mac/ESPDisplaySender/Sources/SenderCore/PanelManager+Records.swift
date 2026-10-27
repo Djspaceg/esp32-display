@@ -26,6 +26,7 @@ extension PanelManager {
                 panels[index].profile = nil
                 panels[index].partition = nil
                 panels[index].geometry = nil
+                panels[index].reportedNoScreen = false
                 panels[index].announcedSSID = nil
                 panels[index].announcedAt = nil
             }
@@ -91,10 +92,19 @@ extension PanelManager {
         // The resolution takes the same treatment and for the same reason: a
         // second browse result without metadata must not erase a `res` that has
         // already arrived. A panel does not stop knowing its own screen size.
+        // A board that announces no screen has no geometry to keep, whatever a
+        // USB identity or an earlier result suggested.
+        for device in devices where device.metadata.reportsNoScreen {
+            guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
+            else { continue }
+            panels[index].reportedNoScreen = true
+            panels[index].geometry = nil
+        }
         for device in devices where device.metadata.geometry != nil {
             guard let index = panels.firstIndex(where: { $0.serviceName == device.name })
             else { continue }
             guard let geometry = device.metadata.geometry else { continue }
+            panels[index].reportedNoScreen = false
             panels[index].geometry = geometry
             if let region = panels[index].source.region,
                !region.matchesAspect(of: geometry) {

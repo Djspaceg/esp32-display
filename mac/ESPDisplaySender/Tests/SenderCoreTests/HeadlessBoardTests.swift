@@ -73,7 +73,7 @@ final class HeadlessBoardTests: XCTestCase {
 
         for operation: PanelManager.Operation in [
             .brightness, .brightnessLevel, .brightnessLevels, .flip, .rotate,
-            .automaticRotation, .power, .identify, .streaming,
+            .automaticRotation, .power, .streaming,
         ] {
             XCTAssertTrue(PanelManager.needsScreen(operation), "\(operation)")
             XCTAssertEqual(
@@ -81,7 +81,8 @@ final class HeadlessBoardTests: XCTestCase {
                 PanelManager.noScreenReason, "\(operation)")
         }
         for operation: PanelManager.Operation in [
-            .restart, .rename, .otaPassword, .firmwareUpdate, .wirelessFirmwareUpdate,
+            .identify, .restart, .rename, .otaPassword, .firmwareUpdate,
+            .wirelessFirmwareUpdate,
         ] {
             XCTAssertFalse(PanelManager.needsScreen(operation), "\(operation)")
             XCTAssertNotEqual(
@@ -89,6 +90,8 @@ final class HeadlessBoardTests: XCTestCase {
                 PanelManager.noScreenReason, "\(operation)")
         }
         XCTAssertTrue(manager.canControl(panel.serviceName, capability: .restart))
+        // Identify follows its capability: off here, where no LED is advertised.
+        XCTAssertFalse(manager.canControl(panel.serviceName, capability: .identify))
         XCTAssertFalse(manager.canPerform(.streaming, for: panel.serviceName))
     }
 
@@ -109,6 +112,23 @@ final class HeadlessBoardTests: XCTestCase {
             GamesDataRow.isOffered(for: barePanel(profile: "st7735-042"), manager: manager))
     }
 
+    func testABoardThatAnnouncesNoScreenHasNoneWhateverItsProfile() {
+        let none = ServiceMetadata(txtRecords: ["res": "0x0", "profile": "auto"])
+        XCTAssertTrue(none.reportsNoScreen)
+        XCTAssertNil(none.geometry)
+        XCTAssertFalse(ServiceMetadata(txtRecords: ["res": "96x54"]).reportsNoScreen)
+        XCTAssertFalse(ServiceMetadata(txtRecords: [:]).reportsNoScreen)
+        XCTAssertFalse(ServiceMetadata(txtRecords: ["res": "0x54"]).reportsNoScreen)
+
+        // A screen board whose panel did not come up, and an unidentified one.
+        for profile in ["st7735-042", "auto"] {
+            var panel = barePanel(profile: profile)
+            XCTAssertFalse(panel.hasNoScreen, profile)
+            panel.reportedNoScreen = true
+            XCTAssertTrue(panel.hasNoScreen, profile)
+        }
+    }
+
     func testTheManagerKnowsWhichDeviceHasNoScreen() {
         let manager = makeManager([barePanel()])
         XCTAssertTrue(manager.hasNoScreen("espdisplay-8af8"))
@@ -117,6 +137,7 @@ final class HeadlessBoardTests: XCTestCase {
 
     func testAHeadlessSessionSaysSoAndNeverCaptures() async {
         var statuses: [CaptureStatus] = []
+        var framesSent: [UInt64] = []
         let lock = NSLock()
         let session = DeviceSession(
             name: "espdisplay-8af8",
@@ -126,7 +147,10 @@ final class HeadlessBoardTests: XCTestCase {
             fps: 30,
             headless: true,
             onStatus: { status in
-                lock.withLock { statuses.append(status.captureStatus) }
+                lock.withLock {
+                    statuses.append(status.captureStatus)
+                    framesSent.append(status.framesSent)
+                }
             })
         XCTAssertTrue(session.headless)
         let run = Task { await session.run() }
@@ -140,6 +164,7 @@ final class HeadlessBoardTests: XCTestCase {
         let seen = lock.withLock { statuses }
         XCTAssertTrue(seen.contains(DeviceSession.headlessStatus))
         XCTAssertFalse(seen.contains { $0.isStreaming })
+        XCTAssertEqual(lock.withLock { framesSent.max() ?? 0 }, 0)
         XCTAssertEqual(session.captureStatus, DeviceSession.headlessStatus)
     }
 

@@ -575,6 +575,7 @@ public enum ESPDisplaySenderApp {
                         // Its sender never sends a frame, so the geometry it
                         // is built with is only the type's default.
                         let headless = panelManager.hasNoScreen(device.name)
+                            || device.metadata.reportsNoScreen
                             || PanelSnapshot.profileHasNoScreen(device.metadata.profile)
                         guard let geometry = panelManager.geometry(of: device.name)
                             ?? device.geometry

@@ -374,6 +374,18 @@ void setup() {
                    "(WiFi, serial and updates; no screen)");
     Serial.println("board: use CFGBOARD <profile> over serial to name the "
                    "board");
+    // A hosted radio is a link to a coprocessor over carrier lines (the P4's
+    // C6 on SDIO and its reset). With no carrier known nothing says those
+    // lines lead to one, so such a board stays serial-only, as before.
+    if (bcfg->platform->wifi == board::WifiTopology::HostedCoprocessor) {
+      Serial.println("board: WiFi here is a coprocessor on the carrier; "
+                     "serial only until CFGBOARD names the board");
+      bcfg = nullptr;  // only CFGBOARD is served, as before
+      while (true) {
+        handleSerialConfig();
+        delay(20);
+      }
+    }
   } else {
     bcfg = &board::configFor(boardVariant);
     beginSerialConfig(*bcfg);
@@ -442,8 +454,8 @@ void setup() {
     markScreenAbsent();
   }
   if (!screenPresent()) {
-    Serial.printf("board: %s runs headless: no screen, touch or "
-                  "buttons; WiFi, serial and updates only\n",
+    Serial.printf("board: %s runs headless (no screen): nothing is drawn "
+                  "or streamed\n",
                   bcfg->name);
   } else {
   // Panel-command brightness (the AMOLED) ends its init table at full
@@ -970,6 +982,20 @@ void loop() {
     if (wifiSupervisor.noteHealthyFrame()) {
       clearWifiRestartAttempted();
       Serial.println("WiFi recovery watchdog re-armed after a complete frame");
+    }
+  }
+  // A board with no screen never shows a frame, so five minutes associated
+  // is its proof of health instead; without it one restart would be its last.
+  static uint32_t connectedSince = 0;
+  if (!wifiConnected) {
+    connectedSince = 0;
+  } else if (!screenPresent()) {
+    if (connectedSince == 0) connectedSince = millis();
+    if (millis() - connectedSince >= 5u * 60u * 1000u &&
+        wifiSupervisor.noteHealthyFrame()) {
+      clearWifiRestartAttempted();
+      Serial.println("WiFi recovery watchdog re-armed after five minutes "
+                     "connected (no screen)");
     }
   }
 
