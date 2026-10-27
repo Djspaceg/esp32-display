@@ -105,6 +105,95 @@ public enum UsbOnboarding {
         }
     }
 
+    // MARK: - identifying without a restart
+
+    /// How long a board that said nothing is given before it is asked again.
+    ///
+    /// Measured on an ESP32-P4-WIFI6-Touch-LCD-4B running 2.1.0: its first
+    /// CFGSHOW answer came 3.3 s after an EN reset, inside the boot menu's
+    /// countdown. A board the sheet catches just after a restart therefore
+    /// answers the second readout, as does one whose line buffer held an
+    /// earlier esptool's sync bytes (the first CFGSHOW's newline clears them).
+    public static let bootAnswerDelay: TimeInterval = 4
+
+    /// What identifying the board needs next.
+    public enum IdentityStep: Equatable, Sendable {
+        /// Nothing more to read: the readout identified the board, nothing still
+        /// needs its chip, or there is no esptool to read it with.
+        case done
+        /// Ask CFGSHOW again over the same no-reset open, after this long.
+        case askAgain(after: TimeInterval)
+        /// Read the chip with esptool, which restarts the board on the way in
+        /// (default-reset) and out (hard-reset).
+        case restartToRead
+    }
+
+    /// Whether the sheet still needs esptool's chip read after a readout.
+    ///
+    /// A flash needs the chip, so this follows the mode the plan will run -
+    /// `chosenMode` raised to a flash when the board answered without a
+    /// hardware ID, as the sheet's effective mode is - and so does a board whose
+    /// hardware ID nobody knows yet.
+    public static func identityNeedsChip(
+        after existing: ExistingFirmware, chosenMode: Mode, hardwareIDKnown: Bool
+    ) -> Bool {
+        if case .answered(_, let hardwareID) = existing,
+           ConfigCommands.canonicalHardwareID(hardwareID) == nil {
+            return true
+        }
+        return chosenMode == .flashAndConfigure || !hardwareIDKnown
+    }
+
+    /// The step after a readout.
+    ///
+    /// A RESTART IS THE LAST RESORT. esptool's chip read resets the board, and
+    /// on a CH343P board that is a full reboot through its boot menu, so a
+    /// board that did not identify itself is asked once more over its running
+    /// firmware first: silent, or an answer without a hardware ID (current
+    /// firmware's reply can lose its tail to another reader of the port). Only
+    /// then is it restarted, and never without an esptool to do it with. A
+    /// board that identified itself is restarted only when a flash needs its
+    /// chip, and the flash restarts it anyway.
+    public static func nextIdentityStep(
+        after existing: ExistingFirmware, askedAgain: Bool, needsChip: Bool,
+        toolInstalled: Bool
+    ) -> IdentityStep {
+        guard needsChip else { return .done }
+        var identified = false
+        if case .answered(_, let hardwareID) = existing {
+            identified = ConfigCommands.canonicalHardwareID(hardwareID) != nil
+        }
+        if !identified, !askedAgain { return .askAgain(after: bootAnswerDelay) }
+        return toolInstalled ? .restartToRead : .done
+    }
+
+    /// Where identifying the board has got to, for the sheet's Board row.
+    public enum IdentityStage: Equatable, Sendable {
+        case reading
+        case waitingToAskAgain
+        case restartingToRead
+
+        public var statusText: String {
+            switch self {
+            case .reading:
+                return "Reading…"
+            case .waitingToAskAgain:
+                return "No answer yet; asking again in a few seconds…"
+            case .restartingToRead:
+                return "Restarting the board to read its chip…"
+            }
+        }
+    }
+
+    /// The Board row for a board esptool read, saying when reading it meant
+    /// restarting it, so a board seen rebooting has its reason on screen.
+    public static func detectedDescription(
+        chip: String, mac: String?, restartedToRead: Bool
+    ) -> String {
+        let read = mac.map { "\(chip) · \($0)" } ?? chip
+        return restartedToRead ? read + " · restarted to read it" : read
+    }
+
     /// Whether there is enough to send for the chosen network.
     ///
     /// A NETWORK NAME IS NOT A CREDENTIAL. The blank-password case is genuinely

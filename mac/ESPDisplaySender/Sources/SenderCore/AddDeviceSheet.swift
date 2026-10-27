@@ -29,6 +29,10 @@ struct AddDeviceSheet: View {
     @State private var boardVersion: String?
     @State private var boardSource: FirmwareSourceIdentity?
     @State private var inspecting = false
+    /// Which part of identifying the board is running, for the Board row.
+    @State private var identityStage: UsbOnboarding.IdentityStage = .reading
+    /// esptool read this board's chip, which restarted it.
+    @State private var restartedToRead = false
     @State private var inspectionGeneration = 0
     @State private var inspectedPathGeneration: Int?
     /// The inspected device as the manager listed it when the inspection's
@@ -678,12 +682,16 @@ struct AddDeviceSheet: View {
         }
         switch detection {
         case .detected(let chip, let mac):
-            guard let mac else { return chip }
-            return "\(chip) · \(mac)"
+            return UsbOnboarding.detectedDescription(
+                chip: chip, mac: mac, restartedToRead: restartedToRead)
         case .failed:
-            return "Could not be read"
+            // esptool may have failed before it reached the port, so the
+            // restart is possible rather than certain.
+            return restartedToRead
+                ? "Could not be read; trying may have restarted it"
+                : "Could not be read"
         case .notAttempted:
-            if inspecting { return "Reading…" }
+            if inspecting { return identityStage.statusText }
             switch existing {
             case .answered(let name, _) where !name.isEmpty:
                 return "Already set up as \"\(name)\""
@@ -789,9 +797,13 @@ struct AddDeviceSheet: View {
     /// CFGSHOW FIRST, esptool second, and the order matters: CFGSHOW is a line on
     /// an already-open tty and leaves the board running, while every esptool run
     /// ends by resetting it. A board that answers CFGSHOW and only needs
-    /// credentials is therefore never reset at all.
+    /// credentials is therefore never reset at all, and a silent one is asked
+    /// once more after `UsbOnboarding.bootAnswerDelay` before esptool restarts
+    /// it - which the Board row then says.
     private func inspect(preserveMode: Bool = false) {
         detection = .notAttempted
+        identityStage = .reading
+        restartedToRead = false
         existing = .notChecked
         loadError = nil
         boardVersion = nil
@@ -815,33 +827,64 @@ struct AddDeviceSheet: View {
             defer {
                 if generation == inspectionGeneration { inspecting = false }
             }
-            let report = await manager.probeExistingFirmwareReport(at: target)
-            let answered = report.existing
-            // The user may have changed the port, or closed the sheet, during the
-            // three seconds CFGSHOW is allowed. Answers about a port nobody is
-            // asking about any more are dropped rather than displayed.
-            guard !Task.isCancelled, target == port,
-                  pathGeneration == manager.usbPathGeneration(target)
-            else { return }
-            existing = answered
-            deviceAtInspection = manager.usbDevices.first { $0.path == target }
-            boardVersion = report.version
-            boardSource = report.source
-            if case .answered(let name, let hardwareID) = answered {
-                manager.noteUSBIdentity(
-                    path: target,
-                    name: name,
-                    hardwareID: hardwareID)
-                preselectExactTarget()
+            // A board that did not identify itself is asked again over the same
+            // no-reset open before esptool restarts it
+            // (UsbOnboarding.nextIdentityStep).
+            var askedAgain = false
+            // The mode this inspection suggested. A later readout moves the
+            // picker only while it still shows that suggestion, so a choice the
+            // user made during the wait is kept.
+            var suggested: UsbOnboarding.Mode?
+            identify: while true {
+                identityStage = .reading
+                let report = await manager.probeExistingFirmwareReport(at: target)
+                let answered = report.existing
+                // The user may have changed the port, or closed the sheet, during
+                // the three seconds CFGSHOW is allowed. Answers about a port nobody
+                // is asking about any more are dropped rather than displayed.
+                guard !Task.isCancelled, target == port,
+                      pathGeneration == manager.usbPathGeneration(target)
+                else { return }
+                existing = answered
+                deviceAtInspection = manager.usbDevices.first { $0.path == target }
+                boardVersion = report.version
+                boardSource = report.source
+                if case .answered(let name, let hardwareID) = answered {
+                    manager.noteUSBIdentity(
+                        path: target,
+                        name: name,
+                        hardwareID: hardwareID)
+                    preselectExactTarget()
+                }
+                if !preserveMode, suggested == nil || mode == suggested {
+                    mode = UsbOnboarding.suggestedMode(for: answered)
+                    suggested = mode
+                }
+                let toolInstalled: Bool
+                if case .installed = tool { toolInstalled = true } else { toolInstalled = false }
+                switch UsbOnboarding.nextIdentityStep(
+                    after: answered, askedAgain: askedAgain,
+                    // The mode the plan will run, the user's when preserved: a
+                    // re-read of a board that identified itself and only needs
+                    // WiFi does not restart it to read a chip nothing will flash.
+                    needsChip: UsbOnboarding.identityNeedsChip(
+                        after: answered, chosenMode: mode,
+                        hardwareIDKnown: selectedHardwareID != nil),
+                    toolInstalled: toolInstalled) {
+                case .done:
+                    return
+                case .askAgain(let delay):
+                    identityStage = .waitingToAskAgain
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    guard !Task.isCancelled else { return }
+                    askedAgain = true
+                    continue
+                case .restartToRead:
+                    break identify
+                }
             }
-            if !preserveMode {
-                mode = UsbOnboarding.suggestedMode(for: answered)
-            }
-            let needsHardwareID = selectedHardwareID == nil
-            guard ((preserveMode ? .flashAndConfigure : mode) == .flashAndConfigure
-                    || needsHardwareID),
-                  case .installed(let path) = tool
-            else { return }
+            guard case .installed(let path) = tool else { return }
+            identityStage = .restartingToRead
             // esptool has the port: the manager's retry of an unanswered
             // CFGSHOW must not write over it.
             let read: UsbOnboarding.ChipDetection
@@ -855,6 +898,7 @@ struct AddDeviceSheet: View {
                   pathGeneration == manager.usbPathGeneration(target)
             else { return }
             detection = read
+            restartedToRead = true
             if case .detected(_, let mac) = read {
                 manager.noteUSBIdentity(
                     path: target, name: nil,
