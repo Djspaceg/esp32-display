@@ -182,7 +182,9 @@ enum BundledFirmware {
                     entry: entry, identity: mergedIdentity, isExact: true)
             } catch let strictError {
                 guard let chip = Self.usable(mergedIdentity.chip),
-                      let entry = entryForUniqueChip(chip),
+                      let entry = entryForUniqueChip(
+                        chip, family: mergedIdentity.family,
+                        profile: mergedIdentity.profile),
                       let accepted = Self.universalFamilyAliases[entry.family]
                 else { throw strictError }
                 if let family = Self.usable(mergedIdentity.family),
@@ -279,18 +281,56 @@ enum BundledFirmware {
         /// explicit profile choice. Callers decide whether a chip-only match is
         /// enough to preselect a bundled family artifact. The write path still
         /// re-verifies the exact target before any USB flash.
-        func selectForUniqueChip(_ chip: String) -> Selection? {
-            let matches = selections.values.filter { $0.catalogEntry.chip == chip }
+        ///
+        /// Two families can share a chip (the S3's s3 and s3-4m). There the
+        /// other evidence present narrows the match: a family name or alias,
+        /// a profile, or the chip's flash size, since those families ship to
+        /// disjoint sizes. Evidence that is absent narrows nothing, so a chip
+        /// two families share with nothing else to go on resolves neither.
+        func selectForUniqueChip(
+            _ chip: String, family: String? = nil, profile: String? = nil,
+            flashBytes: Int? = nil
+        ) -> Selection? {
+            let matches = selections.values.filter {
+                Self.entry($0.catalogEntry, matchesChip: chip, family: family,
+                           profile: profile, flashBytes: flashBytes)
+            }
             guard matches.count == 1 else { return nil }
             return matches.first
         }
 
         private func entryForUniqueChip(
-            _ chip: String
+            _ chip: String, family: String? = nil, profile: String? = nil
         ) -> FirmwareReleaseCatalog.Entry? {
-            let matches = catalog.families.values.filter { $0.chip == chip }
+            let matches = catalog.families.values.filter {
+                Self.entry($0, matchesChip: chip, family: family,
+                           profile: profile, flashBytes: nil)
+            }
             guard matches.count == 1 else { return nil }
             return matches.first
+        }
+
+        /// The chip match, narrowed only where several families share it.
+        private static func entry(
+            _ entry: FirmwareReleaseCatalog.Entry, matchesChip chip: String,
+            family: String?, profile: String?, flashBytes: Int?
+        ) -> Bool {
+            guard entry.chip == chip else { return false }
+            let sharers = GeneratedBoardCatalog.expected.values.filter {
+                $0.chip == chip
+            }.count
+            guard sharers > 1 else { return true }
+            if let family = usable(family),
+               universalFamilyAliases[entry.family]?.contains(family) != true {
+                return false
+            }
+            if let profile = usable(profile), !entry.profiles.contains(profile) {
+                return false
+            }
+            if let flashBytes, !entry.compatibility.flashBytes.contains(flashBytes) {
+                return false
+            }
+            return true
         }
 
         /// Legacy family aliases a universal image still answers to, so a board
@@ -319,7 +359,7 @@ enum BundledFirmware {
         /// requires `--profile`, one of its carriers must be named or reported.
         func resolveUpdate(
             family: String?, chip: String?, profile: String?, partition: String?,
-            transport: UpdateTransport
+            transport: UpdateTransport, flashBytes: Int? = nil
         ) throws -> UpdateResolution {
             do {
                 return .exact(try select(
@@ -327,7 +367,9 @@ enum BundledFirmware {
                     profile: profile, partition: partition))
             } catch let strictError {
                 guard let chip = Self.usable(chip),
-                      let selection = selectForUniqueChip(chip),
+                      let selection = selectForUniqueChip(
+                        chip, family: family, profile: profile,
+                        flashBytes: flashBytes),
                       let accepted = Self.universalFamilyAliases[
                         selection.catalogEntry.family]
                 else { throw strictError }

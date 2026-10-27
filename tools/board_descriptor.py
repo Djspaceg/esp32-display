@@ -333,7 +333,8 @@ def _validate_clear_memory(descriptor: Dict[str, Any]) -> None:
     if not isinstance(clear, bool):
         raise DescriptorError("%s: panel.clear_memory must be bool" % source)
     panel = descriptor["panel"]
-    if clear and (panel["bus"] != "spi" or not panel["memory_width"]):
+    if clear and (panel["bus"] != "spi" or not panel["memory_width"] or
+                  not panel["memory_height"]):
         # The clear addresses the memory with absolute single-lane CASET and
         # RASET, so it needs a SPI panel and the memory's extents.
         raise DescriptorError(

@@ -429,6 +429,36 @@ final class UsbOnboardingAppTests: XCTestCase {
         XCTAssertFalse(resolution.isExact)
     }
 
+    func testAnS3ChipAloneNamesNeitherS3FamilyButItsFlashSizeDoes() throws {
+        let releases = try Self.bundledReleaseSet()
+        // Two families share the S3 chip, so the chip alone resolves neither.
+        XCTAssertThrowsError(try releases.resolveUpdate(
+            family: nil, chip: "esp32s3", profile: nil, partition: nil,
+            transport: .usb))
+        // The chip's flash size names one: they ship to disjoint sizes.
+        for (flash, family) in [(4, "s3-4m"), (8, "s3"), (16, "s3")] {
+            let resolution = try releases.resolveUpdate(
+                family: nil, chip: "esp32s3", profile: nil, partition: nil,
+                transport: .usb, flashBytes: flash * 1024 * 1024)
+            XCTAssertEqual(resolution.canonicalTarget, family, "\(flash) MB")
+            XCTAssertFalse(resolution.isExact)
+        }
+        XCTAssertThrowsError(try releases.resolveUpdate(
+            family: nil, chip: "esp32s3", profile: nil, partition: nil,
+            transport: .usb, flashBytes: 2 * 1024 * 1024))
+        // A profile names one too.
+        XCTAssertEqual(try releases.resolveUpdate(
+            family: nil, chip: "esp32s3", profile: "gc9107-tqt", partition: nil,
+            transport: .usb).canonicalTarget, "s3-4m")
+        XCTAssertEqual(try releases.resolveUpdate(
+            family: nil, chip: "esp32s3", profile: "co5300", partition: nil,
+            transport: .usb).canonicalTarget, "s3")
+        // The C6 still resolves on its chip alone: no other family shares it.
+        XCTAssertEqual(try releases.resolveUpdate(
+            family: nil, chip: "esp32c6", profile: nil, partition: nil,
+            transport: .usb, flashBytes: 4 * 1024 * 1024).canonicalTarget, "c6")
+    }
+
     func testALegacyS3ExactTargetStillFallsBackToTheUniversalBundledFamily() throws {
         let releases = try Self.bundledReleaseSet()
 
@@ -530,7 +560,7 @@ final class UsbOnboardingAppTests: XCTestCase {
             .appendingPathComponent(FirmwareReleaseCatalog.fileName)
         let catalog = try FirmwareReleaseCatalog.read(contentsOf: catalogURL)
         var selections = [String: BundledFirmware.Selection]()
-        for family in ["c3", "c6", "s3", "p4"] {
+        for family in ["c3", "c6", "s3", "s3-4m", "p4"] {
             let entry = try XCTUnwrap(catalog.families[family])
             let url = root
                 .appendingPathComponent("firmware-releases", isDirectory: true)

@@ -5981,6 +5981,32 @@ def test_s3_4m_family():
                 espdisp.FAMILIES["c6"], "/dev/cu.usbmodem1"),
             "a chip only one family runs on is not asked its flash size")
 
+    # Bootstrap takes the family from the chip and its flash size too.
+    import espdisp_bootstrap
+    descriptors = board_descriptor.load_repository_descriptors(espdisp.REPO_ROOT)
+    for flash, expected in ((4, "s3-4m"), (8, "s3"), (32, "s3")):
+        check_equal(
+            espdisp_bootstrap.family_for_chip(
+                "esp32s3", flash * 1024 * 1024, descriptors),
+            expected, "bootstrap takes %s for an S3 with %d MiB" % (expected, flash))
+    check_equal(
+        espdisp_bootstrap.family_for_chip("esp32c6", 4 * 1024 * 1024, descriptors),
+        "c6", "a chip one family runs on needs no flash size")
+    try:
+        espdisp_bootstrap.family_for_chip("esp32s3", 2 * 1024 * 1024, descriptors)
+        check(False, "an S3 size no family ships to fails closed")
+    except espdisp_bootstrap.BootstrapFailure as exc:
+        check("no single family" in str(exc),
+              "an S3 size no family ships to fails closed")
+    # A red fill is judged against the order the sketch drives, which
+    # PANEL_CONFIG cannot change, not against the descriptor's claim.
+    by_key = {item["key"]: item for item in descriptors}
+    check_equal(espdisp_bootstrap.applied_color_order(
+        by_key["s3-lilygo-tqt-pro"]), "bgr",
+        "the bootstrap sketch drives the T-QT's GC9107 in BGR")
+    check_equal(espdisp_bootstrap.applied_color_order(
+        by_key["s3-touch-lcd-154"]), "rgb", "an ST7789 is driven in RGB")
+
 
 def test_family_resolution_and_discovery():
     blank = espdisp.PortInfo("/dev/cu.usbmodem1", [], "unknown")

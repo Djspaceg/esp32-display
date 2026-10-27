@@ -12,7 +12,7 @@ final class GeneratedReleaseCrossReadTests: XCTestCase {
             .deletingLastPathComponent()
         let catalogURL = root.appendingPathComponent("firmware-releases/manifest.json")
         let catalog = try FirmwareReleaseCatalog.read(contentsOf: catalogURL)
-        for family in ["c3", "c6", "s3", "p4"] {
+        for family in GeneratedBoardCatalog.requiredFamilies.sorted() {
             let entry = try XCTUnwrap(catalog.families[family])
             XCTAssertFalse(entry.revisions.isEmpty)
             XCTAssertNil(entry.latestBuild)
@@ -33,7 +33,8 @@ final class GeneratedReleaseCrossReadTests: XCTestCase {
                     revision.version)
                 let verified = try catalog.bundle(
                     for: revision, in: entry, data: data)
-                if family == "c3" || family == "c6" {
+                // Doom ships on the S3 8 MB and P4 families, which hold its WAD.
+                if family != "s3" && family != "p4" {
                     XCTAssertNil(
                         try XCTUnwrap(verified.images.first)
                             .flashPart(role: "doom_wad"))

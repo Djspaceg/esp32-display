@@ -62,9 +62,15 @@ minimum_flash_bytes = 4194304
 # factory flash was 99.2% byte-identical to LilyGO's
 # T-QT-Pro-N4R2_LVGL_Factory_240815.bin and unlike the 2026 new-panel image,
 # so it is the earlier glass: extras/old_panel/GC9A01_Init.h (inversion off,
-# 0x20) and GC9A01_Rotation.h (MADCTL RGB; column 2, row 1 in plain and MX|MY,
-# column 1, row 2 in the MV states). LilyGO's 2024 factory sketch draws
-# upright at setRotation(0), plain MADCTL, so orientation_offset is 0.
+# 0x20) and GC9A01_Rotation.h (column 2, row 1 in plain and MX|MY, column 1,
+# row 2 in the MV states). LilyGO's 2024 factory sketch draws upright at
+# setRotation(0), plain MADCTL, so orientation_offset is 0.
+# Colour order: the image this unit shipped with was built from LilyGO's
+# 2024 lib/TFT_eSPI (repo commit 3f31e59), whose GC9A01_Defines.h sets
+# TFT_MAD_COLOR_ORDER to TFT_MAD_RGB, so its MADCTL is 0x00: RGB. The 2026
+# extras/old_panel/GC9A01_Rotation.h writes TFT_MAD_BGR instead; the earlier
+# build is the one measured against this glass, so RGB stands until a red
+# fill on the glass says otherwise.
 # LilyGO's TFT_eSPI setup clocks it at 40 MHz.
 # The GC9107 datasheet gives 128x160 of memory, but LilyGO's own window
 # (columns 2..129) runs past column 127, so the memory is taken as the

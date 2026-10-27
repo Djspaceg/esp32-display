@@ -102,7 +102,7 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
 
     func testReadsExactlyFourFamiliesAndSelectsWithIndependentEvidence() throws {
         let catalog = try FirmwareReleaseCatalog.read(Self.catalogData())
-        XCTAssertEqual(Set(catalog.families.keys), ["c3", "c6", "s3", "p4"])
+        XCTAssertEqual(Set(catalog.families.keys), ["c3", "c6", "s3", "s3-4m", "p4"])
         let c3 = try catalog.entry(for: .init(
             family: "c3", chip: "esp32c3", profile: "gc9a01a-240",
             partition: "c3-4m-ota"))
@@ -113,6 +113,16 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
             partition: "universal-8m-doom-saves-ota"))
         XCTAssertEqual(s3.family, "s3")
         XCTAssertEqual(s3.profiles, ["st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"])
+
+        // The T-QT shares the S3 chip but has its own family and table.
+        let tqt = try catalog.entry(for: .init(
+            family: "s3-4m", chip: "esp32s3", profile: "gc9107-tqt",
+            partition: "s3-4m-ota"))
+        XCTAssertEqual(tqt.family, "s3-4m")
+        XCTAssertEqual(tqt.compatibility.flashBytes, [4 * 1024 * 1024])
+        XCTAssertThrowsError(try catalog.entry(for: .init(
+            family: "s3", chip: "esp32s3", profile: "gc9107-tqt",
+            partition: "universal-8m-doom-saves-ota")))
     }
 
     func testSelectionFailsClosedForMissingOrContradictoryEvidence() throws {
@@ -222,24 +232,27 @@ final class FirmwareReleaseCatalogTests: XCTestCase {
             "c3": ["gc9a01a-240"],
             "c6": ["st7789", "jd9853"],
             "s3": ["st7735-042", "gc9107", "st7789-130", "st7789-154", "st7789-190", "co5300", "st77916", "gc9a01-knob-128", "st7789-twatch"],
+            "s3-4m": ["gc9107-tqt"],
             "p4": ["st7703-4b", "jd9365-4c", "jd9365-34c"],
         ]
         let chips = [
             "c3": "esp32c3", "c6": "esp32c6",
-            "s3": "esp32s3", "p4": "esp32p4",
+            "s3": "esp32s3", "s3-4m": "esp32s3", "p4": "esp32p4",
         ]
         let partitions = [
             "c3": "c3-4m-ota", "c6": "default-8m",
-            "s3": "universal-8m-doom-saves-ota", "p4": "p4-32m-saves-ota",
+            "s3": "universal-8m-doom-saves-ota", "s3-4m": "s3-4m-ota",
+            "p4": "p4-32m-saves-ota",
         ]
         let flashes: [String: [Int]] = [
             "c3": [4 * 1024 * 1024],
             "c6": [8 * 1024 * 1024],
             "s3": [8 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024],
+            "s3-4m": [4 * 1024 * 1024],
             "p4": [32 * 1024 * 1024],
         ]
         var families = [String: Any]()
-        for family in ["c3", "c6", "s3", "p4"] {
+        for family in ["c3", "c6", "s3", "s3-4m", "p4"] {
             let profileList = profiles[family]!
             var hardware = [String: [String]]()
             for profile in profileList { hardware[profile] = ["Fixture \(profile)"] }

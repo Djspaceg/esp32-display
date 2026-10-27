@@ -48,7 +48,7 @@ echo "embedded canonical firmware catalog and ${#ARTIFACTS[@]} shipping artifact
 
 # The rescue images are copied as committed, index and all; the app checks every
 # file against its rescue.json before it will write one.
-RESCUE_FAMILIES=(c3 c6 s3 p4)
+RESCUE_FAMILIES=(c3 c6 s3 s3-4m p4)
 for family in "${RESCUE_FAMILIES[@]}"; do
   source="$RESCUE_ROOT/$family"
   if [[ ! -f "$source/rescue.json" ]]; then

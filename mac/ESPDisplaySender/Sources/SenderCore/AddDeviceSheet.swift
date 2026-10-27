@@ -24,6 +24,9 @@ struct AddDeviceSheet: View {
     @State private var port = ""
     @State private var mode: UsbOnboarding.Mode = .flashAndConfigure
     @State private var detection: UsbOnboarding.ChipDetection = .notAttempted
+    /// The chip's flash size, read only where two families share the chip
+    /// (the S3's s3 and s3-4m ship to disjoint sizes); nil otherwise.
+    @State private var detectedFlashBytes: Int?
     @State private var existing: UsbOnboarding.ExistingFirmware = .notChecked
     /// The firmware version the board reported, shown as is.
     @State private var boardVersion: String?
@@ -546,8 +549,14 @@ struct AddDeviceSheet: View {
     private var compatibleTargets: [String] {
         guard let bundle, let chip = detection.chip else { return [] }
         return Array(Set(bundle.images
-            .filter { $0.chip == chip }
+            .filter { $0.chip == chip && fitsFlash($0.flashSizes) }
             .flatMap(\.targets))).sorted()
+    }
+
+    /// Whether an image's flash sizes admit the chip's, where it was read.
+    private func fitsFlash(_ sizes: [Int]) -> Bool {
+        guard let detectedFlashBytes, !sizes.isEmpty else { return true }
+        return sizes.contains(detectedFlashBytes)
     }
 
     /// The note on the loaded selection, when it was offered as the file
@@ -574,7 +583,10 @@ struct AddDeviceSheet: View {
     private var compatibleProfiles: [String] {
         guard let releases = bundledReleases, let chip = detection.chip else { return [] }
         return releases.selections.values
-            .filter { $0.catalogEntry.chip == chip }
+            .filter {
+                $0.catalogEntry.chip == chip
+                    && fitsFlash($0.catalogEntry.compatibility.flashBytes)
+            }
             .flatMap { $0.catalogEntry.profiles }
             .sorted()
     }
@@ -585,7 +597,7 @@ struct AddDeviceSheet: View {
                let resolution = try? releases.resolveUpdate(
                     family: identity.family, chip: chip,
                     profile: identity.profile, partition: identity.partition,
-                    transport: .usb) {
+                    transport: .usb, flashBytes: detectedFlashBytes) {
                 bundle = resolution.selection.bundle
                 bundleLabel = resolution.selection.url.lastPathComponent
                     + " (\(sourceName))"
@@ -595,6 +607,7 @@ struct AddDeviceSheet: View {
                       let selection = releases.selections.values.first(where: {
                           $0.catalogEntry.chip == chip
                             && $0.catalogEntry.profiles.contains(selectedProfile)
+                            && fitsFlash($0.catalogEntry.compatibility.flashBytes)
                       }),
                       let recovered = try? releases.selectForRecovery(
                         family: selection.catalogEntry.family,
@@ -607,7 +620,8 @@ struct AddDeviceSheet: View {
                 chip: chip,
                 profile: nil,
                 partition: nil,
-                transport: .usb
+                transport: .usb,
+                flashBytes: detectedFlashBytes
             ) {
                 // Neither complete runtime identity nor an explicit profile was
                 // available, so fall back to the one bundled family that the
@@ -802,6 +816,7 @@ struct AddDeviceSheet: View {
     /// it - which the Board row then says.
     private func inspect(preserveMode: Bool = false) {
         detection = .notAttempted
+        detectedFlashBytes = nil
         identityStage = .reading
         restartedToRead = false
         existing = .notChecked
@@ -897,7 +912,20 @@ struct AddDeviceSheet: View {
             guard !Task.isCancelled, target == port,
                   pathGeneration == manager.usbPathGeneration(target)
             else { return }
+            var flash: Int?
+            if case .detected(let chip, let mac) = read,
+               UsbOnboarder.familiesShareChip(chip) {
+                manager.holdUSBIdentifyRetries()
+                defer { manager.releaseUSBIdentifyRetries() }
+                flash = await UsbOnboarder.readFlashBytes(
+                    port: target, chip: chip, mac: mac,
+                    tool: EsptoolCommand.Tool(path: path))
+            }
+            guard !Task.isCancelled, target == port,
+                  pathGeneration == manager.usbPathGeneration(target)
+            else { return }
             detection = read
+            detectedFlashBytes = flash
             restartedToRead = true
             if case .detected(_, let mac) = read {
                 manager.noteUSBIdentity(

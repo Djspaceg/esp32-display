@@ -71,6 +71,32 @@ enum UsbOnboarder {
         }
     }
 
+    /// Whether more than one release family runs on this chip, so its flash
+    /// size is what tells them apart (the S3's s3 and s3-4m).
+    static func familiesShareChip(_ chip: String) -> Bool {
+        GeneratedBoardCatalog.expected.values.filter { $0.chip == chip }.count > 1
+    }
+
+    /// The chip's flash size from `flash-id`, read-only, or nil when it could
+    /// not be read or a board other than `mac` answered.
+    static func readFlashBytes(
+        port: String, chip: String, mac: String?, tool: EsptoolCommand.Tool,
+        onProgress: (@Sendable (Progress) -> Void)? = nil
+    ) async -> Int? {
+        guard let command = try? EsptoolCommand.flashID(
+                  tool: tool, chip: chip, port: port),
+              let outcome = try? await EsptoolRunner.run(command, onLine: { line in
+                  onProgress?(.log(.esptool, line))
+              }),
+              outcome.succeeded
+        else { return nil }
+        let expected = ConfigCommands.canonicalHardwareID(mac)
+        let named = ConfigCommands.canonicalHardwareID(
+            EsptoolOutput.macAddress(in: outcome.output))
+        guard expected == nil || named == expected else { return nil }
+        return EsptoolOutput.detectedFlashBytes(in: outcome.output)
+    }
+
     /// Ask a port whether it is already running this firmware.
     ///
     /// CFGSHOW answering at all is the proof, the same test

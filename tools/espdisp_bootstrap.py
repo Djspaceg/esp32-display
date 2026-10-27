@@ -24,12 +24,43 @@ class BootstrapDeviceRefusal(BootstrapFailure):
     """The firmware safely refused one syntactically valid request."""
 
 
+# The families each chip runs; the S3's two ship to disjoint flash sizes.
 CHIP_FAMILIES = {
-    "esp32c3": "c3",
-    "esp32c6": "c6",
-    "esp32s3": "s3",
-    "esp32p4": "p4",
+    "esp32c3": ("c3",),
+    "esp32c6": ("c6",),
+    "esp32s3": ("s3", "s3-4m"),
+    "esp32p4": ("p4",),
 }
+
+
+def family_for_chip(
+    chip: str, flash_bytes: int, descriptors: Sequence[Dict[str, Any]]
+) -> str:
+    """The one family this chip and flash size take."""
+    families = CHIP_FAMILIES[chip]
+    if len(families) == 1:
+        return families[0]
+    fits = sorted({
+        descriptor["identity"]["target"] for descriptor in descriptors
+        if descriptor["identity"]["target"] in families
+        and flash_bytes in descriptor["family"]["flash_bytes"]
+    })
+    if len(fits) != 1:
+        raise BootstrapFailure(
+            "%s with %d bytes of flash fits %s; no single family"
+            % (chip, flash_bytes, ", ".join(fits) or "no family"))
+    return fits[0]
+
+
+def applied_color_order(candidate: Dict[str, Any]) -> str:
+    """The colour order the bootstrap sketch drives a candidate panel with.
+
+    PANEL_CONFIG carries no colour order, so the sketch keeps its own rule
+    (board_bootstrap.ino): BGR on the GC9107 and ST7735, RGB otherwise. A
+    red fill is judged against that, not against the descriptor's claim.
+    """
+    return ("bgr" if candidate["panel"]["driver"] in ("Gc9107", "St7735")
+            else "rgb")
 
 RETUNE_SECTIONS = ("imu", "touch", "color", "offsets", "backlight", "buttons")
 
@@ -1074,7 +1105,7 @@ def _descriptor_from_evidence(
 ) -> Tuple[Dict[str, Any], Dict[str, Sequence[str]]]:
     draft = copy.deepcopy(candidate)
     draft.pop("_source", None)
-    family = CHIP_FAMILIES[chip]
+    family = candidate["identity"]["target"]
     family_descriptors = [
         descriptor
         for descriptor in descriptors
@@ -1691,8 +1722,12 @@ def run_bootstrap_session(
             "descriptor key must use lowercase letters, digits, and hyphens"
         )
     chip = require_confirmed_bootstrap_chip(confirmed_chip)
-    family = CHIP_FAMILIES[chip]
     descriptors = list(board_descriptor.load_repository_descriptors(repo_root))
+
+    info = _validated_device_info(
+        bootstrap_request(transport, "INFO", timeout), chip
+    )
+    family = family_for_chip(chip, info["flash_bytes"], descriptors)
     candidates = [
         descriptor
         for descriptor in descriptors
@@ -1700,10 +1735,6 @@ def run_bootstrap_session(
     ]
     if not candidates:
         raise BootstrapFailure("no descriptor candidates exist for family %s" % family)
-
-    info = _validated_device_info(
-        bootstrap_request(transport, "INFO", timeout), chip
-    )
     console.fact(
         "chip=%s revision=%s flash=%s PSRAM=%s MAC=%s"
         % (
@@ -1838,7 +1869,7 @@ def run_bootstrap_session(
     bootstrap_request(transport, "PANEL_FILL CONFIRM red", timeout)
     color_order = derive_color_order(
         _ask(prompter, "color.red", "Does the panel look red or blue?"),
-        candidate["panel"]["color_order"],
+        applied_color_order(candidate),
     )
 
     console.warning("DISPLAY DRIVE: fill entire candidate panel with RGB565 black")
@@ -2174,7 +2205,7 @@ def run_retune_session(
             bootstrap_request(transport, "PANEL_FILL CONFIRM red", timeout)
             order = derive_color_order(
                 _ask(prompter, "color.red", "Does the panel look red or blue?"),
-                candidate["panel"]["color_order"],
+                applied_color_order(candidate),
             )
             console.warning("DISPLAY DRIVE: RGB565 black fill")
             if not _confirm(

@@ -138,7 +138,14 @@ public enum UsbRescue {
         public var id: String { key }
 
         /// "ESP32-S3", as the chip is printed on the module.
-        public var displayName: String { "ESP32-" + key.uppercased() }
+        /// "ESP32-S3 (4 MB)" for the 4 MB S3 family, which shares the chip.
+        public var displayName: String {
+            let parts = key.split(separator: "-", maxSplits: 1)
+            let chip = "ESP32-" + parts[0].uppercased()
+            guard parts.count == 2 else { return chip }
+            return chip + " (" + parts[1].uppercased().replacingOccurrences(
+                of: "M", with: " MB") + ")"
+        }
 
         public init(key: String, chip: String, baud: Int) {
             self.key = key
@@ -146,7 +153,7 @@ public enum UsbRescue {
             self.baud = baud
         }
 
-        public static let all: [Family] = ["c3", "c6", "s3", "p4"].compactMap { key in
+        public static let all: [Family] = ["c3", "c6", "s3", "s3-4m", "p4"].compactMap { key in
             guard let expected = GeneratedBoardCatalog.expected[key] else { return nil }
             return Family(
                 key: key, chip: expected.chip,
