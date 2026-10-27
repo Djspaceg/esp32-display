@@ -1,0 +1,38 @@
+{
+  "built_at": "2026-10-27T19:15:31Z",
+  "chip": "esp32s3",
+  "family": "s3-4m",
+  "format": 1,
+  "regions": [
+    {
+      "address": 0,
+      "bytes": 19968,
+      "file": "bootloader.bin",
+      "role": "bootloader",
+      "sha256": "66cf6c060fc857c8ea6d6812aab8e9b27448431846426218b6fb81526b31e564"
+    },
+    {
+      "address": 32768,
+      "bytes": 3072,
+      "file": "partitions.bin",
+      "role": "partitions",
+      "sha256": "915675fe9f18fce5ac6291ffc8dcf18e099b1ff4c7748aa9bf1ee41b49284295"
+    },
+    {
+      "address": 57344,
+      "bytes": 8192,
+      "file": "boot_app0.bin",
+      "role": "boot_app0",
+      "sha256": "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0"
+    },
+    {
+      "address": 65536,
+      "bytes": 421376,
+      "file": "app.bin",
+      "role": "app",
+      "sha256": "4ff7837c20ef239569027f80ac870674cd24920cd1caf9b21e4d15203e19d7a2"
+    }
+  ],
+  "source_commit": "61daf6f24705fdc61e10761de358849fde5210c4",
+  "source_dirty": false
+}
