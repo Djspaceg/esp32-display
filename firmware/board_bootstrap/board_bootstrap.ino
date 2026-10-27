@@ -35,6 +35,11 @@ static esp_lcd_panel_io_handle_t panelIo = nullptr;
 static esp_lcd_panel_handle_t panel = nullptr;
 static uint8_t *framebuffer = nullptr;
 static size_t framebufferBytes = 0;
+// The frame's own shape for the orientation last programmed: the panel's
+// width x height, or height x width when MV swaps the axes of rectangular
+// glass (the frame the stream firmware's sender sends for 90 and 270).
+static int frameWidth = 0;
+static int frameHeight = 0;
 static bool panelReady = false;
 static volatile int dmaInFlight = 0;
 #if !defined(CONFIG_IDF_TARGET_ESP32P4)
@@ -50,6 +55,11 @@ struct PanelValues {
   long mode = 0;
   long col = 0;
   long row = 0;
+  // Controller memory extents and the far-end window rule, as in the board
+  // descriptor; 0/0/0 (the default) is a panel whose memory is unmeasured.
+  long memWidth = 0;
+  long memHeight = 0;
+  long follow = 0;
   long invert = 0;
   long lanes = 0;
   long laneMbps = 0;
@@ -397,6 +407,9 @@ static bool assignPanelValue(PanelValues &values, char *assignment) {
   PANEL_NUMBER("mode", mode)
   PANEL_NUMBER("col", col)
   PANEL_NUMBER("row", row)
+  PANEL_NUMBER("mem_w", memWidth)
+  PANEL_NUMBER("mem_h", memHeight)
+  PANEL_NUMBER("follow", follow)
   PANEL_NUMBER("invert", invert)
   PANEL_NUMBER("lanes", lanes)
   PANEL_NUMBER("lane_mbps", laneMbps)
@@ -597,10 +610,10 @@ static bool pushRect(int x0, int y0, int x1, int y1,
 static bool pushFrame() {
   if (!panelReady || framebuffer == nullptr) return false;
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
-  return pushRect(0, 0, candidatePanel.width, candidatePanel.height, framebuffer);
+  return pushRect(0, 0, frameWidth, frameHeight, framebuffer);
 #else
-  const int width = candidatePanel.width;
-  const int height = candidatePanel.height;
+  const int width = frameWidth;
+  const int height = frameHeight;
   const int rowsPerChunk = max(1, (int)(DMA_BYTES / ((size_t)width * 2)));
   for (int y = 0; y < height; y += rowsPerChunk) {
     const int rows = min(rowsPerChunk, height - y);
@@ -610,6 +623,15 @@ static bool pushFrame() {
   }
   return true;
 #endif
+}
+
+// Program a quadrant and the frame shape that goes with it.
+static void orient(bool landscape, uint8_t rotation) {
+  boarddisplay::applyOrientation(panel, candidateConfig, landscape, rotation);
+  const bool swapped =
+      candidatePanel.width != candidatePanel.height && landscape;
+  frameWidth = swapped ? candidatePanel.height : candidatePanel.width;
+  frameHeight = swapped ? candidatePanel.width : candidatePanel.height;
 }
 
 static void fillFrame(uint16_t color) {
@@ -622,11 +644,8 @@ static void fillFrame(uint16_t color) {
 }
 
 static void pixel(int x, int y, uint16_t color) {
-  if (x < 0 || y < 0 || x >= candidatePanel.width ||
-      y >= candidatePanel.height) {
-    return;
-  }
-  const size_t offset = ((size_t)y * candidatePanel.width + x) * 2;
+  if (x < 0 || y < 0 || x >= frameWidth || y >= frameHeight) return;
+  const size_t offset = ((size_t)y * frameWidth + x) * 2;
   framebuffer[offset] = (uint8_t)(color >> 8);
   framebuffer[offset + 1] = (uint8_t)color;
 }
@@ -637,12 +656,8 @@ static void rectangle(int x, int y, int width, int height, uint16_t color) {
   const int64_t bottom = (int64_t)y + height;
   const int x0 = x < 0 ? 0 : x;
   const int y0 = y < 0 ? 0 : y;
-  const int x1 = right > candidatePanel.width
-      ? candidatePanel.width
-      : (int)right;
-  const int y1 = bottom > candidatePanel.height
-      ? candidatePanel.height
-      : (int)bottom;
+  const int x1 = right > frameWidth ? frameWidth : (int)right;
+  const int y1 = bottom > frameHeight ? frameHeight : (int)bottom;
   for (int py = y0; py < y1; ++py) {
     for (int px = x0; px < x1; ++px) pixel(px, py, color);
   }
@@ -669,6 +684,14 @@ static void handlePanelConfig(char **tokens, int count) {
     error("candidate panel is unsupported on this confirmed chip family");
     return;
   }
+  if (!bootstrapproto::validPanelMemory(values.width, values.height,
+                                        values.col, values.row,
+                                        values.memWidth, values.memHeight,
+                                        values.follow)) {
+    error("candidate panel memory (mem_w, mem_h, follow) does not hold the "
+          "glass at its offsets");
+    return;
+  }
 
   candidatePanel.width = (uint16_t)values.width;
   candidatePanel.height = (uint16_t)values.height;
@@ -676,6 +699,11 @@ static void handlePanelConfig(char **tokens, int count) {
   candidatePanel.spiMode = (uint8_t)values.mode;
   candidatePanel.colOffset = (uint8_t)values.col;
   candidatePanel.rowOffset = (uint8_t)values.row;
+  candidatePanel.memoryWidth = (uint16_t)values.memWidth;
+  candidatePanel.memoryHeight = (uint16_t)values.memHeight;
+  candidatePanel.windowFollowsMirror = values.follow == 1;
+  // Bootstrap orientations name quadrants directly; for the XIAO, whose
+  // descriptor offset is 0, quadrant 0 is rotation 0, flex cable on top.
   candidatePanel.orientationOffset = 0;
   candidatePanel.invertColor = values.invert != 0;
   candidatePanel.roundDisplay = values.width == values.height;
@@ -747,7 +775,7 @@ static void handlePanelConfig(char **tokens, int count) {
     error("candidate panel initialization failed");
     return;
   }
-  boarddisplay::applyOrientation(panel, candidateConfig, false, 0);
+  orient(false, 0);
   panelReady = true;
   ok("{\"status\":\"ok\"}");
 }
@@ -818,14 +846,15 @@ static void handlePanelEdges(char **tokens, int count) {
   // only rotation's half turn directly (panelorient::addressedRotation), so
   // its odd orientations are reached through the landscape flag instead.
   const bool rectangular = candidatePanel.width != candidatePanel.height;
-  boarddisplay::applyOrientation(
-      panel, candidateConfig, rectangular && (args.orientation & 1) != 0,
-      (uint8_t)(rectangular ? (args.orientation & 2) : args.orientation));
+  // The frame takes the orientation's own shape, height x width when the
+  // axes swap, so its four edges are the glass's four edges.
+  orient(rectangular && (args.orientation & 1) != 0,
+         (uint8_t)(rectangular ? (args.orientation & 2) : args.orientation));
   fillFrame(0x0000);
-  rectangle(0, 0, candidatePanel.width, 3, 0xFFFF);
-  rectangle(0, candidatePanel.height - 3, candidatePanel.width, 3, 0xFFFF);
-  rectangle(0, 0, 3, candidatePanel.height, 0xFFFF);
-  rectangle(candidatePanel.width - 3, 0, 3, candidatePanel.height, 0xFFFF);
+  rectangle(0, 0, frameWidth, 3, 0xFFFF);
+  rectangle(0, frameHeight - 3, frameWidth, 3, 0xFFFF);
+  rectangle(0, 0, 3, frameHeight, 0xFFFF);
+  rectangle(frameWidth - 3, 0, 3, frameHeight, 0xFFFF);
   if (args.hasMarker) {
     rectangle(args.markerX - 8, args.markerY - 1, 17, 3, 0xFFE0);
     rectangle(args.markerX - 1, args.markerY - 8, 3, 17, 0xFFE0);
@@ -843,10 +872,10 @@ static void handlePanelGlyph(char **tokens, int count) {
     error("panel is not configured");
     return;
   }
-  boarddisplay::applyOrientation(panel, candidateConfig, false, 0);
+  orient(false, 0);
   fillFrame(0x0000);
-  const int cx = candidatePanel.width / 2;
-  const int cy = candidatePanel.height / 2;
+  const int cx = frameWidth / 2;
+  const int cy = frameHeight / 2;
   rectangle(cx - 45, cy - 4, 70, 9, 0xFFFF);
   for (int i = 0; i < 25; ++i) {
     rectangle(cx + 25 - i, cy - 24 + i, 3, 3, 0xF800);

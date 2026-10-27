@@ -890,6 +890,16 @@ def _panel_config_command(candidate: Dict[str, Any]) -> str:
         "i2c_scl": candidate["touch"]["scl"],
         "panel_exio": candidate["reset"]["panel_output"],
     }
+    # The controller memory, for the two things in the stream firmware that
+    # read it: the far-end window rule and the ST7735's whole-memory clear.
+    # Any other panel's command is unchanged, so a bootstrap image built
+    # before these fields still accepts it.
+    follows = board_descriptor.window_follows_mirror(candidate)
+    if (panel["memory_width"] and panel["memory_height"] and
+            (follows or panel["driver"] == "St7735")):
+        values["mem_w"] = panel["memory_width"]
+        values["mem_h"] = panel["memory_height"]
+        values["follow"] = int(follows)
     return "PANEL_CONFIG CONFIRM " + " ".join(
         "%s=%s" % item for item in values.items()
     )

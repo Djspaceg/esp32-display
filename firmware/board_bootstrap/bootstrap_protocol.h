@@ -307,4 +307,18 @@ inline bool parsePanelEdgesArgs(const char *const *assignments, size_t count,
   return true;
 }
 
+/// PANEL_CONFIG's optional controller memory (mem_w, mem_h, follow): both
+/// extents or neither, at most 1024 each, holding the glass at its offsets in
+/// the panel's native axes, and the far-end rule (follow=1) only with memory,
+/// as tools/board_descriptor.py requires of a descriptor.
+inline bool validPanelMemory(long width, long height, long col, long row,
+                             long memWidth, long memHeight, long follow) {
+  if (memWidth < 0 || memWidth > 1024 || memHeight < 0 || memHeight > 1024 ||
+      (memWidth == 0) != (memHeight == 0) || (follow != 0 && follow != 1)) {
+    return false;
+  }
+  if (memWidth == 0) return follow == 0;
+  return width + col <= memWidth && height + row <= memHeight;
+}
+
 }  // namespace bootstrapproto

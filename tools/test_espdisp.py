@@ -8135,6 +8135,36 @@ def test_bootstrap_refusals_and_color_controls():
                 "a silent 8 MiB codec bus selects the XIAO ST7735 automatically")
     check_equal([item["key"] for item in safe], ["s3-xiao-tft-042"],
                 "the XIAO resolution narrows the drive safety set")
+    # The bootstrap sketch draws through the same window rule as the stream
+    # firmware: the XIAO's 128x160 memory and its far-end mirror rule ride
+    # PANEL_CONFIG, and a panel with unmeasured memory sends neither.
+    xiao_words = espdisp.bootstrap._panel_config_command(selected).split()
+    for word in ("mem_w=128", "mem_h=160", "follow=1"):
+        check(word in xiao_words,
+              "XIAO PANEL_CONFIG carries %s" % word)
+    by_key = {item["key"]: item for item in candidates}
+    watch_words = espdisp.bootstrap._panel_config_command(
+        by_key["s3-lilygo-twatch-s3"]).split()
+    for word in ("mem_w=240", "mem_h=320", "follow=1"):
+        check(word in watch_words,
+              "T-Watch PANEL_CONFIG carries %s" % word)
+    # Memory that nothing reads (no far-end rule, not an ST7735), and memory
+    # never measured, both leave the command exactly as it was.
+    for key in ("s3-touch-lcd-154", "c6-lcd-147"):
+        check(by_key[key]["panel"]["memory_width"] != 0,
+              "%s has measured memory" % key)
+    unmeasured = next(
+        item for item in candidates
+        if item["panel"]["memory_width"] == 0
+        and item["panel"]["bus"] == "spi")
+    for item in (by_key["s3-touch-lcd-154"], by_key["c6-lcd-147"], unmeasured):
+        words = espdisp.bootstrap._panel_config_command(item).split()
+        check(not any(word.startswith(("mem_w=", "mem_h=", "follow="))
+                      for word in words),
+              "%s sends no memory fields" % item["key"])
+        # The sketch's tokenizer keeps 48 words.
+        check(len(words) <= 48, "%s PANEL_CONFIG fits 48 words" % item["key"])
+    check(len(xiao_words) <= 48, "XIAO PANEL_CONFIG fits 48 words")
 
     p4 = [
         item for item in candidates
@@ -8396,6 +8426,16 @@ int main() {
   if (!dsiPanelDriverSupported("jd9365")) return 15;
   if (dsiPanelDriverSupported("st7789")) return 16;
   if (dsiPanelDriverSupported(nullptr)) return 17;
+  // PANEL_CONFIG memory: the XIAO's 96x54 at 16,0 in 128x160 with the
+  // far-end rule; unmeasured; and each way it can be wrong.
+  if (!validPanelMemory(96, 54, 16, 0, 128, 160, 1)) return 18;
+  if (!validPanelMemory(96, 54, 16, 0, 0, 0, 0)) return 19;
+  if (validPanelMemory(96, 54, 16, 0, 0, 0, 1)) return 20;
+  if (validPanelMemory(96, 54, 16, 0, 128, 0, 0)) return 21;
+  if (validPanelMemory(96, 54, 33, 0, 128, 160, 1)) return 22;
+  if (validPanelMemory(96, 54, 16, 107, 128, 160, 1)) return 23;
+  if (validPanelMemory(96, 54, 16, 0, 128, 160, 2)) return 24;
+  if (validPanelMemory(96, 54, 16, 0, 2048, 160, 0)) return 25;
   return 0;
 }
 ''')
