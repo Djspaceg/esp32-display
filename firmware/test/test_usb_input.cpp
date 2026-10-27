@@ -44,6 +44,17 @@ static bool hasEvent(const KeyEvent* events, size_t count, unsigned char key,
 static int testHostingIsPerBoard() {
   // The 4B hosts but cannot power: its only host-capable connector advertises
   // itself as a sink and nothing on the board drives 5 V out.
+  // Every board's host port is its descriptor's carrier.usb_host fact.
+  for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+    const board::GeneratedUsbHost *fact =
+        board::generatedUsbHost(identity.variant);
+    CHECK(fact != nullptr);
+    if (fact == nullptr) continue;
+    CHECK(doomusb::hostPortFor(identity.variant).hostCapable ==
+          fact->hostCapable);
+    CHECK(doomusb::hostPortFor(identity.variant).suppliesVbus ==
+          fact->suppliesVbus);
+  }
   CHECK(doomusb::hostPortFor(board::Variant::P4_4B).hostCapable);
   CHECK(!doomusb::hostPortFor(board::Variant::P4_4B).suppliesVbus);
 

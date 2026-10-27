@@ -7044,6 +7044,26 @@ int main() {
                                    x, y, points));
   }
 
+  // --- tile streaming is a capability of the panel, not of one board ------
+  {
+    // Square glass (the grid is the same in both orientations), a grid the
+    // protocol can carry, and PSRAM for the frame.
+    CHECK(tileproto::panelCanStreamTiles(466, 466, true));   // 1.75C
+    CHECK(tileproto::panelCanStreamTiles(360, 360, true));   // 1.85C
+    CHECK(tileproto::panelCanStreamTiles(240, 240, true));   // watch, 1.54
+    CHECK(tileproto::panelCanStreamTiles(128, 128, true));   // 0.85
+    CHECK(!tileproto::panelCanStreamTiles(170, 320, true));  // 1.9: not square
+    CHECK(!tileproto::panelCanStreamTiles(96, 54, true));    // XIAO
+    CHECK(!tileproto::panelCanStreamTiles(720, 720, true));  // > 32 columns
+    CHECK(!tileproto::panelCanStreamTiles(466, 466, false)); // no PSRAM
+    CHECK(!tileproto::panelCanStreamTiles(0, 0, true));
+    // Whatever qualifies is exactly what TileGeometry says the wire carries.
+    for (uint16_t side = 16; side <= 640; side += 16) {
+      const tileproto::TileGeometry grid = {side, side};
+      CHECK(tileproto::panelCanStreamTiles(side, side, true) == grid.valid());
+    }
+  }
+
   // --- BMA423/BMA456 accelerometer contract (LilyGO T-Watch-S3) -----------
   {
     CHECK(bma4xx::ADDRESS == 0x19);
@@ -7304,11 +7324,18 @@ int main() {
       CHECK(doom_menu_key_release_action(0, false) == DOOM_MENU_KEY_ESCAPE);
       CHECK(doom_menu_key_release_action(599, false) == DOOM_MENU_KEY_ESCAPE);
       CHECK(doom_menu_key_release_action(600, false) == DOOM_MENU_KEY_BACK);
-      CHECK(doom_menu_key_release_action(2999, false) == DOOM_MENU_KEY_BACK);
-      CHECK(doom_menu_key_release_action(3000, false) == DOOM_MENU_KEY_NONE);
+      CHECK(doom_menu_key_release_action(972, false) == DOOM_MENU_KEY_BACK);
+      CHECK(doom_menu_key_release_action(1999, false) == DOOM_MENU_KEY_BACK);
+      CHECK(doom_menu_key_release_action(2000, false) == DOOM_MENU_KEY_NONE);
       CHECK(doom_menu_key_release_action(100, true) == DOOM_MENU_KEY_NONE);
-      CHECK(!doom_menu_key_exit_due(2999));
-      CHECK(doom_menu_key_exit_due(3000));
+      CHECK(!doom_menu_key_exit_due(1999));
+      CHECK(doom_menu_key_exit_due(2000));
+      // The hold the watch's player meant as "about 3 seconds" measured
+      // 2560 ms on the board: it must leave Doom, not go back a menu.
+      CHECK(doom_menu_key_exit_due(2560));
+      // And the exit lands well before the PMU's 4 s power-off, with a
+      // second to spare.
+      CHECK(DOOM_MENU_KEY_EXIT_MS + 1000u < 4000u);
       // Exit lands before the PMU's own hold-to-power-off (4 s on the watch).
       CHECK(DOOM_MENU_KEY_EXIT_MS < 4000u);
     }

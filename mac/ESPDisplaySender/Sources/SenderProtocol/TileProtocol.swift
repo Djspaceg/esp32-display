@@ -9,8 +9,9 @@ import Foundation
 ///
 /// A 466x466 panel derives a 30x30 grid whose last column and row are 2 px
 /// (466 = 29*16 + 2). The grid is orientation-independent: tile streaming
-/// only ships on square glass (`Capabilities.tileStream`, advertised solely
-/// by the CO5300 board), where rotation changes nothing about layout.
+/// only ships on square glass (`Capabilities.tileStream`, advertised by
+/// every board whose square panel the protocol carries), where rotation
+/// changes nothing about layout.
 public struct TileGeometry: Hashable, Sendable {
     public let width: Int
     public let height: Int

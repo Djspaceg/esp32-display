@@ -4997,6 +4997,19 @@ def test_board_descriptor_validator():
         "nor opt into one its family image does not carry")
     watch = next(item for item in descriptors
                  if item["key"] == "s3-lilygo-twatch-s3")
+    # The USB host port is a wiring fact in each descriptor, never a list.
+    check_equal(
+        {item["key"]: board_descriptor.usb_host(item) for item in descriptors
+         if board_descriptor.usb_host(item) != "none"},
+        {"p4-wifi6-touch-lcd-4b": "unpowered",
+         "p4-wifi6-touch-lcd-4c": "powered",
+         "p4-wifi6-touch-lcd-34c": "powered"},
+        "the P4 carriers' host ports, as their schematics wire them")
+    bad_host = copy.deepcopy(watch)
+    bad_host["carrier"]["usb_host"] = "yes"
+    check_descriptor_fails(
+        [bad_host], "carrier.usb_host must be one of",
+        "a host port is none, unpowered or powered")
     check_equal(watch["motion"]["controller"], "bma423",
                 "the watch's IMU is its BMA423 (BMA456 on later batches)")
     check_equal(watch["motion"]["address"], 0x19, "at LilyGO's SDO-high 0x19")

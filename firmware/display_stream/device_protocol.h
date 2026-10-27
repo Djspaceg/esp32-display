@@ -81,11 +81,11 @@ enum Capability : uint32_t {
   CAP_POWER = 1u << 14,
   // Accepts tile-stream packets (tile_protocol.h): a 16x16 dirty-tile grid
   // with per-run codec choice (raw / RLE565 / BC1), replacing full-width
-  // bands on this panel. Advertised only by board::Variant::AmoledCo5300 -
-  // gated on the variant rather than panelW == panelH deliberately, so a
-  // hypothetical future square panel on other silicon does not inherit a
-  // draw path that was tuned for this board's QSPI and PSRAM (see
-  // docs/tile-stream-plan.md section 5). A capability bit rather than a
+  // bands on this panel. Advertised by every board that can take it
+  // (tileproto::panelCanStreamTiles: square glass, a grid the protocol
+  // carries, PSRAM, on the S3 image that carries the tile path); the 1.75C
+  // is the board it was tuned on (docs/tile-stream-plan.md). A capability
+  // bit rather than a
   // version bump, per the reasoning at EBAT below: a sender only sends
   // tile packets to a panel that advertised it, so every other pairing -
   // including every C6 board - stays byte-identical on the wire.

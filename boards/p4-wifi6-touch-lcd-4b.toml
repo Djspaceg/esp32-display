@@ -85,6 +85,8 @@ pin_rst = 27
 pin_bl = 26
 pin_boot = 35
 pin_rgb_led = -1
+# USB host port per docs/usb-host-ports.md (vendor schematic): H2 Type-C, the device brings its own 5 V.
+usb_host = "unpowered"
 
 [touch]
 controller = "gt911"

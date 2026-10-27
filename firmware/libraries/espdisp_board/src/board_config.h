@@ -77,6 +77,7 @@ static const int8_t NO_PIN = -1;
 #include "generated_board_identity.h"
 #include "generated_board_audio.h"
 #include "generated_board_touch.h"
+#include "generated_board_usb_host.h"
 #include "generated_board_detection.h"
 
 /// Which capacitive touch controller the board carries, so the sketch knows
@@ -319,7 +320,7 @@ struct Config {
   /// Whether some units of this carrier have no BOOT key to press although
   /// pinBootButton is wired (the T-Watch-S3's earlier batches: the switch
   /// pad is there, the key on the back cover is not). Doom then gives the
-  /// PWR key BOOT's tiers (menu, previous menu, 3 s exit) instead of firing
+  /// PWR key BOOT's tiers (menu, previous menu, 2 s exit) instead of firing
   /// with it, since nothing else can open the menu or leave mid-game; touch
   /// still fires.
   bool bootButtonOptional = false;

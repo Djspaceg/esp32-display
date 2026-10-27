@@ -256,6 +256,10 @@
         "pin_panel_power": {"$ref": "#/$defs/pin"},
         "pin_encoder_a": {"$ref": "#/$defs/pin"},
         "pin_encoder_b": {"$ref": "#/$defs/pin"},
+        "usb_host": {
+          "enum": ["none", "unpowered", "powered"],
+          "description": "The carrier's USB host port: none, unpowered (the device brings its own 5 V) or powered. Absent means none."
+        },
         "boot_button_optional": {
           "type": "boolean",
           "description": "Some units have no BOOT key on pin_boot; Doom then takes its menu key from the AXP2101 PWR key. Absent means false."

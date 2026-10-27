@@ -73,15 +73,16 @@ struct HostPort {
 /// 1.3 cannot host at all -- its connector's data pins land on a CH343P bridge
 /// and GPIO19/GPIO20 are spent on reset control and the backlight. So hosting
 /// stays off for all of them.
-constexpr HostPort hostPortFor(board::Variant variant) {
-  return variant == board::Variant::P4_4B  ? HostPort{true, false}
-         : variant == board::Variant::P4_4C  ? HostPort{true, true}
-         : variant == board::Variant::P4_34C ? HostPort{true, true}
-                                             : HostPort{false, false};
+/// The carrier's own descriptor says (carrier.usb_host, generated into
+/// GENERATED_USB_HOSTS); a board with no entry has no host port.
+inline HostPort hostPortFor(board::Variant variant) {
+  const board::GeneratedUsbHost *port = board::generatedUsbHost(variant);
+  return port == nullptr ? HostPort{false, false}
+                         : HostPort{port->hostCapable, port->suppliesVbus};
 }
 
 /// Whether this firmware brings the USB host stack up at all on a carrier.
-constexpr bool inputSupported(board::Variant variant) {
+inline bool inputSupported(board::Variant variant) {
   return hostPortFor(variant).hostCapable;
 }
 

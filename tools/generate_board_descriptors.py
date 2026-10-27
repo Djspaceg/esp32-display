@@ -241,6 +241,36 @@ def render_touch_calibrations(descriptors: Sequence[Dict[str, Any]]) -> str:
     return "".join(lines)
 
 
+def render_usb_host(descriptors: Sequence[Dict[str, Any]]) -> str:
+    ordered = sorted(
+        descriptors, key=lambda item: item["identity"]["variant_value"])
+    lines = [
+        HEADER,
+        "#pragma once\n\n",
+        "struct GeneratedUsbHost {\n",
+        "  Variant variant;\n",
+        "  bool hostCapable;\n",
+        "  bool suppliesVbus;\n",
+        "};\n\n",
+        "static constexpr GeneratedUsbHost GENERATED_USB_HOSTS[] = {\n",
+    ]
+    for item in ordered:
+        port = board_descriptor.usb_host(item)
+        lines.append("    {Variant::%s, %s, %s},\n" % (
+            item["identity"]["variant"], _bool(port != "none"),
+            _bool(port == "powered")))
+    lines.extend([
+        "};\n\n",
+        "inline const GeneratedUsbHost *generatedUsbHost(Variant variant) {\n",
+        "  for (const auto &port : GENERATED_USB_HOSTS) {\n",
+        "    if (port.variant == variant) return &port;\n",
+        "  }\n",
+        "  return nullptr;\n",
+        "}\n",
+    ])
+    return "".join(lines)
+
+
 def render_identity(descriptors: Sequence[Dict[str, Any]]) -> str:
     ordered = sorted(
         descriptors, key=lambda item: item["identity"]["variant_value"])
@@ -915,6 +945,8 @@ def expected_outputs(repo_root: str) -> Dict[str, str]:
             render_audio(descriptors),
         "firmware/libraries/espdisp_board/src/generated_board_touch.h":
             render_touch_calibrations(descriptors),
+        "firmware/libraries/espdisp_board/src/generated_board_usb_host.h":
+            render_usb_host(descriptors),
         "firmware/libraries/espdisp_board/src/generated_board_configs.h":
             render_configs(descriptors),
         "firmware/libraries/espdisp_board/src/generated_board_config_lookup.h":

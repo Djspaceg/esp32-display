@@ -1,4 +1,5 @@
 #include "app_state.h"
+#include "tile_protocol.h"
 
 #include <display_backend.h>
 
@@ -69,18 +70,28 @@ void configurePanelGeometry(const board::Config &config) {
 esp_lcd_panel_handle_t panel = nullptr;
 
 // Whether this board speaks the tile-stream protocol instead of packed
-// bands. A variant fact, not a shape fact: the draw path behind it is tuned
-// to this board's QSPI and PSRAM (see device_protocol.h's CAP_TILE_STREAM
-// comment), so a future square panel on other silicon must opt in
-// explicitly rather than inherit it.
+// bands: by capability (tileproto::panelCanStreamTiles: square glass, a grid
+// the protocol carries, PSRAM), in the image that carries the tile path (the
+// S3's). Never a list of boards.
 bool tileStreamEnabled() {
-  return bcfg->variant == board::Variant::AmoledCo5300;
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  return tileproto::panelCanStreamTiles(bcfg->panel->width,
+                                        bcfg->panel->height,
+                                        bcfg->platform->usePsramFrameBuffers);
+#else
+  return false;
+#endif
 }
 
+// Large tiles are the family image's capability (ESPDISP_LARGE_TILE_STREAM,
+// set for the P4 family by tools/generate_board_descriptors.py): every board
+// that image runs on streams them.
 bool largeTileStreamEnabled() {
-  return bcfg->variant == board::Variant::P4_4B ||
-         bcfg->variant == board::Variant::P4_4C ||
-         bcfg->variant == board::Variant::P4_34C;
+#if defined(ESPDISP_LARGE_TILE_STREAM)
+  return true;
+#else
+  return false;
+#endif
 }
 
 // Whether the touch controller came up. Not simply "is this the Touch board":

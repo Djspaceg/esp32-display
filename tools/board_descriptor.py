@@ -239,7 +239,11 @@ OPTIONAL_FIELDS = {
     # Some units of the carrier lack a BOOT key on the wired pin; see
     # Config::bootButtonOptional.
     "carrier.boot_button_optional": False,
+    # The carrier's USB host port, from its schematic: none, unpowered (the
+    # device brings its own 5 V) or powered (VBUS supplied).
+    "carrier.usb_host": "none",
 }
+USB_HOST_PORTS = ("none", "unpowered", "powered")
 # Carrier wiring only some boards have. Absent means -1 (no such line), so a
 # descriptor written before a field existed stays valid without restating it.
 OPTIONAL_PIN_DEFAULTS = {
@@ -363,6 +367,19 @@ def _validate_doom_capability(descriptor: Dict[str, Any]) -> None:
             "%s: capabilities.doom must equal family.requires_doom_wad: a "
             "board runs Doom exactly when its family image carries it"
             % _source_name(descriptor))
+
+
+def usb_host(descriptor: Dict[str, Any]) -> str:
+    """The carrier's USB host port: none, unpowered or powered."""
+    return descriptor["carrier"].get(
+        "usb_host", OPTIONAL_FIELDS["carrier.usb_host"])
+
+
+def _validate_usb_host(descriptor: Dict[str, Any]) -> None:
+    if usb_host(descriptor) not in USB_HOST_PORTS:
+        raise DescriptorError(
+            "%s: carrier.usb_host must be one of %s"
+            % (_source_name(descriptor), ", ".join(USB_HOST_PORTS)))
 
 
 def _validate_boot_optional(descriptor: Dict[str, Any]) -> None:
@@ -1463,6 +1480,7 @@ def validate_descriptors(
         _validate_boot_optional(descriptor)
         _validate_doom_capability(descriptor)
         _validate_motion(descriptor)
+        _validate_usb_host(descriptor)
         _validate_backlight_floor(descriptor)
         panel_symbol = descriptor["panel"]["symbol"]
         if panel_symbol in panels:

@@ -201,8 +201,8 @@ extern "C" bool doom_power_key_init(void) {
         const char* action = nullptr;
         const char* role =
             doom_power_key_is_menu()
-                ? "PWR key        = BOOT's tiers: press Escape, 0.6-3 s "
-                  "previous menu, 3 s exit Doom"
+                ? "PWR key        = press Escape, 0.6-2 s previous menu, "
+                  "2 s hold exit Doom"
                 : "PWR key held   = Shoot";
         if (boardpower::powerKeyHold(offSeconds, action)) {
             doom_log("  %s (a %d s hold: %s)", role, offSeconds, action);

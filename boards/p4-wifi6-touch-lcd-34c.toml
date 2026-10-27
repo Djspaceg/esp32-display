@@ -85,6 +85,8 @@ pin_rst = 27
 pin_bl = 26
 pin_boot = 35
 pin_rgb_led = -1
+# USB host port per docs/usb-host-ports.md (vendor schematic): J3 type A, VBUS supplied whenever the board is powered.
+usb_host = "powered"
 
 [touch]
 controller = "gt911"

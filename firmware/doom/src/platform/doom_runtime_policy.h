@@ -242,8 +242,14 @@ static inline bool doom_power_key_press_ended(bool was_held,
 // reaches DOOM_MENU_KEY_EXIT_MS leaves Doom while still held, so a release
 // after it does nothing more. Doom's own Quit Game prompt answers only 'y',
 // which no touch gesture or key here sends, so the hold is the way out.
+//
+// The exit is at 2 s, not BOOT's 3 s. A PMU key has a ceiling BOOT does not:
+// the AXP2101 powers the board off after a 4 s hold (REG 27H). On the
+// T-Watch-S3 a hold its player meant as about 3 seconds measured 2560 ms,
+// and went back a menu instead of leaving; 2 s is reached by such a hold and
+// leaves two seconds before the power-off.
 #define DOOM_MENU_KEY_BACK_MS 600u
-#define DOOM_MENU_KEY_EXIT_MS 3000u
+#define DOOM_MENU_KEY_EXIT_MS 2000u
 
 typedef enum {
     DOOM_MENU_KEY_NONE,

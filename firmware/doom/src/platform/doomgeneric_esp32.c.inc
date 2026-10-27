@@ -25,7 +25,7 @@
 // The 1.75C's large side button (the AXP2101 PWR key): fire while held.
 // On a carrier that may have no BOOT key (the T-Watch-S3's crown) the PWR
 // key takes BOOT's place instead: a press is Escape (open/close the menu),
-// 0.6-3 s is Backspace (previous menu), and a 3 s hold exits Doom.
+// 0.6-2 s is Backspace (previous menu), and a 2 s hold exits Doom.
 //
 // USB keyboard and mouse (carriers whose USB port can host a device):
 //   W/A/S/D or arrows move and turn, Ctrl fires, Space uses, Shift runs,
@@ -482,7 +482,7 @@ static void process_power_key_input(void) {
         if (dg_power_key.held && !dg_power_key_exit_fired &&
             doom_menu_key_exit_due(now - dg_power_key_down_at)) {
             dg_power_key_exit_fired = true;
-            doom_log("pwr key: 3 s hold -- exiting Doom");
+            doom_log("pwr key: 2 s hold -- exiting Doom");
             doom_request_exit();
         }
         if (doom_power_key_press_ended(was_held, &dg_power_key,

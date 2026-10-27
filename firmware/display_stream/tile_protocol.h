@@ -212,8 +212,19 @@ struct TileGeometry {
   }
 };
 
-/// The 1.75" AMOLED (ESP32-S3-Touch-AMOLED-1.75C), the only board that
-/// advertises CAP_TILE_STREAM today. Named because the host tests pin its
+/// Whether a panel can take the tile stream: square glass (the grid is the
+/// same in both orientations, which is what lets the sender keep one grid
+/// across rotation), a grid this protocol can carry (TileGeometry::valid),
+/// and PSRAM for the frame the tiles are assembled into. A capability of the
+/// panel and platform, never a list of boards.
+inline bool panelCanStreamTiles(uint16_t width, uint16_t height,
+                                bool psramFrameBuffers) {
+  return psramFrameBuffers && width == height &&
+         TileGeometry{width, height}.valid();
+}
+
+/// The 1.75" AMOLED (ESP32-S3-Touch-AMOLED-1.75C), the board the tile stream
+/// was first tuned on. Named because the host tests pin its
 /// derived grid; the sketch takes its geometry from the board table.
 static const TileGeometry GEOMETRY_466X466 = {466, 466};
 
