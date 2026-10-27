@@ -58,10 +58,16 @@ public enum QuakePak {
     public static func supports(chip: String?, profile: String?) -> Bool {
         guard supports(chip: chip) else { return false }
         guard let profile else { return true }
-        let family = GeneratedBoardCatalog.requiredFamilies.first {
-            GeneratedBoardCatalog.profilesByTarget[$0]?.contains(profile) == true
+        // The chip names the family; a profile listed under another family
+        // is not this board's.
+        let family = chip == s3Chip ? "s3" : "p4"
+        guard GeneratedBoardCatalog.profilesByTarget[family]?.contains(profile) == true
+        else {
+            let elsewhere = GeneratedBoardCatalog.requiredFamilies.contains {
+                GeneratedBoardCatalog.profilesByTarget[$0]?.contains(profile) == true
+            }
+            return !elsewhere
         }
-        guard let family else { return true }
         guard families.contains(family),
               let geometry = GeneratedBoardCatalog.geometryByProfile[profile]
         else { return false }

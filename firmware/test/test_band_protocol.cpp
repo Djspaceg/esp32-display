@@ -3672,10 +3672,24 @@ int main() {
       CHECK(watch.hasMotionBus());
       CHECK(watch.motionSda() == 10 && watch.motionScl() == 11);
       CHECK(watch.motionSda() == watch.pmuSda());
+      // The firmware's frame is the reading's: an upright board reads +Y
+      // (motion_orientation.h), and a clockwise turn +X. Bosch's device
+      // frame for this board (LilyGO's remap: device x = sensor Y, device
+      // y = sensor X) reads +1 g on device y upright, and -1 g on device x
+      // after a clockwise turn. So panel X is -sensor Y and panel Y +sensor X.
       CHECK_EQ(watch.motionXAxis, 1);
-      CHECK_EQ(watch.motionXSign, 1);
+      CHECK_EQ(watch.motionXSign, -1);
       CHECK_EQ(watch.motionYAxis, 0);
-      CHECK_EQ(watch.motionYSign, -1);
+      CHECK_EQ(watch.motionYSign, 1);
+      {
+        // Upright: device y up reads +1 g, which is sensor +X.
+        const int16_t upright[3] = {8192, 0, 0};
+        const motionorient::Calibration cal = {
+            watch.motionXAxis, watch.motionXSign, watch.motionYAxis,
+            watch.motionYSign};
+        CHECK(motionorient::classify(upright, cal, 0,
+                                     motionorient::AutomaticMode::FourWay) == 0);
+      }
       // Every other IMU board reads its sensor on the touch bus, as before.
       for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
         if (identity.variant == board::Variant::LilygoTwatchS3) continue;
@@ -7183,10 +7197,11 @@ int main() {
         CHECK(fabsf(pitch - oldPitch) < 0.01f);
         CHECK(fabsf(roll - oldRoll) < 0.01f);
       }
-      // The watch (panel-right sensor Y, panel-down minus sensor X, the
-      // sensor on the bottom layer so Z points into the glass): the same
-      // physical tilt gives the same angles as on the 1.75C.
-      doom_panel_accel_t watch = doom_panel_accel(-2000, 0, -7900, 1, 1, 0, -1);
+      // The watch (its descriptor map: X from -sensor Y, Y from +sensor X,
+      // the sensor on the bottom layer so Z points into the glass): the same
+      // physical tilt gives the same angles as on the 1.75C, whose sensor +X
+      // also reads the tilt toward the panel top.
+      doom_panel_accel_t watch = doom_panel_accel(2000, 0, -7900, 1, -1, 0, 1);
       doom_panel_accel_t round = doom_panel_accel(2000, 0, 7900, 1, 1, 0, 1);
       float wp = 0, wr = 0, rp = 0, rr = 0;
       doom_tilt_angles(watch, &wp, &wr);

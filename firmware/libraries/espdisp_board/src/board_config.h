@@ -793,13 +793,13 @@ static const Config CONFIG_LILYGO_TWATCH_S3 = {
     /* adcScale */ 0,
     /* batteryEnable */ NO_PIN,
     /* chargeStatus */ NO_PIN,
-    // BMA423 on the main bus. Panel-right is sensor +Y and panel-down sensor
-    // -X: LilyGO's own remap for this board (BOTTOM_LAYER_TOP_RIGHT_CORNER,
-    // device x = sensor Y, device y = sensor X, z = -Z) turned into this
-    // firmware's panel-right/panel-down frame.
+    // BMA423 on the main bus, mapped from LilyGO's own remap for this board
+    // (BOTTOM_LAYER_TOP_RIGHT_CORNER: device x = sensor Y, device y = sensor
+    // X) into this firmware's reading frame (upright reads +Y, a clockwise
+    // turn +X): panel X is -sensor Y, panel Y +sensor X.
     MotionController::Bma423,
-    /* motion X */ 1, 1,
-    /* motion Y */ 0, -1,
+    /* motion X */ 1, -1,
+    /* motion Y */ 0, 1,
     /* panelResetExio */ 0,
     /* touchResetExio */ 0,
     /* pinBlEnable */ NO_PIN,
