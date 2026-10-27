@@ -160,7 +160,7 @@ under motion, and odd-orientation touch corners remain unverified.
 | Profile | Current evidence | Residual gap |
 | --- | --- | --- |
 | `co5300` | Runtime detection, frame counters, two rotations, brightness, and power on attached hardware | No independent visual observer for the latest image |
-| `st7735-042` | Hand-wired XIAO ESP32-S3: detection, `CFGSHOW`, 96x54 window at column 16 and BGR order seen on the glass with a test sketch at 4 MHz, firmware rotation 180 seen correct | 15 MHz unproven over jumper wires; 180 degrees seen correct, 90/270 unchecked; WiFi joins (seen at -85 dBm) but no frame streamed yet |
+| `st7735-042` | Hand-wired XIAO ESP32-S3: detection, `CFGSHOW`, BGR order at 4 MHz; on the glass, a memory map put the 96x54 window at columns 16..111, rows 0..53 of a 128x160 memory, upright in plain MADCTL with the flex cable on top (now rotation 0), and an edge frame under MX\|MY (rotation 180) at rows 106..159; the stream, test and rescue firmware clear the whole memory at init (the bootstrap sketch does not) | 15 MHz unproven over jumper wires; 90/270 follow the far-end rule unchecked; WiFi joins (seen at -85 dBm before the antenna, -39 with it) but no frame streamed from the app yet |
 | `gc9107` | Family compile and host profile tests | No attached carrier for current visible smoke testing |
 | `st7789-130` | Attached carrier chip/flash probe, unique QMI8658A detection on GPIO47/48, production `CFGSHOW` over CH343, motion initialization, and WiFi association | Visual RGB/offset/backlight/rotation, battery with an attached cell, and sustained streaming checks pending |
 | `st7789-154` | Family compile and host profile tests | No attached carrier for current runtime testing |

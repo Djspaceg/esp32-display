@@ -50,6 +50,10 @@
 #error "No panel implementation selected for this firmware family"
 #endif
 
+#include <esp_heap_caps.h>
+#include <esp_lcd_panel_commands.h>
+
+#include "panel_memory_clear.h"
 #include "panel_orientation.h"
 
 namespace boardpanel {
@@ -160,6 +164,49 @@ static const gc9107_lcd_init_cmd_t ST7735_QUESTWISE_INIT[] = {
     {0x13, nullptr, 0, 10},  // NORON
 };
 #endif
+
+/// Write black over the controller's whole memory (panel_memory_clear.h says
+/// which panels and why). Absolute CASET/RASET/RAMWR through tx_param, so the
+/// driver's window gap is bypassed and no colour-done callback fires; it runs
+/// before DISPON, so the glass never shows the power-on noise either.
+inline void clearControllerMemory(esp_lcd_panel_io_handle_t io,
+                                  const board::PanelConfig &panel,
+                                  size_t maxTransferSz) {
+  const panelorient::MemoryExtent extent = panelorient::memoryToClear(panel);
+  if (extent.width == 0) return;
+  // A clear that fails brings the frozen noise back, so it always says so.
+  const uint16_t band = panelorient::clearBandRows(extent, maxTransferSz);
+  uint8_t *zeros = band == 0 ? nullptr
+                             : (uint8_t *)heap_caps_calloc(
+                                   1, (size_t)extent.width * 2 * band,
+                                   MALLOC_CAP_DMA);
+  if (zeros == nullptr) {
+    Serial.printf("panel: memory clear skipped (band %u rows, no buffer)\n",
+                  (unsigned)band);
+    return;
+  }
+  const uint16_t x1 = extent.width - 1;
+  const uint8_t cols[4] = {0, 0, (uint8_t)(x1 >> 8), (uint8_t)x1};
+  esp_err_t err = esp_lcd_panel_io_tx_param(io, LCD_CMD_CASET, cols,
+                                            sizeof(cols));
+  for (uint16_t y = 0; err == ESP_OK && y < extent.height;
+       y = (uint16_t)(y + band)) {
+    const uint16_t rows =
+        (uint16_t)(extent.height - y < band ? extent.height - y : band);
+    const uint16_t y1 = (uint16_t)(y + rows - 1);
+    const uint8_t span[4] = {(uint8_t)(y >> 8), (uint8_t)y, (uint8_t)(y1 >> 8),
+                             (uint8_t)y1};
+    err = esp_lcd_panel_io_tx_param(io, LCD_CMD_RASET, span, sizeof(span));
+    if (err == ESP_OK) {
+      err = esp_lcd_panel_io_tx_param(io, LCD_CMD_RAMWR, zeros,
+                                      (size_t)extent.width * 2 * rows);
+    }
+  }
+  heap_caps_free(zeros);
+  if (err != ESP_OK) {
+    Serial.printf("panel: memory clear failed err=%d\n", (int)err);
+  }
+}
 
 /// Bring up the SPI/QSPI bus and the panel described by cfg.
 ///
@@ -325,6 +372,7 @@ inline bool init(const board::Config &cfg, spi_host_device_t host,
   esp_lcd_panel_reset(panel);
   esp_lcd_panel_init(panel);
   esp_lcd_panel_invert_color(panel, cfg.panel->invertColor);
+  clearControllerMemory(io, *cfg.panel, maxTransferSz);
   esp_lcd_panel_set_gap(panel, cfg.panel->colOffset, cfg.panel->rowOffset);
   esp_lcd_panel_disp_on_off(panel, true);
 
@@ -385,11 +433,9 @@ inline void applyOrientation(esp_lcd_panel_handle_t panel,
                              const board::Config &cfg, bool landscape,
                              uint8_t rotation,
                              bool installationMirrorX = false) {
-  const uint8_t q = panelorient::quadrant(
-      panelorient::addressedRotation(
-          (uint8_t)(rotation + cfg.panel->orientationOffset),
-          cfg.panel->width != cfg.panel->height),
-      landscape);
+  const uint8_t q = panelorient::addressedQuadrant(
+      rotation, cfg.panel->orientationOffset,
+      cfg.panel->width != cfg.panel->height, landscape);
   const bool swap = panelorient::swapXY(q);
   esp_lcd_panel_swap_xy(panel, swap);
   esp_lcd_panel_mirror(panel,

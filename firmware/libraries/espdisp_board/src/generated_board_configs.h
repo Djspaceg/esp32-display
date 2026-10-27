@@ -107,12 +107,12 @@ static constexpr PanelConfig PANEL_ST77916_360X360 = {
     false};
 static constexpr PanelConfig PANEL_ST7735_96X54 = {
     PanelProfile::St7735_96x54, PanelDriver::St7735, PanelBus::Spi,
-    96, 54, 0, 0,
-    4000000, 0, 16, 0, 2,
+    96, 54, 128, 160,
+    4000000, 0, 16, 0, 0,
     false, false, true,
     0, 0, 0, 0, 0,
     0, 0, 0,
-    false};
+    true};
 
 static constexpr Config CONFIG_C3_2424S012 = {
     Variant::C3_2424S012, "ESP32-2424S012C-Y(B) (GC9A01A)", &PLATFORM_ESP32_C3, &PANEL_GC9107_240X240, 6, 7,

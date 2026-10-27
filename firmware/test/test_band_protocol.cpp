@@ -41,6 +41,7 @@
 #include "../libraries/espdisp_board/src/gt911_protocol.h"
 #include "../libraries/espdisp_board/src/motion_orientation.h"
 #include "../libraries/espdisp_board/src/panel_transfer_plan.h"
+#include "../libraries/espdisp_board/src/panel_memory_clear.h"
 #include "../libraries/espdisp_board/src/panel_orientation.h"
 #include "../libraries/espdisp_board/src/touch_gesture.h"
 #include "../libraries/espdisp_board/src/touch_map.h"
@@ -3972,13 +3973,96 @@ int main() {
     CHECK(x.serialTransport() == board::SerialTransport::NativeUsbCdc);
     const int8_t used[] = {x.pinSclk, x.pinMosi, x.pinCs, x.pinDc, x.pinRst};
     for (int8_t pin : used) CHECK(pin != 2 && pin != 19 && pin != 20 && pin != 21);
-    // The seller's green-tab geometry: 96x54 at column 16, row 0, in the
-    // MX|MY state (two quarter turns), BGR, no inversion; 4 MHz is the clock
-    // measured clean over jumper wires (15 MHz showed static).
+    // 96x54 of glass at column 16, row 0 of a 128x160 memory, BGR, no
+    // inversion; 4 MHz is the clock measured clean over jumper wires (15 MHz
+    // showed static).
     CHECK(x.panel->width == 96 && x.panel->height == 54);
     CHECK(x.panel->colOffset == 16 && x.panel->rowOffset == 0);
-    CHECK(x.panel->orientationOffset == 2);
     CHECK(!x.panel->invertColor);
+    // Measured on the glass, 2026-10-27: a block map in plain MADCTL put the
+    // glass at memory columns 16..111, rows 0..53, upright with the flex
+    // cable on top; a 132-wide write sheared, so a memory row is 128 long;
+    // and a one-pixel frame at columns 16..111, rows 106..159 under MX|MY
+    // touched all four glass edges, so memory is 160 rows and a mirrored
+    // axis counts from its far end. With the window kept at row 0 under
+    // MX|MY, as before, the glass showed memory nothing wrote: static.
+    CHECK(x.panel->memoryWidth == 128 && x.panel->memoryHeight == 160);
+    CHECK(x.panel->windowFollowsMirror);
+    // Rotation 0 is upright with the flex cable on top: plain MADCTL.
+    CHECK(x.panel->orientationOffset == 0);
+    {
+      // The sender streams landscape frames for rotations 1 and 3 on
+      // rectangular glass, as applyOrientation is called.
+      const auto quadrantFor = [&](uint8_t rotation) {
+        return panelorient::addressedQuadrant(
+            rotation, x.panel->orientationOffset, true, (rotation & 1) != 0);
+      };
+      const auto gapFor = [&](uint8_t q, bool installationMirrorX) {
+        return panelorient::windowGap(
+            x.panel->width, x.panel->height, x.panel->memoryWidth,
+            x.panel->memoryHeight, x.panel->colOffset, x.panel->rowOffset, q,
+            installationMirrorX, x.panel->windowFollowsMirror);
+      };
+      CHECK_EQ(quadrantFor(0), 0);
+      CHECK_EQ(gapFor(0, false).x, 16);
+      CHECK_EQ(gapFor(0, false).y, 0);
+      CHECK_EQ(quadrantFor(2), 2);
+      CHECK_EQ(gapFor(2, false).x, 16);
+      CHECK_EQ(gapFor(2, false).y, 106);
+      // Wherever it is addressed from, the drawn window must land on the
+      // glass's own memory: columns 16..111, rows 0..53. The driver adds the
+      // gap to CASET (x) and RASET (y); under MV, CASET walks the memory's
+      // rows and RASET its columns; MX reverses the columns and MY the rows
+      // from the far end.
+      for (uint8_t rotation = 0; rotation < 4; rotation++) {
+        for (int mirrored = 0; mirrored < 2; mirrored++) {
+          const uint8_t q = quadrantFor(rotation);
+          const bool swap = panelorient::swapXY(q);
+          const bool mx = panelorient::mirrorX(q, mirrored != 0);
+          const bool my = panelorient::mirrorY(q, mirrored != 0);
+          const panelorient::WindowGap gap = gapFor(q, mirrored != 0);
+          const int frameW = swap ? x.panel->height : x.panel->width;
+          const int frameH = swap ? x.panel->width : x.panel->height;
+          int col0 = swap ? gap.y : gap.x;
+          int colSpan = swap ? frameH : frameW;
+          int row0 = swap ? gap.x : gap.y;
+          int rowSpan = swap ? frameW : frameH;
+          if (mx) col0 = x.panel->memoryWidth - col0 - colSpan;
+          if (my) row0 = x.panel->memoryHeight - row0 - rowSpan;
+          CHECK_EQ(col0, 16);
+          CHECK_EQ(colSpan, 96);
+          CHECK_EQ(row0, 0);
+          CHECK_EQ(rowSpan, 54);
+        }
+      }
+      // The descriptor's per-rotation table says the same.
+      const uint16_t tableX[4] = {16, 0, 16, 106};
+      const uint16_t tableY[4] = {0, 16, 106, 16};
+      for (uint8_t rotation = 0; rotation < 4; rotation++) {
+        CHECK_EQ(gapFor(quadrantFor(rotation), false).x, tableX[rotation]);
+        CHECK_EQ(gapFor(quadrantFor(rotation), false).y, tableY[rotation]);
+      }
+    }
+    // The whole memory is cleared at init, so a part of it the window does
+    // not cover never shows power-on noise.
+    {
+      const panelorient::MemoryExtent clear =
+          panelorient::memoryToClear(*x.panel);
+      CHECK_EQ(clear.width, 128);
+      CHECK_EQ(clear.height, 160);
+      // In row bands that fit the bus's largest transfer, the frame size.
+      CHECK_EQ(panelorient::clearBandRows(clear, 96 * 54 * 2), 40);
+      // A bus that cannot carry one whole memory row clears nothing.
+      CHECK_EQ(panelorient::clearBandRows(clear, 100), 0);
+      // Only the ST7735 is cleared; every other panel's init is unchanged.
+      for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+        const board::PanelConfig &panel = *board::configFor(identity.variant).panel;
+        const panelorient::MemoryExtent other = panelorient::memoryToClear(panel);
+        if (identity.variant == Variant::XiaoSt7735) continue;
+        CHECK_EQ(other.width, 0);
+        CHECK_EQ(other.height, 0);
+      }
+    }
     CHECK(x.panel->pixelClockHz == 4 * 1000 * 1000);
     CHECK(x.panel->spiMode == 0);
     CHECK(board::supportsDoom(Variant::XiaoSt7735));

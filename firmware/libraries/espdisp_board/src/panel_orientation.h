@@ -49,6 +49,17 @@ inline uint8_t addressedRotation(uint8_t rotation, bool rectangular) {
   return (uint8_t)(rotation & (rectangular ? 2u : 3u));
 }
 
+/// The quadrant a panel is addressed through for the user's rotation: the
+/// descriptor's orientation offset composed with the rotation, then the
+/// sender's landscape turn. applyOrientation's composition, here so the host
+/// suite tests the same arithmetic the firmware runs.
+inline uint8_t addressedQuadrant(uint8_t rotation, uint8_t orientationOffset,
+                                 bool rectangular, bool landscape) {
+  return quadrant(
+      addressedRotation((uint8_t)(rotation + orientationOffset), rectangular),
+      landscape);
+}
+
 /// MADCTL MV: odd quadrants exchange the axes.
 inline bool swapXY(uint8_t q) { return (q & 1) != 0; }
 

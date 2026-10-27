@@ -52,25 +52,32 @@ serial = "native_usb_cdc"
 minimum_flash_bytes = 8388608
 
 [panel]
-# The seller's rotation 0 is MADCTL MX|MY|BGR with the glass at column 16,
-# row 0; orientation_offset 2 is that same MX|MY state. Measured on a
-# hand-wired XIAO: at 4 MHz a whole-memory fill showed solid red, green, blue
-# in order (BGR), and a 96x54 white frame at column 16, row 0 touched all four
-# edges; the seller's 15 MHz showed only static over jumper wires. 4 MHz moves
-# a full frame in about 21 ms. Controller memory extents are unmeasured.
+# Measured on a hand-wired XIAO: at 4 MHz a whole-memory fill showed solid
+# red, green, blue in order (BGR); the seller's 15 MHz showed only static over
+# jumper wires. 4 MHz moves a full frame in about 21 ms.
+# Measured on the glass, 2026-10-27, held with the flex cable on top: a
+# labelled block map in plain MADCTL (no MX/MY/MV) put the glass at memory
+# columns 16..111, rows 0..53, upright and unmirrored; a 132-wide write
+# sheared, so a memory row is 128 long; and a one-pixel frame at columns
+# 16..111, rows 106..159 under MX|MY touched all four glass edges, so memory
+# is 128x160 and a mirrored axis counts from its far end
+# (window_follows_mirror). Rotation 0 is that upright plain state,
+# orientation_offset 0. The earlier MX|MY rotation 0 kept the window at row 0,
+# which under MY addresses memory rows 106..159, off the glass: the glass
+# showed power-on memory, frozen noise.
 symbol = "PANEL_ST7735_96X54"
 profile = "St7735_96x54"
 driver = "St7735"
 bus = "spi"
 width = 96
 height = 54
-memory_width = 0
-memory_height = 0
+memory_width = 128
+memory_height = 160
 pixel_clock_hz = 4000000
 spi_mode = 0
 col_offset = 16
 row_offset = 0
-orientation_offset = 2
+orientation_offset = 0
 invert_color = false
 round_display = false
 supports_command_rotation = true
@@ -85,6 +92,7 @@ hsync_front_porch = 0
 vsync_back_porch = 0
 vsync_pulse_width = 0
 vsync_front_porch = 0
+window_follows_mirror = true
 
 [carrier]
 # SCLK D8, SDIN D10, DC D3, RES D4, CS D5. The screen pulls its BL input high,
@@ -129,7 +137,9 @@ long_press_ms = 600
 press_max_ms = 10000
 
 [orientation]
-offsets = [[16, 0], [0, 16], [16, 0], [0, 16]]
+# The window gap per rotation under the far-end rule: rotation 2 (MX|MY) was
+# measured at 16,106; rotations 1 and 3 follow the same rule, unmeasured.
+offsets = [[16, 0], [0, 16], [16, 106], [106, 16]]
 mirror_x_supported = true
 quarter_turns = [0, 1, 2, 3]
 
