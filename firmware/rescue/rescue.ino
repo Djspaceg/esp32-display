@@ -90,17 +90,21 @@ static bool drawScreen(esp_lcd_panel_handle_t panel) {
     const int rows = screen.height - y < BAND_ROWS ? screen.height - y
                                                    : BAND_ROWS;
     rescuemodel::renderBand(screen, y, rows, band);
-    portENTER_CRITICAL(&dmaMux);
-    dmaInFlight = dmaInFlight + 1;
-    portEXIT_CRITICAL(&dmaMux);
+    if (!cfg->isI2c()) {
+      portENTER_CRITICAL(&dmaMux);
+      dmaInFlight = dmaInFlight + 1;
+      portEXIT_CRITICAL(&dmaMux);
+    }
     if (boarddisplay::drawBitmap(panel, *cfg, 0, y, screen.width, y + rows,
                                  band) != ESP_OK) {
-      portENTER_CRITICAL(&dmaMux);
-      dmaInFlight = dmaInFlight - 1;
-      portEXIT_CRITICAL(&dmaMux);
+      if (!cfg->isI2c()) {
+        portENTER_CRITICAL(&dmaMux);
+        dmaInFlight = dmaInFlight - 1;
+        portEXIT_CRITICAL(&dmaMux);
+      }
       ok = false;
     }
-    ok = waitDma() && ok;
+    if (!cfg->isI2c()) ok = waitDma() && ok;
   }
   // A band still in flight after a timeout keeps its buffer.
   if (dmaInFlight == 0) heap_caps_free(band);

@@ -73,18 +73,22 @@ static bool waitDma(uint32_t timeoutMs = 500) {
 
 static bool pushDirect(int x0, int y0, int x1, int y1,
                        const uint8_t *pixels) {
-  if (!waitDma()) return false;
-  portENTER_CRITICAL(&dmaMux);
-  dmaInFlight = dmaInFlight + 1;
-  portEXIT_CRITICAL(&dmaMux);
+  if (!cfg->isI2c() && !waitDma()) return false;
+  if (!cfg->isI2c()) {
+    portENTER_CRITICAL(&dmaMux);
+    dmaInFlight = dmaInFlight + 1;
+    portEXIT_CRITICAL(&dmaMux);
+  }
   if (boarddisplay::drawBitmap(panel, *cfg, x0, y0, x1, y1, pixels) !=
       ESP_OK) {
-    portENTER_CRITICAL(&dmaMux);
-    dmaInFlight = dmaInFlight - 1;
-    portEXIT_CRITICAL(&dmaMux);
+    if (!cfg->isI2c()) {
+      portENTER_CRITICAL(&dmaMux);
+      dmaInFlight = dmaInFlight - 1;
+      portEXIT_CRITICAL(&dmaMux);
+    }
     return false;
   }
-  return waitDma();
+  return cfg->isI2c() || waitDma();
 }
 
 static bool pushPackedRect(int x0, int y0, int w, int h,
@@ -97,7 +101,7 @@ static bool pushPackedRect(int x0, int y0, int w, int h,
                                   chunk)) {
       return false;
     }
-    if (!waitDma()) return false;
+    if (!cfg->isI2c() && !waitDma()) return false;
     memcpy(dmaStaging, pixels + chunk.sourceOffset, chunk.byteCount);
     if (!pushDirect(x0, chunk.y0, x0 + w, chunk.y1, dmaStaging)) {
       return false;

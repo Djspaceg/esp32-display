@@ -228,6 +228,17 @@ int main() {
     CHECK(dim != std::string::npos);
     CHECK(dim < sketch.find("if (!drawScreen(panel))"));
     CHECK(sketch.find("setBrightness(panel, *cfg, 0)") != std::string::npos);
+    // SSD1315 page writes are synchronous. Rescue must not wait for the SPI
+    // DMA callback that its I2C backend never emits.
+    CHECK(sketch.find("if (!cfg->isI2c()) {\n      portENTER_CRITICAL(&dmaMux);") !=
+          std::string::npos);
+    CHECK(sketch.find("if (!cfg->isI2c()) ok = waitDma() && ok;") !=
+          std::string::npos);
+    const std::string displayTest = sourceText("../display_test/display_test.ino");
+    CHECK(displayTest.find("if (!cfg->isI2c() && !waitDma()) return false;") !=
+          std::string::npos);
+    CHECK(displayTest.find("return cfg->isI2c() || waitDma();") !=
+          std::string::npos);
 
     // Held off only where the WiFi is a hosted coprocessor, never on a USB pin.
     using board::WifiTopology;
