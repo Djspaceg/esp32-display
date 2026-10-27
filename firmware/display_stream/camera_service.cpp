@@ -59,7 +59,7 @@ bool startCameraService() {
   config.frame_size = frameSize(resolution);
   config.jpeg_quality = 12;
   config.fb_count = psramFound() ? 2 : 1;
-  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
   config.grab_mode = CAMERA_GRAB_LATEST;
 
   if (esp_camera_init(&config) != ESP_OK) {
