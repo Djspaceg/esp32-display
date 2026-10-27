@@ -172,15 +172,21 @@ mirror_x_supported = true
 quarter_turns = [0, 1, 2, 3]
 
 # BMA423 (BMA456 on later batches) at 0x19 on the main bus, INT1 GPIO14
-# ([L] doc #L37, #L88, #L122). This firmware has no BMA4xx driver, so no
-# automatic rotation.
+# ([L] doc #L37, #L88, #L122), read on the PMU's bus (Wire1). Axes: LilyGO
+# mounts it with SensorRemap::BOTTOM_LAYER_TOP_RIGHT_CORNER ([L]
+# LilyGoWatchS3.cpp#L366), which SensorLib defines as device x = sensor Y,
+# device y = sensor X, z = -Z (SensorBMA4XX.hpp#L701-L705 at dff98e7). With
+# Bosch's device frame (x right, y toward the top) and this firmware's
+# panel-right/panel-down frame, panel-right is +Y and panel-down is -X.
 [motion]
-controller = "none"
-address = 0
-x_axis = 0
+controller = "bma423"
+address = 25
+x_axis = 1
 x_sign = 1
-y_axis = 1
-y_sign = 1
+y_axis = 0
+y_sign = -1
+sda = 10
+scl = 11
 
 [reset]
 expander = "none"

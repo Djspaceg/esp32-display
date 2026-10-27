@@ -98,7 +98,7 @@ enum class TouchController : uint8_t {
 enum class PowerController : uint8_t { None, Axp2101, BatteryAdc };
 
 /// Which inertial sensor supplies acceleration for automatic orientation.
-enum class MotionController : uint8_t { None, Qmi8658 };
+enum class MotionController : uint8_t { None, Qmi8658, Bma423 };
 
 /// The variant fixed by an exact build target before runtime detection.
 /// Every family is universal now, so each remains Unknown until its safe
@@ -324,6 +324,23 @@ struct Config {
   /// still fires.
   bool bootButtonOptional = false;
 
+  /// The accelerometer's own I2C bus, when it is not the touch bus. Both
+  /// NO_PIN means it shares the touch bus (every QMI8658 board). The
+  /// T-Watch-S3's BMA423 sits on its main bus, GPIO10/11, with the AXP2101,
+  /// so it is read on the same Wire1 the PMU uses.
+  int8_t pinMotionSda = NO_PIN;
+  int8_t pinMotionScl = NO_PIN;
+
+  bool hasMotionBus() const {
+    return pinMotionSda != NO_PIN && pinMotionScl != NO_PIN;
+  }
+  int8_t motionSda() const {
+    return hasMotionBus() ? pinMotionSda : pinTouchSda;
+  }
+  int8_t motionScl() const {
+    return hasMotionBus() ? pinMotionScl : pinTouchScl;
+  }
+
   bool hasPmuBus() const {
     return pinPmuSda != NO_PIN && pinPmuScl != NO_PIN;
   }
@@ -369,8 +386,8 @@ struct Config {
     return false;
   }
   bool hasMotion() const {
-    return motion != MotionController::None && pinTouchSda != NO_PIN &&
-           pinTouchScl != NO_PIN && motionXAxis < 3 && motionYAxis < 3 &&
+    return motion != MotionController::None && motionSda() != NO_PIN &&
+           motionScl() != NO_PIN && motionXAxis < 3 && motionYAxis < 3 &&
            motionXAxis != motionYAxis &&
            (motionXSign == 1 || motionXSign == -1) &&
            (motionYSign == 1 || motionYSign == -1);
@@ -776,9 +793,13 @@ static const Config CONFIG_LILYGO_TWATCH_S3 = {
     /* adcScale */ 0,
     /* batteryEnable */ NO_PIN,
     /* chargeStatus */ NO_PIN,
-    MotionController::None,
-    /* motion X */ 0, 1,
-    /* motion Y */ 1, 1,
+    // BMA423 on the main bus. Panel-right is sensor +Y and panel-down sensor
+    // -X: LilyGO's own remap for this board (BOTTOM_LAYER_TOP_RIGHT_CORNER,
+    // device x = sensor Y, device y = sensor X, z = -Z) turned into this
+    // firmware's panel-right/panel-down frame.
+    MotionController::Bma423,
+    /* motion X */ 1, 1,
+    /* motion Y */ 0, -1,
     /* panelResetExio */ 0,
     /* touchResetExio */ 0,
     /* pinBlEnable */ NO_PIN,
@@ -795,6 +816,8 @@ static const Config CONFIG_LILYGO_TWATCH_S3 = {
     /* pmuPanelAldoMask */ 0x06,  // ALDO2 | ALDO3
     /* pmuInputLimitMilliamps */ 900,
     /* bootButtonOptional */ true,
+    /* motionSda */ 10,
+    /* motionScl */ 11,
 };
 
 /// Waveshare ESP32-P4-WIFI6-Touch-LCD-4C: JD9365 720x720 round IPS over

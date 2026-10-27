@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <math.h>
 #include <stdint.h>
 
 #include "doom_touch_bridge.h"
@@ -81,6 +82,63 @@ typedef struct {
     bool left;
     bool right;
 } doom_tilt_move_t;
+
+// Gravity in the panel's own frame: right, down (both in the glass) and out
+// of the glass, from a raw sensor sample through the board descriptor's axis
+// map (Config::motionXAxis/XSign for panel-right, motionYAxis/YSign for
+// panel-down; the remaining axis is out of the glass). Every IMU board's tilt
+// then means the same physical tilt.
+typedef struct {
+    float right;
+    float down;
+    float out;
+} doom_panel_accel_t;
+
+static inline doom_panel_accel_t doom_panel_accel(
+    int16_t x, int16_t y, int16_t z, uint8_t right_axis, int8_t right_sign,
+    uint8_t down_axis, int8_t down_sign) {
+    const float raw[3] = {x / 8192.0f, y / 8192.0f, z / 8192.0f};
+    doom_panel_accel_t a;
+    a.right = raw[right_axis % 3] * (float)right_sign;
+    a.down = raw[down_axis % 3] * (float)down_sign;
+    a.out = raw[3 - (right_axis % 3) - (down_axis % 3)];
+    return a;
+}
+
+// Pitch and roll, in degrees, as the 1.75C's player tuned them: pitch from
+// the panel-down component (the top edge tipped away is positive), roll from
+// panel-right. The out-of-glass component enters as a magnitude, so a sensor
+// whose third axis points into the glass (the T-Watch-S3's, mounted on the
+// bottom layer) reads level face up rather than upside down.
+static inline void doom_tilt_angles(doom_panel_accel_t a, float* pitch,
+                                    float* roll) {
+    const float out = a.out < 0 ? -a.out : a.out;
+    *pitch = atan2f(-a.down, sqrtf(a.right * a.right + out * out)) * 57.2958f;
+    *roll = atan2f(a.right, out) * 57.2958f;
+}
+
+// How the board is held when play starts is level: a watch worn tipped
+// toward the face, or a handheld board held at an angle, stands still until
+// it moves from there. Averaged over the samples doom_imu_init() takes.
+typedef struct {
+    float pitch_sum;
+    float roll_sum;
+    int samples;
+} doom_tilt_neutral_t;
+
+static inline void doom_tilt_neutral_add(doom_tilt_neutral_t* n, float pitch,
+                                         float roll) {
+    n->pitch_sum += pitch;
+    n->roll_sum += roll;
+    ++n->samples;
+}
+
+static inline void doom_tilt_relative(const doom_tilt_neutral_t* n,
+                                      float* pitch, float* roll) {
+    if (n->samples <= 0) return;
+    *pitch -= n->pitch_sum / (float)n->samples;
+    *roll -= n->roll_sum / (float)n->samples;
+}
 
 static inline doom_tilt_move_t doom_tilt_movement(float pitch, float roll) {
     doom_tilt_move_t move;

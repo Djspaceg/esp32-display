@@ -1,4 +1,8 @@
-// Minimal QMI8658/QMI8658A accelerometer reader for automatic orientation.
+// Minimal accelerometer reader for automatic orientation and Doom's tilt:
+// the QMI8658/QMI8658A on the touch bus (Waveshare boards), and the BMA423 or
+// BMA456 on the T-Watch-S3's main bus (bma4xx_protocol.h). Both report at
+// +/-4g, 8192 counts per g, in the sensor's own axes; the board's descriptor
+// axis map (Config::motionXAxis and so on) turns those into the panel's.
 #pragma once
 
 #include <Arduino.h>
@@ -6,6 +10,7 @@
 #include <math.h>
 
 #include <board_config.h>
+#include <bma4xx_protocol.h>
 
 namespace boardmotion {
 
@@ -35,22 +40,44 @@ struct Sample {
 // sketch TU, while orientation.cpp samples it after the firmware module split.
 // Namespace-static state would leave the sampler's private copy disabled.
 inline bool enabled = false;
+/// The bus and part the register helpers talk to; init() sets them.
+inline TwoWire *activeBus = &Wire;
+inline uint8_t activeAddress = I2C_ADDR;
+inline board::MotionController activeController = board::MotionController::None;
 
 inline bool writeRegister(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(I2C_ADDR);
-  Wire.write(reg);
-  Wire.write(value);
-  return Wire.endTransmission() == 0;
+  TwoWire &wire = *activeBus;
+  wire.beginTransmission(activeAddress);
+  wire.write(reg);
+  wire.write(value);
+  return wire.endTransmission() == 0;
 }
 
 inline bool readRegisters(uint8_t reg, uint8_t *out, size_t len) {
-  Wire.beginTransmission(I2C_ADDR);
-  Wire.write(reg);
-  if (Wire.endTransmission() != 0) return false;
-  Wire.requestFrom(I2C_ADDR, len);
-  if (Wire.available() != (int)len) return false;
-  Wire.readBytes(out, len);
+  TwoWire &wire = *activeBus;
+  wire.beginTransmission(activeAddress);
+  wire.write(reg);
+  if (wire.endTransmission() != 0) return false;
+  wire.requestFrom(activeAddress, len);
+  if (wire.available() != (int)len) return false;
+  wire.readBytes(out, len);
   return true;
+}
+
+/// Start the bus this board's accelerometer answers on: Wire on the touch
+/// bus, or Wire1 on its own bus, which by the descriptor rule is the PMU's
+/// (board_power.h starts the same Wire1 on the same pins; begin() on a
+/// running bus is a no-op).
+inline bool beginBus(const board::Config &cfg) {
+  activeBus = &Wire;
+  if (cfg.hasMotionBus()) {
+#if SOC_HP_I2C_NUM > 1
+    activeBus = &Wire1;
+#else
+    return false;
+#endif
+  }
+  return activeBus->begin(cfg.motionSda(), cfg.motionScl(), I2C_HZ);
 }
 
 // Whether a sample could be gravity at rest. At +/-4g the scale is 8192 counts
@@ -73,19 +100,84 @@ inline bool plausibleSample() {
   return false;
 }
 
+/// Bring up a BMA423/BMA456 for raw samples only: soft reset, identity,
+/// advanced power save off, +/-4g at 100 Hz, accelerometer on, each write
+/// read back, then a sample that could be gravity.
+inline bool initBma4xx(const board::Config &cfg, bool verbose) {
+  activeAddress = bma4xx::ADDRESS;
+  writeRegister(bma4xx::REG_CMD, bma4xx::CMD_SOFT_RESET);
+  delay(5);
+  uint8_t chip = 0;
+  if (!readRegisters(bma4xx::REG_CHIP_ID, &chip, 1) ||
+      !bma4xx::isKnownChip(chip)) {
+    if (verbose) {
+      Serial.printf("motion: ERROR no BMA423/BMA456 at 0x%02X (chip 0x%02X)\n",
+                    bma4xx::ADDRESS, chip);
+    }
+    return false;
+  }
+  for (uint8_t attempt = 1; attempt <= CONFIG_ATTEMPTS; attempt++) {
+    bool ok = writeRegister(bma4xx::REG_PWR_CONF, bma4xx::PWR_CONF_ACTIVE);
+    delay(1);
+    ok = writeRegister(bma4xx::REG_ACC_CONF, bma4xx::ACC_CONF_100HZ) && ok;
+    ok = writeRegister(bma4xx::REG_ACC_RANGE, bma4xx::ACC_RANGE_4G) && ok;
+    ok = writeRegister(bma4xx::REG_PWR_CTRL, bma4xx::PWR_CTRL_ACC_EN) && ok;
+    delay(CONFIG_SETTLE_MS);
+    uint8_t conf = 0, range = 0, ctrl = 0;
+    const bool readback = ok &&
+        readRegisters(bma4xx::REG_ACC_CONF, &conf, 1) &&
+        readRegisters(bma4xx::REG_ACC_RANGE, &range, 1) &&
+        readRegisters(bma4xx::REG_PWR_CTRL, &ctrl, 1);
+    if (readback && conf == bma4xx::ACC_CONF_100HZ &&
+        (range & 0x03) == bma4xx::ACC_RANGE_4G &&
+        (ctrl & bma4xx::PWR_CTRL_ACC_EN) != 0) {
+      enabled = true;
+      if (plausibleSample()) {
+        if (verbose) {
+          Serial.printf(
+              "motion: %s ready at 0x%02X (sda=%d scl=%d, +/-4g, attempt %u)\n",
+              chip == bma4xx::CHIP_BMA423 ? "BMA423" : "BMA456",
+              bma4xx::ADDRESS, cfg.motionSda(), cfg.motionScl(),
+              (unsigned)attempt);
+        }
+        return true;
+      }
+      enabled = false;
+    }
+    if (verbose) {
+      Serial.printf("motion: BMA4xx not ready (conf=0x%02X range=0x%02X "
+                    "ctrl=0x%02X), retrying %u of %u\n",
+                    conf, range, ctrl, (unsigned)attempt,
+                    (unsigned)CONFIG_ATTEMPTS);
+    }
+    delay(RESET_SETTLE_MS);
+  }
+  if (verbose) {
+    Serial.println("motion: ERROR BMA4xx never produced a plausible sample");
+  }
+  return false;
+}
+
 inline bool init(const board::Config &cfg, bool verbose = true) {
   enabled = false;
+  activeController = board::MotionController::None;
+  activeAddress = I2C_ADDR;
   if (!cfg.hasMotion()) {
     if (verbose) Serial.printf("motion: not present on %s\n", cfg.name);
     return false;
   }
-  if (cfg.motion != board::MotionController::Qmi8658) {
+  if (cfg.motion != board::MotionController::Qmi8658 &&
+      cfg.motion != board::MotionController::Bma423) {
     if (verbose) Serial.printf("motion: unsupported controller on %s\n", cfg.name);
     return false;
   }
-  if (!Wire.begin(cfg.pinTouchSda, cfg.pinTouchScl, I2C_HZ)) {
+  if (!beginBus(cfg)) {
     if (verbose) Serial.println("motion: ERROR I2C bus would not start");
     return false;
+  }
+  activeController = cfg.motion;
+  if (cfg.motion == board::MotionController::Bma423) {
+    return initBma4xx(cfg, verbose);
   }
 
   // QMI8658 soft reset used by both Waveshare board support packages. The reset
@@ -203,7 +295,9 @@ inline bool init(const board::Config &cfg, bool verbose = true) {
 // unknowns are the control bank and the raw bytes before this file interprets
 // them. Guessing at those cost a day; reading them costs one flash.
 inline void dumpState(const board::Config &cfg) {
-  if (!cfg.hasMotion()) return;
+  if (!cfg.hasMotion() || cfg.motion != board::MotionController::Qmi8658) {
+    return;
+  }
   uint8_t ctrl[10] = {0};
   for (uint8_t i = 0; i < sizeof(ctrl); i++) {
     readRegisters((uint8_t)(0x00 + i), &ctrl[i], 1);
@@ -237,6 +331,14 @@ inline bool available() { return enabled; }
 
 inline bool read(Sample &out) {
   if (!enabled) return false;
+  if (activeController == board::MotionController::Bma423) {
+    uint8_t data[6] = {0};
+    if (!readRegisters(bma4xx::REG_DATA_X_LSB, data, sizeof(data))) {
+      return false;
+    }
+    bma4xx::decode(data, out.x, out.y, out.z);
+    return true;
+  }
   uint8_t data[6] = {0};
   if (!readRegisters(REG_ACCEL_X_LOW, data, sizeof(data))) return false;
   out.x = (int16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));

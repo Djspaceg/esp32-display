@@ -69,6 +69,7 @@ POWER_ENUMS = {
 MOTION_ENUMS = {
     "none": "MotionController::None",
     "qmi8658": "MotionController::Qmi8658",
+    "bma423": "MotionController::Bma423",
 }
 AUDIO_AMP_ENUMS = {
     "none": "AudioAmp::None",
@@ -420,6 +421,8 @@ def _config_initializer(descriptor: Dict[str, Any]) -> str:
         "0x%02X" % board_descriptor.pmu_panel_aldo_mask(descriptor),
         str(board_descriptor.pmu_input_limit_ma(descriptor)),
         _bool(board_descriptor.boot_button_optional(descriptor)),
+        *(str(board_descriptor.optional_pin(descriptor, "motion." + key))
+          for key in ("sda", "scl")),
     ]
     rendered = []
     for index in range(0, len(values), 6):

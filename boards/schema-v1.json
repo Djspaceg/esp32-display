@@ -372,12 +372,17 @@
         "y_sign"
       ],
       "properties": {
-        "controller": {"enum": ["none", "qmi8658"]},
+        "controller": {"enum": ["none", "qmi8658", "bma423"]},
         "address": {"type": "integer", "minimum": 0, "maximum": 127},
         "x_axis": {"type": "integer", "minimum": 0, "maximum": 2},
         "x_sign": {"enum": [-1, 1]},
         "y_axis": {"type": "integer", "minimum": 0, "maximum": 2},
-        "y_sign": {"enum": [-1, 1]}
+        "y_sign": {"enum": [-1, 1]},
+        "sda": {
+          "$ref": "#/$defs/pin",
+          "description": "The accelerometer's own I2C bus, which must be the PMU's power.sda/scl. Absent means -1: it shares the touch bus."
+        },
+        "scl": {"$ref": "#/$defs/pin"}
       }
     },
     "reset": {

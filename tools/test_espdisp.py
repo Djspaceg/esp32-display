@@ -4997,6 +4997,22 @@ def test_board_descriptor_validator():
         "nor opt into one its family image does not carry")
     watch = next(item for item in descriptors
                  if item["key"] == "s3-lilygo-twatch-s3")
+    check_equal(watch["motion"]["controller"], "bma423",
+                "the watch's IMU is its BMA423 (BMA456 on later batches)")
+    check_equal(watch["motion"]["address"], 0x19, "at LilyGO's SDO-high 0x19")
+    check_equal((board_descriptor.optional_pin(watch, "motion.sda"),
+                 board_descriptor.optional_pin(watch, "motion.scl")), (10, 11),
+                "on the main bus it shares with the AXP2101")
+    one_pin = copy.deepcopy(watch)
+    del one_pin["motion"]["scl"]
+    check_descriptor_fails(
+        [one_pin], "motion.sda and motion.scl must both be declared",
+        "an IMU bus names both its lines")
+    wrong_address = copy.deepcopy(watch)
+    wrong_address["motion"]["address"] = 0x18
+    check_descriptor_fails(
+        [wrong_address], "a bma423 answers at 0x19",
+        "the driver reads the BMA4xx at 0x19 only")
     check_equal(board_descriptor.boot_button_optional(watch), True,
                 "the watch's earlier batches have no BOOT key")
     check_equal(

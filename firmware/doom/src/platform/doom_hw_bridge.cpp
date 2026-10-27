@@ -104,11 +104,25 @@ extern "C" void doom_display_blit(const uint16_t* rgb565_buf, int width, int hei
     }
 }
 
-// --- IMU bridge (QMI8658) ---
-// The QMI8658 6-axis IMU shares the touch I2C bus (GPIO15 SDA, GPIO14 SCL).
-// We read the accelerometer to get pitch/roll for movement control.
+// --- IMU bridge ---
+// Any board whose descriptor declares an accelerometer (boardmotion: the
+// QMI8658s on the touch bus, the T-Watch-S3's BMA423 on its main bus). The
+// sample goes through the board's axis map to the panel's frame, and tilt is
+// measured from how the board is held when Doom starts.
 
 static bool imu_initialized = false;
+static doom_tilt_neutral_t imu_neutral = {};
+static const int IMU_NEUTRAL_SAMPLES = 8;
+
+static bool imu_angles(float* pitch, float* roll) {
+    boardmotion::Sample sample = {};
+    if (!boardmotion::read(sample)) return false;
+    const doom_panel_accel_t panel = doom_panel_accel(
+        sample.x, sample.y, sample.z, bcfg->motionXAxis, bcfg->motionXSign,
+        bcfg->motionYAxis, bcfg->motionYSign);
+    doom_tilt_angles(panel, pitch, roll);
+    return true;
+}
 
 extern "C" void doom_imu_init(void) {
     if (!doom_motion_available()) {
@@ -117,9 +131,22 @@ extern "C" void doom_imu_init(void) {
         return;
     }
     if (!boardmotion::init(*bcfg)) {
-        doom_fail_restart("QMI8658 motion sensor unavailable", true);
+        doom_fail_restart("motion sensor unavailable", true);
     }
     imu_initialized = true;
+    imu_neutral = {};
+    for (int i = 0; i < IMU_NEUTRAL_SAMPLES; ++i) {
+        float pitch = 0.0f, roll = 0.0f;
+        if (imu_angles(&pitch, &roll)) {
+            doom_tilt_neutral_add(&imu_neutral, pitch, roll);
+        }
+        delay(15);
+    }
+    if (imu_neutral.samples > 0) {
+        Serial.printf("[doom] IMU level as held: pitch %.1f, roll %.1f\n",
+                      imu_neutral.pitch_sum / imu_neutral.samples,
+                      imu_neutral.roll_sum / imu_neutral.samples);
+    }
     Serial.println("[doom] IMU ready for tilt control");
 }
 
@@ -130,27 +157,12 @@ extern "C" void doom_imu_read(float* pitch, float* roll) {
         return;
     }
 
-    boardmotion::Sample sample = {};
-    if (!boardmotion::read(sample)) {
+    if (!imu_angles(pitch, roll)) {
         *pitch = 0.0f;
         *roll = 0.0f;
         return;
     }
-
-    int16_t ax = sample.x;
-    int16_t ay = sample.y;
-    int16_t az = sample.z;
-
-    // Convert to g (±4g range, 16-bit signed -> 8192 LSB/g)
-    float fax = ax / 8192.0f;
-    float fay = ay / 8192.0f;
-    float faz = az / 8192.0f;
-
-    // Compute pitch and roll from accelerometer (degrees)
-    // pitch = rotation about X axis (nose up/down)
-    // roll = rotation about Y axis (lean left/right)
-    *pitch = atan2f(-fax, sqrtf(fay * fay + faz * faz)) * 57.2958f;
-    *roll = atan2f(fay, faz) * 57.2958f;
+    doom_tilt_relative(&imu_neutral, pitch, roll);
 }
 
 // --- PWR key bridge (AXP2101) ---

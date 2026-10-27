@@ -37,6 +37,7 @@
 #include "../libraries/espdisp_board/src/battery_estimate.h"
 #include "../libraries/espdisp_board/src/board_config.h"
 #include "../libraries/espdisp_board/src/ft6336_protocol.h"
+#include "../libraries/espdisp_board/src/bma4xx_protocol.h"
 #include "../libraries/espdisp_board/src/gt911_protocol.h"
 #include "../libraries/espdisp_board/src/motion_orientation.h"
 #include "../libraries/espdisp_board/src/panel_transfer_plan.h"
@@ -3664,7 +3665,27 @@ int main() {
         if (identity.variant == board::Variant::LilygoTwatchS3) continue;
         CHECK(!board::configFor(identity.variant).bootButtonOptional);
       }
-      CHECK(!watch.hasMotion());
+      // Its BMA423 (0x19) shares the PMU's own bus, GPIO10/11, and maps to
+      // the panel by LilyGO's own remap for this board.
+      CHECK(watch.motion == board::MotionController::Bma423);
+      CHECK(watch.hasMotion());
+      CHECK(watch.hasMotionBus());
+      CHECK(watch.motionSda() == 10 && watch.motionScl() == 11);
+      CHECK(watch.motionSda() == watch.pmuSda());
+      CHECK_EQ(watch.motionXAxis, 1);
+      CHECK_EQ(watch.motionXSign, 1);
+      CHECK_EQ(watch.motionYAxis, 0);
+      CHECK_EQ(watch.motionYSign, -1);
+      // Every other IMU board reads its sensor on the touch bus, as before.
+      for (const auto &identity : board::GENERATED_BOARD_IDENTITIES) {
+        if (identity.variant == board::Variant::LilygoTwatchS3) continue;
+        const board::Config &other = board::configFor(identity.variant);
+        CHECK(!other.hasMotionBus());
+        if (other.hasMotion()) {
+          CHECK(other.motionSda() == other.pinTouchSda);
+          CHECK(other.motion == board::MotionController::Qmi8658);
+        }
+      }
       // An FT6336 with no interrupt has nothing to wake it.
       board::Config noInt = watch;
       noInt.pinTouchInt = board::NO_PIN;
@@ -7009,6 +7030,29 @@ int main() {
                                    x, y, points));
   }
 
+  // --- BMA423/BMA456 accelerometer contract (LilyGO T-Watch-S3) -----------
+  {
+    CHECK(bma4xx::ADDRESS == 0x19);
+    CHECK(bma4xx::isKnownChip(0x13));  // BMA423
+    CHECK(bma4xx::isKnownChip(0x16));  // BMA456, later batches
+    CHECK(!bma4xx::isKnownChip(0x00));
+    CHECK(!bma4xx::isKnownChip(0xFF));
+    // 12-bit samples, left-aligned in two little-endian bytes: at +/-4g a
+    // count is 2 mg, so read as int16 they are the QMI8658's 8192 per g.
+    const uint8_t flatFaceUp[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x20};
+    int16_t x = 0, y = 0, z = 0;
+    bma4xx::decode(flatFaceUp, x, y, z);
+    CHECK(x == 0 && y == 0 && z == 8192);
+    // The low nibble carries no data and never reaches the sample.
+    const uint8_t noisy[6] = {0x0F, 0x00, 0x0A, 0x00, 0x05, 0xE0};
+    bma4xx::decode(noisy, x, y, z);
+    CHECK(x == 0 && y == 0 && z == -8192);
+    const uint8_t mixed[6] = {0x10, 0x04, 0xF0, 0xFF, 0x00, 0x00};
+    bma4xx::decode(mixed, x, y, z);
+    CHECK(x == 0x0410 && y == -16 && z == 0);
+    CHECK(bma4xx::ACC_RANGE_4G == 0x01);
+  }
+
   // --- FT6336U report contract (LilyGO T-Watch-S3) ------------------------
   {
     CHECK(ft6336proto::ADDRESS == 0x38);
@@ -7117,6 +7161,59 @@ int main() {
                                      400) == DOOM_GAMEPLAY_SWIPE_NONE);
     CHECK(doom_gameplay_swipe_action(DOOM_TOUCH_GESTURE_NONE, 200, 400) ==
           DOOM_GAMEPLAY_SWIPE_NONE);
+
+    // Doom's tilt reads the sensor through the board's descriptor axis map,
+    // so every IMU board walks the same way for the same physical tilt. On
+    // the 1.75C (panel-right is sensor Y, panel-down sensor X) it gives
+    // exactly the pitch and roll its player tuned, face up.
+    {
+      const int16_t samples[][3] = {
+          {0, 0, 8192}, {2000, 0, 7900}, {-2500, 1200, 7600},
+          {0, -3000, 7600}, {4000, 4000, 5000}};
+      for (const auto &s : samples) {
+        doom_panel_accel_t panel =
+            doom_panel_accel(s[0], s[1], s[2], 1, 1, 0, 1);
+        float pitch = 0, roll = 0;
+        doom_tilt_angles(panel, &pitch, &roll);
+        const float fax = s[0] / 8192.0f, fay = s[1] / 8192.0f,
+                    faz = s[2] / 8192.0f;
+        const float oldPitch =
+            atan2f(-fax, sqrtf(fay * fay + faz * faz)) * 57.2958f;
+        const float oldRoll = atan2f(fay, faz) * 57.2958f;
+        CHECK(fabsf(pitch - oldPitch) < 0.01f);
+        CHECK(fabsf(roll - oldRoll) < 0.01f);
+      }
+      // The watch (panel-right sensor Y, panel-down minus sensor X, the
+      // sensor on the bottom layer so Z points into the glass): the same
+      // physical tilt gives the same angles as on the 1.75C.
+      doom_panel_accel_t watch = doom_panel_accel(-2000, 0, -7900, 1, 1, 0, -1);
+      doom_panel_accel_t round = doom_panel_accel(2000, 0, 7900, 1, 1, 0, 1);
+      float wp = 0, wr = 0, rp = 0, rr = 0;
+      doom_tilt_angles(watch, &wp, &wr);
+      doom_tilt_angles(round, &rp, &rr);
+      CHECK(fabsf(wp - rp) < 0.01f && fabsf(wr - rr) < 0.01f);
+      // Held as it is held: tilt is measured from the pose at the start, so
+      // a watch worn tipped 35 degrees toward the face stands still, and
+      // walks when tipped further.
+      doom_tilt_neutral_t neutral = {};
+      doom_tilt_neutral_add(&neutral, 35.0f, 4.0f);
+      doom_tilt_neutral_add(&neutral, 33.0f, 6.0f);
+      CHECK(neutral.samples == 2);
+      float p = 34.0f, r = 5.0f;
+      doom_tilt_relative(&neutral, &p, &r);
+      CHECK(fabsf(p) < 0.01f && fabsf(r) < 0.01f);
+      CHECK(!doom_tilt_movement(p, r).forward);
+      p = 34.0f + DOOM_TILT_WALK_DEG + 3.0f;
+      r = 5.0f;
+      doom_tilt_relative(&neutral, &p, &r);
+      CHECK(doom_tilt_movement(p, r).forward);
+      // With no neutral captured yet, level is neutral.
+      doom_tilt_neutral_t none = {};
+      p = 20.0f;
+      r = 0.0f;
+      doom_tilt_relative(&none, &p, &r);
+      CHECK(p == 20.0f);
+    }
 
     // Where the PWR key is the menu key (the T-Watch-S3, whose earlier units
     // have no BOOT key), every press is exactly one Escape, whatever the

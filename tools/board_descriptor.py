@@ -199,7 +199,7 @@ PANEL_BUSES = {"spi", "qspi", "mipi_dsi"}
 TOUCH_CONTROLLERS = {
     "none", "axs5106l", "cst9217", "cst816", "gt911", "ft6336"}
 POWER_CONTROLLERS = {"none", "axp2101", "battery_adc"}
-MOTION_CONTROLLERS = {"none", "qmi8658"}
+MOTION_CONTROLLERS = {"none", "qmi8658", "bma423"}
 AUDIO_AMPS = {"none", "unknown", "ns4150b", "ns8002"}
 AUDIO_CODECS = {"none", "unknown", "es8311", "pcm5101a"}
 AUDIO_MICS = {"none", "unknown", "es7210", "ics43434", "pdm"}
@@ -252,7 +252,13 @@ OPTIONAL_PIN_DEFAULTS = {
     # The AXP2101's own I2C bus, declared only when it is not the touch bus.
     "power.sda": -1,
     "power.scl": -1,
+    # The accelerometer's own I2C bus, declared only when it is not the touch
+    # bus.
+    "motion.sda": -1,
+    "motion.scl": -1,
 }
+# The address each motion driver reads its part at.
+MOTION_ADDRESSES = {"qmi8658": 0x6B, "bma423": 0x19}
 PMU_PANEL_RAILS = ("aldo1", "aldo2", "aldo3", "aldo4")
 PMU_INPUT_LIMITS = (100, 500, 900, 1000, 1500, 2000)
 ALLOWED_TOP_LEVEL = {path.split(".", 1)[0] for path in REQUIRED_FIELDS}
@@ -319,6 +325,34 @@ def boot_button_optional(descriptor: Dict[str, Any]) -> bool:
     return descriptor["carrier"].get(
         "boot_button_optional",
         OPTIONAL_FIELDS["carrier.boot_button_optional"])
+
+
+def _validate_motion(descriptor: Dict[str, Any]) -> None:
+    source = _source_name(descriptor)
+    controller = descriptor["motion"]["controller"]
+    sda = optional_pin(descriptor, "motion.sda")
+    scl = optional_pin(descriptor, "motion.scl")
+    if (sda == -1) != (scl == -1):
+        raise DescriptorError(
+            "%s: motion.sda and motion.scl must both be declared or both be -1"
+            % source)
+    if controller == "none" and sda != -1:
+        raise DescriptorError(
+            "%s: motion.sda/scl are only for a motion controller" % source)
+    if sda != -1 and descriptor["identity"]["target"] not in ("s3", "p4"):
+        raise DescriptorError(
+            "%s: a separate motion bus needs a second I2C controller "
+            "(s3 or p4)" % source)
+    if sda != -1 and (sda, scl) != (optional_pin(descriptor, "power.sda"),
+                                    optional_pin(descriptor, "power.scl")):
+        # Firmware has Wire (touch) and Wire1 (the PMU's bus); a motion bus
+        # that is neither would re-pin one under its owner.
+        raise DescriptorError(
+            "%s: motion.sda/scl must be the PMU's power.sda/scl bus" % source)
+    expected = MOTION_ADDRESSES.get(controller)
+    if expected is not None and descriptor["motion"]["address"] != expected:
+        raise DescriptorError(
+            "%s: a %s answers at 0x%02X" % (source, controller, expected))
 
 
 def _validate_doom_capability(descriptor: Dict[str, Any]) -> None:
@@ -468,6 +502,10 @@ def _validate_optional_pins(descriptor: Dict[str, Any]) -> None:
             existing.setdefault(value, path)
     for path, value in values.items():
         if value < 0:
+            continue
+        # The IMU's bus is the PMU's bus by rule (_validate_motion), so it
+        # shares those two lines by design.
+        if path in ("motion.sda", "motion.scl"):
             continue
         if value in existing:
             raise DescriptorError(
@@ -1424,6 +1462,7 @@ def validate_descriptors(
         _validate_pmu(descriptor)
         _validate_boot_optional(descriptor)
         _validate_doom_capability(descriptor)
+        _validate_motion(descriptor)
         _validate_backlight_floor(descriptor)
         panel_symbol = descriptor["panel"]["symbol"]
         if panel_symbol in panels:
