@@ -9,7 +9,9 @@
 #include <stdint.h>
 
 #include "font5x7.h"  // classic 5x7 ASCII font (Adafruit GFX, BSD license)
+#if !defined(CONFIG_IDF_TARGET_ESP32C6)
 #include "panel_fonts.h"
+#endif
 
 enum class TextFamily : uint8_t {
   Classic,
@@ -24,13 +26,19 @@ struct TextStyle {
 };
 
 inline bool useClassicText(int width, int height) {
-  return width <= 72 || height <= 40;
+  // At 96x54 (the 0.42-inch colour XIAO) 9px anti-aliased glyphs leave no
+  // space for a line's ascenders, descenders and card margins. The compact
+  // sharp treatment keeps every status string readable. The 72x40 OLED uses
+  // the same path because its framebuffer is physically one bit per pixel.
+  return width <= 96 || height <= 54;
 }
 
 inline TextStyle smallTextStyle(int width, int height) {
   if (useClassicText(width, height)) return {TextFamily::Classic, 1};
 #if defined(CONFIG_IDF_TARGET_ESP32C6)
-  return {TextFamily::Small, 9};
+  (void)width;
+  (void)height;
+  return {TextFamily::Classic, 1};
 #else
   const int side = width < height ? width : height;
   return {TextFamily::Small, (uint8_t)(side < 170 ? 9 : side < 400 ? 13 : 18)};
@@ -40,7 +48,9 @@ inline TextStyle smallTextStyle(int width, int height) {
 inline TextStyle monoTextStyle(int width, int height) {
   if (useClassicText(width, height)) return {TextFamily::Classic, 1};
 #if defined(CONFIG_IDF_TARGET_ESP32C6)
-  return {TextFamily::Mono, 12};
+  (void)width;
+  (void)height;
+  return {TextFamily::Classic, 1};
 #else
   const int side = width < height ? width : height;
   return {TextFamily::Mono, (uint8_t)(side < 170 ? 12 : side < 400 ? 24 : 40)};
@@ -50,27 +60,20 @@ inline TextStyle monoTextStyle(int width, int height) {
 inline TextStyle largeTextStyle(int width, int height) {
   if (useClassicText(width, height)) return {TextFamily::Classic, 1};
 #if defined(CONFIG_IDF_TARGET_ESP32C6)
-  return {TextFamily::Large, 16};
+  (void)width;
+  (void)height;
+  return {TextFamily::Classic, 2};
 #else
   const int side = width < height ? width : height;
   return {TextFamily::Large, (uint8_t)(side < 170 ? 16 : side < 400 ? 24 : 40)};
 #endif
 }
 
+// The C6 uses its compact, sharp classic text path. Its 8 MB module's default
+// OTA partition otherwise leaves too little code space for the screen UI. The
+// other colour targets use the embedded OFL atlases below.
+#if !defined(CONFIG_IDF_TARGET_ESP32C6)
 inline const panelfonts::Face &faceFor(TextStyle style) {
-#if defined(CONFIG_IDF_TARGET_ESP32C6)
-  switch (style.family) {
-    case TextFamily::Small:
-      return panelfonts::SMALL_9;
-    case TextFamily::Mono:
-      return panelfonts::MONO_12;
-    case TextFamily::Large:
-      return panelfonts::LARGE_16;
-    case TextFamily::Classic:
-      return panelfonts::SMALL_9;  // unused; keeps this switch total
-  }
-  return panelfonts::SMALL_9;
-#else
   switch (style.family) {
     case TextFamily::Small:
       if (style.pixels <= 9) return panelfonts::SMALL_9;
@@ -88,7 +91,6 @@ inline const panelfonts::Face &faceFor(TextStyle style) {
       return panelfonts::SMALL_9;  // unused; keeps this switch total
   }
   return panelfonts::SMALL_9;
-#endif
 }
 
 inline uint8_t alphaFor(const panelfonts::Face &face, size_t pixel) {
@@ -108,17 +110,26 @@ inline size_t glyphOffset(const panelfonts::Face &face, size_t index) {
   }
   return offset;
 }
+#endif
 
 inline int textHeight(TextStyle style) {
   if (style.family == TextFamily::Classic) return 7 * style.pixels;
+#if !defined(CONFIG_IDF_TARGET_ESP32C6)
   const panelfonts::Face &face = faceFor(style);
   return face.ascent + face.descent;
+#else
+  return 7 * style.pixels;
+#endif
 }
 
 inline int textLineHeight(TextStyle style) {
   if (style.family == TextFamily::Classic) return 9 * style.pixels;
+#if !defined(CONFIG_IDF_TARGET_ESP32C6)
   const panelfonts::Face &face = faceFor(style);
   return face.ascent + face.descent + (face.leading > 1 ? face.leading : 1);
+#else
+  return 9 * style.pixels;
+#endif
 }
 
 inline int textWidth(const char *s, TextStyle style) {
@@ -128,14 +139,32 @@ inline int textWidth(const char *s, TextStyle style) {
     for (; *s; ++s) ++count;
     return count * 6 * style.pixels - style.pixels;
   }
+#if !defined(CONFIG_IDF_TARGET_ESP32C6)
   const panelfonts::Face &face = faceFor(style);
   int width = 0;
   for (; *s; ++s) {
     uint8_t c = (uint8_t)*s;
-    if (c < panelfonts::FIRST || c > panelfonts::LAST) c = '?';
-    width += face.glyphs[c - panelfonts::FIRST].advance;
+    const size_t index = c == 0xB7 ? panelfonts::MIDDLE_DOT
+                                   : (c >= panelfonts::FIRST &&
+                                              c <= panelfonts::LAST
+                                          ? c - panelfonts::FIRST
+                                          : '?' - panelfonts::FIRST);
+    width += face.glyphs[index].advance;
   }
   return width;
+#else
+  int count = 0;
+  for (; *s; ++s) ++count;
+  return count * 6 * style.pixels - style.pixels;
+#endif
+}
+
+inline bool atlasSupports(uint8_t c) {
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+  return c >= 32 && c <= 126;
+#else
+  return c == 0xB7 || (c >= panelfonts::FIRST && c <= panelfonts::LAST);
+#endif
 }
 
 inline uint16_t blend565(uint16_t background, uint16_t foreground,
@@ -167,8 +196,14 @@ inline void putBlended565(uint8_t *buf, int bufW, int bufH, int x, int y,
 inline void drawClassicText(uint8_t *buf, int bufW, int bufH, int x, int y,
                             const char *s, uint16_t color, int scale) {
   for (; *s; s++) {
+    uint8_t character = (uint8_t)*s;
+    // The generated colour atlas has a real middle-dot glyph. The sharp
+    // legacy face predates it, so make the C6/OLED fallback a safe period
+    // rather than indexing beyond font5x7's printable-ASCII table.
+    if (character == 0xB7) character = '.';
+    if (character < 32 || character > 126) character = '?';
     for (int col = 0; col < 5; col++) {
-      uint8_t bits = font[(size_t)(unsigned char)*s * 5 + col];
+      uint8_t bits = font[(size_t)character * 5 + col];
       for (int row = 0; row < 7; row++) {
         if (!(bits & (1 << row))) {
           continue;
@@ -198,11 +233,15 @@ inline void drawText(uint8_t *buf, int bufW, int bufH, int x, int y,
     drawClassicText(buf, bufW, bufH, x, y, s, color, style.pixels);
     return;
   }
+#if !defined(CONFIG_IDF_TARGET_ESP32C6)
   const panelfonts::Face &face = faceFor(style);
   for (; *s; ++s) {
     uint8_t c = (uint8_t)*s;
-    if (c < panelfonts::FIRST || c > panelfonts::LAST) c = '?';
-    const size_t glyphIndex = c - panelfonts::FIRST;
+    const size_t glyphIndex = c == 0xB7 ? panelfonts::MIDDLE_DOT
+                                         : (c >= panelfonts::FIRST &&
+                                                    c <= panelfonts::LAST
+                                                ? c - panelfonts::FIRST
+                                                : '?' - panelfonts::FIRST);
     const panelfonts::Glyph &glyph = face.glyphs[glyphIndex];
     const size_t offset = glyphOffset(face, glyphIndex);
     for (int gy = 0; gy < glyph.height; ++gy) {
@@ -214,6 +253,9 @@ inline void drawText(uint8_t *buf, int bufW, int bufH, int x, int y,
     }
     x += glyph.advance;
   }
+#else
+  drawClassicText(buf, bufW, bufH, x, y, s, color, 1);
+#endif
 }
 
 // Draw inside a text row's visible span. Used for the WiFi survey's marquee:
@@ -246,11 +288,15 @@ inline void drawTextClipped(uint8_t *buf, int bufW, int bufH, int x, int y,
     }
     return;
   }
+#if !defined(CONFIG_IDF_TARGET_ESP32C6)
   const panelfonts::Face &face = faceFor(style);
   for (; *s; ++s) {
     uint8_t c = (uint8_t)*s;
-    if (c < panelfonts::FIRST || c > panelfonts::LAST) c = '?';
-    const size_t glyphIndex = c - panelfonts::FIRST;
+    const size_t glyphIndex = c == 0xB7 ? panelfonts::MIDDLE_DOT
+                                         : (c >= panelfonts::FIRST &&
+                                                    c <= panelfonts::LAST
+                                                ? c - panelfonts::FIRST
+                                                : '?' - panelfonts::FIRST);
     const panelfonts::Glyph &glyph = face.glyphs[glyphIndex];
     const size_t offset = glyphOffset(face, glyphIndex);
     for (int gy = 0; gy < glyph.height; ++gy) {
@@ -265,6 +311,9 @@ inline void drawTextClipped(uint8_t *buf, int bufW, int bufH, int x, int y,
     }
     x += glyph.advance;
   }
+#else
+  drawClassicText(buf, bufW, bufH, x, y, s, color, 1);
+#endif
 }
 
 // White text with a 1px black outline so it reads over any frame content.

@@ -1246,7 +1246,10 @@ int main() {
     // 466 px round at 3x, the 240 px panels at 2x, the 128 px square at 1x.
     CHECK(layout(720, 720, false, worst).scale[ROW_ADDRESS] == 4);
     CHECK(layout(466, 466, true, worst).scale[ROW_ADDRESS] == 3);
-    CHECK(layout(240, 240, false, worst).scale[ROW_ADDRESS] == 2);
+    // The medium-weight Plex atlas gives the synthetic all-wide compatibility
+    // address a real advance width; 9 px is the largest face it can retain
+    // inside 240 px glass without clipping.
+    CHECK(layout(240, 240, false, worst).scale[ROW_ADDRESS] == 1);
     CHECK(layout(128, 128, false, worst).scale[ROW_ADDRESS] == 1);
     CHECK(layout(720, 720, false, worst).scale[ROW_HINT] > 0);
     // With no reading the meter still has its row ("--").

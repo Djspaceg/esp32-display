@@ -2,7 +2,7 @@
 #include <cstring>
 #include <vector>
 
-#include "../display_stream/ui_icons.h"
+#include "../display_stream/static_ui_renderer.h"
 
 static int checks = 0;
 #define CHECK(condition)                                                        \
@@ -50,6 +50,33 @@ int main() {
   int lit = 0;
   for (uint8_t value : pixels) lit += value != 0;
   CHECK(lit > 100);
+
+  const char *uiStrings[] = {"Starting up", "Joining WiFi",
+                             "ESPDisplay \xB7 2.1.0", "WiFi presets",
+                             "Choose a mode", "Press for next",
+                             "Hold to start", "Prev", "Next", "Start",
+                             "Connect", "No saved presets", "Firmware",
+                             "Streaming", "Battery 82%", "Good \xB7 dBm"};
+  for (const char *value : uiStrings) {
+    for (; *value; ++value) CHECK(atlasSupports((uint8_t)*value));
+  }
+  CHECK(uitheme::signalColorForRssi(-60) == uitheme::CURRENT.teal);
+  CHECK(uitheme::signalColorForRssi(-73) == 0xFCE1);
+  CHECK(uitheme::signalColorForRssi(-80) == 0xFA27);
+
+  {
+    const char *longSsid = "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW";
+    std::vector<uint8_t> widePixels(128 * 128 * 2);
+    staticui::Panel panel = {widePixels.data(), 128, 128, false};
+    int lines = 0;
+    const TextStyle style = staticui::wrappedStyle(
+        panel, longSsid, 92, largeTextStyle(128, 128), lines);
+    CHECK(lines > 1);
+    CHECK(lines <= 2 || style.family == TextFamily::Classic);
+    staticui::drawSurvey(panel, longSsid, -64, "Good", "192.168.1.42",
+                          "2.1.0", "Battery 82% charging", "close", true);
+    CHECK(pixel(widePixels, 128, 0, 0) == uitheme::CURRENT.background);
+  }
 
   printf("ui primitives: %d checks passed\n", checks);
   return 0;

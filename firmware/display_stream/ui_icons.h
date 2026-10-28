@@ -43,6 +43,33 @@ inline void check(uint8_t *buf, int w, int h, int x, int y, int size,
   }
 }
 
+inline void hollowCircle(uint8_t *buf, int w, int h, int cx, int cy,
+                         int radius, uint16_t color) {
+  for (int y = cy - radius; y <= cy + radius; ++y) {
+    for (int x = cx - radius; x <= cx + radius; ++x) {
+      const uint8_t outer = uiprim::circleCoverage(x - cx, y - cy, radius);
+      const uint8_t inner =
+          radius > 1 ? uiprim::circleCoverage(x - cx, y - cy, radius - 2) : 0;
+      if (outer > inner) uiprim::put(buf, w, h, x, y, color, outer - inner);
+    }
+  }
+}
+
+inline void screen(uint8_t *buf, int w, int h, int x, int y, int size,
+                   uint16_t color) {
+  const int height = size * 3 / 4;
+  uiprim::strokeRoundedRect(buf, w, h, {x, y, size, height}, 2, 1, color);
+  uiprim::fillRoundedRect(buf, w, h, {x + size / 3, y + height + 2,
+                                       size / 3, 2},
+                          1, color);
+}
+
+inline void target(uint8_t *buf, int w, int h, int cx, int cy, int size,
+                   uint16_t color) {
+  hollowCircle(buf, w, h, cx, cy, size / 2, color);
+  uiprim::fillCircle(buf, w, h, cx, cy, size / 7 + 1, color);
+}
+
 inline void chevron(uint8_t *buf, int w, int h, int x, int y, int size,
                     uint16_t color, bool right = true) {
   for (int i = 0; i < size / 2; ++i) {
@@ -54,8 +81,7 @@ inline void chevron(uint8_t *buf, int w, int h, int x, int y, int size,
 
 inline void pressHint(uint8_t *buf, int w, int h, int x, int y,
                       uint16_t color) {
-  uiprim::strokeRoundedRect(buf, w, h, {x, y, 10, 8}, 3, 1, color);
-  uiprim::fillCircle(buf, w, h, x + 5, y + 4, 1, color);
+  hollowCircle(buf, w, h, x + 4, y + 4, 4, color);
 }
 
 }  // namespace uiicons

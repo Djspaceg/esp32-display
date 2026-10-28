@@ -2,6 +2,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <math.h>
 
 #include "glyph_draw.h"
 
@@ -91,6 +92,20 @@ inline void fillCircle(uint8_t *buf, int width, int height, int cx, int cy,
     for (int x = bounds.x; x < bounds.x + bounds.width; ++x) {
       put(buf, width, height, x, y, color, circleCoverage(x - cx, y - cy, radius));
     }
+  }
+}
+
+inline void strokeArc(uint8_t *buf, int width, int height, int cx, int cy,
+                      int radius, float startDegrees, float sweepDegrees,
+                      int stroke, uint16_t color) {
+  if (radius < 1 || stroke < 1) return;
+  const int steps = (int)(fabsf(sweepDegrees) * radius / 18.0f) + 1;
+  for (int step = 0; step <= steps; ++step) {
+    const float degrees = startDegrees + sweepDegrees * step / steps;
+    const float radians = degrees * 0.01745329252f;
+    const int x = cx + (int)(cosf(radians) * radius);
+    const int y = cy + (int)(sinf(radians) * radius);
+    fillCircle(buf, width, height, x, y, stroke / 2 + 1, color);
   }
 }
 

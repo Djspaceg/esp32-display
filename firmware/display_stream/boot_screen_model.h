@@ -20,18 +20,19 @@
 
 namespace bootscreenmodel {
 
-// The dark grey the panel has always shown while it starts. boot_image.h is
-// composited over it, so the two must agree.
-inline constexpr uint16_t BACKGROUND = 0x2104;
+// The static UI's flat blue-grey. boot_image.h is composited over it, so the
+// two must agree.
+inline constexpr uint16_t BACKGROUND = 0x10C4;
 static_assert(bootimage::BACKGROUND == BACKGROUND,
               "rerun tools/generate_boot_image.py --background with this colour");
 
 inline constexpr uint16_t TEXT_COLOR = 0xFFFF;
-inline constexpr uint16_t BAR_BORDER = 0x8410;
-inline constexpr uint16_t BAR_TRACK = 0x1082;
-inline constexpr uint16_t BAR_PROGRESS = 0x03EF;  // the menus' selected teal
-inline constexpr uint16_t BAR_READY = 0x07E0;
-inline constexpr uint16_t BAR_FAILED = 0xF800;
+inline constexpr uint16_t GRID_DOT = 0x2126;
+inline constexpr uint16_t BAR_BORDER = 0x214A;
+inline constexpr uint16_t BAR_TRACK = 0x18E6;
+inline constexpr uint16_t BAR_PROGRESS = 0x3C7F;
+inline constexpr uint16_t BAR_READY = 0x2EB4;
+inline constexpr uint16_t BAR_FAILED = 0xFA27;
 
 // The longest status line the layout makes room for at full size. Longer text
 // is still drawn, clipped by the screen.
@@ -134,10 +135,10 @@ inline Layout layout(int width, int height, bool round) {
   l.width = (int16_t)width;
   l.height = (int16_t)height;
   l.round = round;
-  if (width <= 80 || height <= 48) {
-    // The XIAOML Kit's 72x40 OLED cannot hold the 120x120 boot image. Keep
-    // its useful boot state: one unscaled status line and a bottom progress
-    // bar, instead of drawing an unrecognizable cropped image.
+  if (width <= 96 || height <= 54) {
+    // The 72x40 OLED and 96x54 colour XIAO cannot hold the 120x120 boot
+    // image. Keep useful boot state: one sharp status line and a bottom
+    // progress bar, rather than drawing unrecognizable cropped artwork.
     l.compact = true;
     l.image = {0, 0, 0, 0};
     l.textScale = 1;
@@ -261,20 +262,26 @@ inline void composeRows(uint8_t *dst, const Layout &l, const char *text,
                         int rows) {
   const int w = l.width;
   if (rows <= 0) return;
-  for (int i = 0; i < w; ++i) put565(dst + 2 * i, BACKGROUND);
-  for (int r = 1; r < rows; ++r) memcpy(dst + (size_t)r * w * 2, dst, (size_t)w * 2);
-
   for (int r = 0; r < rows; ++r) {
-    const int iy = y0 + r - l.image.y;
-    if (iy < 0 || iy >= bootimage::HEIGHT) continue;
-    uint8_t *row = dst + (size_t)r * w * 2;
-    for (uint16_t i = bootimage::ROW_RUNS[iy]; i < bootimage::ROW_RUNS[iy + 1];
-         ++i) {
-      const bootimage::Run &run = bootimage::RUNS[i];
-      for (int k = 0; k < run.length; ++k) {
-        const int x = l.image.x + run.x + k;
-        if (x < 0 || x >= w) continue;
-        put565(row + 2 * x, bootimage::PIXELS[run.pixel + k]);
+    for (int x = 0; x < w; ++x) {
+      const bool dot = x % 18 == 9 && (y0 + r) % 18 == 9;
+      put565(dst + ((size_t)r * w + x) * 2, dot ? GRID_DOT : BACKGROUND);
+    }
+  }
+
+  if (l.image.w > 0 && l.image.h > 0) {
+    for (int r = 0; r < rows; ++r) {
+      const int iy = y0 + r - l.image.y;
+      if (iy < 0 || iy >= bootimage::HEIGHT) continue;
+      uint8_t *row = dst + (size_t)r * w * 2;
+      for (uint16_t i = bootimage::ROW_RUNS[iy];
+           i < bootimage::ROW_RUNS[iy + 1]; ++i) {
+        const bootimage::Run &run = bootimage::RUNS[i];
+        for (int k = 0; k < run.length; ++k) {
+          const int x = l.image.x + run.x + k;
+          if (x < 0 || x >= w) continue;
+          put565(row + 2 * x, bootimage::pixelAt(run.pixel + k));
+        }
       }
     }
   }

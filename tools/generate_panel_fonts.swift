@@ -20,6 +20,7 @@ struct Source {
   let file: String
   let pointSize: CGFloat
   let usedOnC6: Bool
+  let weight: CGFloat?
 }
 
 let root = URL(fileURLWithPath: #filePath)
@@ -28,24 +29,24 @@ let root = URL(fileURLWithPath: #filePath)
 let fontDirectory = root.appendingPathComponent("firmware/display_stream/fonts")
 let output = root.appendingPathComponent("firmware/display_stream/panel_fonts.h")
 let sources = [
-  Source(name: "SMALL_9", file: "IBMPlexSans-Regular.ttf", pointSize: 9,
-         usedOnC6: true),
-  Source(name: "SMALL_13", file: "IBMPlexSans-Regular.ttf", pointSize: 13,
-         usedOnC6: false),
-  Source(name: "SMALL_18", file: "IBMPlexSans-Regular.ttf", pointSize: 18,
-         usedOnC6: false),
-  Source(name: "MONO_12", file: "Inconsolata-Regular.ttf", pointSize: 12,
-         usedOnC6: true),
-  Source(name: "MONO_24", file: "Inconsolata-Regular.ttf", pointSize: 24,
-         usedOnC6: false),
-  Source(name: "MONO_40", file: "Inconsolata-Regular.ttf", pointSize: 40,
-         usedOnC6: false),
-  Source(name: "LARGE_16", file: "Nunito-Regular.ttf", pointSize: 16,
-         usedOnC6: true),
-  Source(name: "LARGE_24", file: "Nunito-Regular.ttf", pointSize: 24,
-         usedOnC6: false),
-  Source(name: "LARGE_40", file: "Nunito-Regular.ttf", pointSize: 40,
-         usedOnC6: false),
+  Source(name: "SMALL_9", file: "IBMPlexSans-Variable.ttf", pointSize: 9,
+         usedOnC6: false, weight: 500),
+  Source(name: "SMALL_13", file: "IBMPlexSans-Variable.ttf", pointSize: 13,
+         usedOnC6: false, weight: 500),
+  Source(name: "SMALL_18", file: "IBMPlexSans-Variable.ttf", pointSize: 18,
+         usedOnC6: false, weight: 500),
+  Source(name: "MONO_12", file: "Inconsolata-Medium.ttf", pointSize: 12,
+         usedOnC6: false, weight: nil),
+  Source(name: "MONO_24", file: "Inconsolata-Medium.ttf", pointSize: 24,
+         usedOnC6: false, weight: nil),
+  Source(name: "MONO_40", file: "Inconsolata-Medium.ttf", pointSize: 40,
+         usedOnC6: false, weight: nil),
+  Source(name: "LARGE_16", file: "Nunito-SemiBold.ttf", pointSize: 16,
+         usedOnC6: false, weight: 600),
+  Source(name: "LARGE_24", file: "Nunito-SemiBold.ttf", pointSize: 24,
+         usedOnC6: false, weight: 600),
+  Source(name: "LARGE_40", file: "Nunito-SemiBold.ttf", pointSize: 40,
+         usedOnC6: false, weight: 600),
 ]
 
 func fail(_ text: String) -> Never {
@@ -59,21 +60,36 @@ func wrap(_ values: [String], indent: String = "    ", width: Int = 78) -> Strin
   for value in values {
     let item = value + ","
     if line.count + item.count + 1 > width && line != indent {
-      lines.append(line)
+      lines.append(line.trimmingCharacters(in: .whitespaces))
       line = indent
     }
     line += item + " "
   }
-  if line != indent { lines.append(line) }
+  if line != indent { lines.append(line.trimmingCharacters(in: .whitespaces)) }
   return lines.joined(separator: "\n")
 }
 
-func font(named path: URL, size: CGFloat) -> CTFont {
+func font(named path: URL, size: CGFloat, weight: CGFloat?) -> CTFont {
   guard let provider = CGDataProvider(url: path as CFURL),
         let graphicsFont = CGFont(provider) else {
     fail("cannot read \(path.path)")
   }
-  return CTFontCreateWithGraphicsFont(graphicsFont, size, nil, nil)
+  let base = CTFontCreateWithGraphicsFont(graphicsFont, size, nil, nil)
+  guard let weight else { return base }
+  for axis in (CTFontCopyVariationAxes(base) as? [[CFString: Any]] ?? []) {
+    guard let identifier = axis[kCTFontVariationAxisIdentifierKey] as? NSNumber,
+          let name = axis[kCTFontVariationAxisNameKey] as? String,
+          name == "Weight" else {
+      continue
+    }
+    let attributes: [CFString: Any] = [
+      kCTFontVariationAttribute: [identifier: NSNumber(value: Double(weight))]
+    ]
+    let descriptor = CTFontDescriptorCreateWithAttributes(
+        attributes as CFDictionary)
+    return CTFontCreateCopyWithAttributes(base, size, nil, descriptor)
+  }
+  fail("\(path.lastPathComponent) has no Weight axis")
 }
 
 struct Glyph {
@@ -150,10 +166,10 @@ func rasterize(_ ctFont: CTFont, code: UInt16) -> (Glyph, [UInt8]) {
 
 func build(_ source: Source) -> Face {
   let ctFont = font(named: fontDirectory.appendingPathComponent(source.file),
-                    size: source.pointSize)
+                    size: source.pointSize, weight: source.weight)
   var glyphs = [Glyph]()
   var alpha = [UInt8]()
-  for code in UInt16(32)...UInt16(126) {
+  for code in Array(UInt16(32)...UInt16(126)) + [UInt16(0x00B7)] {
     let (raw, pixels) = rasterize(ctFont, code: code)
     glyphs.append(Glyph(width: raw.width, height: raw.height,
                         xOffset: raw.xOffset, yOffset: raw.yOffset,
@@ -179,7 +195,9 @@ func header(_ faces: [Face]) -> String {
     "",
     "inline constexpr uint8_t FIRST = 32;",
     "inline constexpr uint8_t LAST = 126;",
-    "inline constexpr uint8_t COUNT = LAST - FIRST + 1;",
+    "inline constexpr uint8_t ASCII_COUNT = LAST - FIRST + 1;",
+    "inline constexpr uint8_t MIDDLE_DOT = ASCII_COUNT;",
+    "inline constexpr uint8_t COUNT = ASCII_COUNT + 1;",
     "",
     "struct Glyph {",
     "  uint8_t width;",

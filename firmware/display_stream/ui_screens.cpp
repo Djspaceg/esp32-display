@@ -20,7 +20,9 @@
 #include "panel_transfer.h"
 #include "panel_state.h"
 #include "prefs_store.h"
+#include "static_ui_renderer.h"
 #include "telemetry.h"
+#include "ui_theme.h"
 #include "wifi_selector_model.h"
 #include "wifi_status_model.h"
 #include "wifi_worker.h"
@@ -148,43 +150,8 @@ void drawIdleScreen() {
     if (showBattery) lines[lineCount++] = lineBattery;
   }
 
-  TextStyle style = smallTextStyle(w, hgt);
-  int blockW = 0;
-  for (int i = 0; i < lineCount; i++) {
-    const int lineW = textWidth(lines[i], style);
-    if (lineW > blockW) blockW = lineW;
-  }
-  // Keep every outlined glyph visibly inside round glass. This is shared
-  // with controls and status rows so an idle card cannot touch the bezel.
-  const int margin = wifiselector::safeMargin(
-      w, hgt, bcfg->panel->roundDisplay);
-  // Prefer the larger text, but drop a size rather than run off the panel:
-  // pushed lines can be far longer than the three status lines ever are.
-  if ((blockW > w - 2 * margin ||
-       lineCount * textLineHeight(style) > hgt - 2 * margin) &&
-      style.family == TextFamily::Small && style.pixels > 9) {
-    style = {TextFamily::Small, 9};
-    blockW = 0;
-    for (int i = 0; i < lineCount; i++) {
-      const int lineW = textWidth(lines[i], style);
-      if (lineW > blockW) blockW = lineW;
-    }
-  }
-  const int lineH = textLineHeight(style);
-  int blockH = lineCount * lineH;
-
-  // Pseudo-random position within margins; esp_random is hardware RNG.
-  int maxX = w - blockW - margin;
-  int maxY = hgt - blockH - margin;
-  int x = margin +
-          (maxX > margin ? (int)(esp_random() % (uint32_t)(maxX - margin + 1)) : 0);
-  int y = margin +
-          (maxY > margin ? (int)(esp_random() % (uint32_t)(maxY - margin + 1)) : 0);
-
-  memcpy(bufB, bufA, FRAME_BYTES);  // bufA stays pristine for the overlay
-  for (int i = 0; i < lineCount; i++) {
-    drawOutlinedText(bufB, w, hgt, x, y + i * lineH, lines[i], style);
-  }
+  staticui::Panel screen = {bufB, w, hgt, bcfg->panel->roundDisplay};
+  staticui::drawIdle(screen, lines, lineCount);
 
   if (queuePanelBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
@@ -207,31 +174,6 @@ static const char *surveyQualityWord(bool connected, int rssi) {
   return "unusable";
 }
 
-// The same thresholds as a colour for the meter: green where the stream
-// works, amber where it is marginal, red where it will not, grey with no
-// reading at all.
-static uint16_t surveyQualityColor(bool connected, int rssi) {
-  if (!connected || rssi == 0) return 0x8410;
-  if (rssi >= -70) return 0x07E0;
-  if (rssi >= -75) return 0xFFE0;
-  if (rssi >= -80) return 0xFD20;
-  return 0xF800;
-}
-
-// Copy printable text for the panel atlas. Callers lay it out with measured
-// glyph advances; this deliberately never replaces a tail with an ellipsis.
-static void fitStatusText(char *out, size_t capacity, const char *text,
-                          size_t) {
-  if (capacity == 0) return;
-  size_t length = strlen(text);
-  size_t copied = length < capacity - 1 ? length : capacity - 1;
-  for (size_t i = 0; i < copied; ++i) {
-    const uint8_t byte = (uint8_t)text[i];
-    out[i] = byte >= 0x20 && byte <= 0x7E ? (char)byte : '?';
-  }
-  out[copied] = 0;
-}
-
 bool wifiSelectorActive = false;
 static uint8_t wifiSelectorSlots[wifipresets::SLOT_MAX] = {0};
 static wifipresets::Credentials
@@ -247,73 +189,6 @@ static const char *wifiSelectorMessage = nullptr;
 static const uint32_t WIFI_SELECTOR_IDLE_MS = 30000;
 static uint32_t wifiSelectorInputAt = 0;
 
-static void fillRect565(uint8_t *buffer, int bufferWidth, int bufferHeight,
-                        int x, int y, int width, int height, uint16_t color) {
-  const int x0 = x < 0 ? 0 : x;
-  const int y0 = y < 0 ? 0 : y;
-  const int x1 = x + width > bufferWidth ? bufferWidth : x + width;
-  const int y1 = y + height > bufferHeight ? bufferHeight : y + height;
-  const uint8_t hi = color >> 8;
-  const uint8_t lo = color & 0xFF;
-  for (int py = y0; py < y1; ++py) {
-    for (int px = x0; px < x1; ++px) {
-      const size_t offset =
-          ((size_t)py * (size_t)bufferWidth + (size_t)px) * 2;
-      buffer[offset] = hi;
-      buffer[offset + 1] = lo;
-    }
-  }
-}
-
-static int wifiScreenMargin(int width, int height) {
-  return wifiselector::safeMargin(width, height, bcfg->panel->roundDisplay);
-}
-
-static void drawCenteredWifiText(int width, int height, int y,
-                                 const char *text, TextStyle style) {
-  const int lineW = textWidth(text, style);
-  drawOutlinedText(bufB, width, height, (width - lineW) / 2, y, text, style);
-}
-
-static TextStyle wifiTextStyle(int width, int height,
-                               const wifiselector::Rect &rect,
-                               const char *text, bool heading) {
-  TextStyle style = heading ? largeTextStyle(width, height)
-                            : smallTextStyle(width, height);
-  if ((textWidth(text, style) > rect.width - 8 ||
-       textHeight(style) > rect.height - 6) &&
-      style.family != TextFamily::Classic) {
-    style = smallTextStyle(width, height);
-  }
-  return style;
-}
-
-static void drawCenteredWifiTextInRect(int width, int height,
-                                       const wifiselector::Rect &rect,
-                                       const char *text, bool heading) {
-  const TextStyle style = wifiTextStyle(width, height, rect, text, heading);
-  const int lineW = textWidth(text, style);
-  const int lineH = textHeight(style);
-  drawOutlinedText(bufB, width, height,
-                   rect.x + (rect.width - lineW) / 2,
-                   rect.y + (rect.height - lineH) / 2, text, style);
-}
-
-static void drawWifiControl(int width, int height,
-                            const wifiselector::Rect &rect, const char *label,
-                            bool primary, bool enabled = true) {
-  const uint16_t border = enabled ? 0xFFFF : 0x4208;
-  const uint16_t fill =
-      !enabled ? 0x1082 : (primary ? 0x03EF : 0x2104);
-  fillRect565(bufB, width, height, rect.x, rect.y, rect.width, rect.height,
-              border);
-  if (rect.width > 4 && rect.height > 4) {
-    fillRect565(bufB, width, height, rect.x + 2, rect.y + 2, rect.width - 4,
-                rect.height - 4, fill);
-  }
-  drawCenteredWifiTextInRect(width, height, rect, label, true);
-}
-
 void drawWifiSelectorScreen() {
   if (!screenPresent()) return;
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
@@ -325,99 +200,29 @@ void drawWifiSelectorScreen() {
 
   const int width = PANEL_GEOMETRY.frameWidth(panelLandscape);
   const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
-  const int margin = wifiScreenMargin(width, height);
-  const uint16_t background = 0x0006;
-  fillRect565(bufB, width, height, 0, 0, width, height, background);
-
-  const wifiselector::SelectorLayout layout = wifiselector::selectorLayout(
-      width, height, bcfg->panel->roundDisplay, wifiSelectorCount,
-      wifiSelectorIndex);
-
-  char title[24] = "WIFI PRESETS";
-  if (wifiSelectorCount > 0) {
-    snprintf(title, sizeof(title), "PRESETS %u/%u",
-             (unsigned)(wifiSelectorIndex + 1),
-             (unsigned)wifiSelectorCount);
+  char labelStorage[wifipresets::SLOT_MAX][33] = {};
+  const char *labels[wifipresets::SLOT_MAX] = {};
+  for (size_t i = 0; i < wifiSelectorCount; ++i) {
+    wifiselector::displaySsid(wifiSelectorCredentials[i], labelStorage[i],
+                              sizeof(labelStorage[i]));
+    labels[i] = labelStorage[i];
   }
-  if (touchAvailable) {
-    drawWifiControl(width, height, layout.back, "BACK", false);
-    drawCenteredWifiTextInRect(width, height, layout.title, title, true);
-  } else {
-    const wifiselector::Rect titleRect = {
-        layout.back.x, layout.back.y,
-        (int16_t)(layout.title.x + layout.title.width - layout.back.x),
-        layout.back.height};
-    drawCenteredWifiTextInRect(width, height, titleRect, title, true);
-  }
-
-  if (wifiSelectorMessage != nullptr) {
-    TextStyle messageStyle = smallTextStyle(width, height);
-    if (textWidth(wifiSelectorMessage, messageStyle) > width - 2 * margin) {
-      messageStyle = {TextFamily::Small, 9};
-    }
-    drawCenteredWifiText(width, height,
-                         (height - textHeight(messageStyle)) / 2,
-                         wifiSelectorMessage, messageStyle);
-  } else if (wifiSelectorCount == 0) {
-    const TextStyle emptyStyle = smallTextStyle(width, height);
-    drawCenteredWifiText(width, height,
-                         height / 2 - textLineHeight(emptyStyle),
-                         "NO SAVED PRESETS", emptyStyle);
-    drawCenteredWifiText(width, height, height / 2 + 2, "ADD THEM IN APP",
-                         emptyStyle);
-  } else {
-    const TextStyle listStyle = smallTextStyle(width, height);
-    for (size_t row = 0; row < layout.visibleCount; ++row) {
-      const size_t i = layout.firstVisible + row;
-      const bool selected = i == wifiSelectorIndex;
-      const bool active = wifiSelectorSlots[i] == wifiSelectorActiveSlot;
-      const wifiselector::Rect rowRect = layout.rowRect(row);
-      fillRect565(bufB, width, height, rowRect.x, rowRect.y, rowRect.width,
-                  rowRect.height, active ? 0x07E0 : 0x4208);
-      if (rowRect.width > 4 && rowRect.height > 4) {
-        fillRect565(bufB, width, height, rowRect.x + 2, rowRect.y + 2,
-                    rowRect.width - 4, rowRect.height - 4,
-                    selected ? 0x03EF : 0x1082);
-      }
-
-      char ssid[33];
-      wifiselector::displaySsid(wifiSelectorCredentials[i], ssid,
-                                sizeof(ssid));
-      char line[48];
-      snprintf(line, sizeof(line), "%c%u %s", active ? '*' : ' ',
-               (unsigned)wifiSelectorSlots[i], ssid);
-      const int textY = rowRect.y + (rowRect.height - textHeight(listStyle)) / 2;
-      const int textX = rowRect.x + 6;
-      const int visibleWidth = rowRect.width - 12;
-      const int lineWidth = textWidth(line, listStyle);
-      int marqueeX = textX;
-      if (lineWidth > visibleWidth) {
-        const int travel = lineWidth - visibleWidth;
-        marqueeX -= (int)((millis() / 60) % (unsigned long)(travel + 1));
-      }
-      drawTextClipped(bufB, width, height, marqueeX, textY, line, 0xFFFF,
-                      listStyle, textX, rowRect.y + 2, visibleWidth,
-                      rowRect.height - 4);
+  static const char *const EMPTY[] = {"No saved presets"};
+  const char *const *visibleLabels = wifiSelectorCount == 0 ? EMPTY : labels;
+  const size_t visibleCount = wifiSelectorCount == 0 ? 1 : wifiSelectorCount;
+  int activeIndex = -1;
+  for (size_t i = 0; i < wifiSelectorCount; ++i) {
+    if (wifiSelectorSlots[i] == wifiSelectorActiveSlot) {
+      activeIndex = (int)i;
+      break;
     }
   }
-
-  if (touchAvailable) {
-    drawWifiControl(width, height, layout.previous, "UP", false,
-                    wifiSelectorCount > 0);
-    drawWifiControl(width, height, layout.next, "DOWN", false,
-                    wifiSelectorCount > 0);
-    drawWifiControl(width, height, layout.connect, "CONNECT", true,
-                    wifiSelectorCount > 0);
-  } else {
-    const wifiselector::Rect nextHint = {
-        layout.previous.x, layout.previous.y,
-        (int16_t)(layout.next.x + layout.next.width - layout.previous.x),
-        layout.previous.height};
-    drawWifiControl(width, height, nextHint, "BOOT NEXT", false,
-                    wifiSelectorCount > 0);
-    drawWifiControl(width, height, layout.connect, "HOLD USE", true,
-                    wifiSelectorCount > 0);
-  }
+  staticui::Panel screen = {bufB, width, height, bcfg->panel->roundDisplay};
+  staticui::drawSelector(screen, "WiFi presets", visibleLabels,
+                         wifiSelectorCount == 0 ? nullptr : wifiSelectorSlots,
+                         visibleCount, wifiSelectorCount == 0 ? 0 : wifiSelectorIndex,
+                         activeIndex,
+                         touchAvailable, false, wifiSelectorMessage);
 
   if (queuePanelBitmap(panel, *bcfg, 0, 0, width, height, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
@@ -443,52 +248,9 @@ void drawBootMenuScreen(const char *const *labels, size_t count,
 
   const int width = PANEL_GEOMETRY.frameWidth(panelLandscape);
   const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
-  const int margin = wifiScreenMargin(width, height);
-  fillRect565(bufB, width, height, 0, 0, width, height, 0x0006);
-
-  const wifiselector::SelectorLayout layout = wifiselector::selectorLayout(
-      width, height, bcfg->panel->roundDisplay, count, selected);
-  const wifiselector::Rect titleRect = {
-      layout.back.x, layout.back.y,
-      (int16_t)(layout.title.x + layout.title.width - layout.back.x),
-      layout.back.height};
-  drawCenteredWifiTextInRect(width, height, titleRect, title, true);
-
-  if (message != nullptr) {
-    TextStyle messageStyle = smallTextStyle(width, height);
-    if (textWidth(message, messageStyle) > width - 2 * margin) {
-      messageStyle = {TextFamily::Small, 9};
-    }
-    drawCenteredWifiText(width, height,
-                         (height - textHeight(messageStyle)) / 2,
-                         message, messageStyle);
-  } else {
-    for (size_t row = 0; row < layout.visibleCount; ++row) {
-      const size_t i = layout.firstVisible + row;
-      const wifiselector::Rect rowRect = layout.rowRect(row);
-      fillRect565(bufB, width, height, rowRect.x, rowRect.y, rowRect.width,
-                  rowRect.height, i == 0 ? 0x07E0 : 0x4208);
-      if (rowRect.width > 4 && rowRect.height > 4) {
-        fillRect565(bufB, width, height, rowRect.x + 2, rowRect.y + 2,
-                    rowRect.width - 4, rowRect.height - 4,
-                    i == selected ? 0x03EF : 0x1082);
-      }
-      drawCenteredWifiTextInRect(width, height, rowRect, labels[i], true);
-    }
-  }
-
-  if (touchAvailable) {
-    drawWifiControl(width, height, layout.previous, "UP", false);
-    drawWifiControl(width, height, layout.next, "DOWN", false);
-    drawWifiControl(width, height, layout.connect, "START", true);
-  } else {
-    const wifiselector::Rect nextHint = {
-        layout.previous.x, layout.previous.y,
-        (int16_t)(layout.next.x + layout.next.width - layout.previous.x),
-        layout.previous.height};
-    drawWifiControl(width, height, nextHint, "BOOT NEXT", false);
-    drawWifiControl(width, height, layout.connect, "HOLD START", true);
-  }
+  staticui::Panel screen = {bufB, width, height, bcfg->panel->roundDisplay};
+  staticui::drawSelector(screen, title, labels, nullptr, count, selected, -1,
+                         touchAvailable, true, message);
 
   if (queuePanelBitmap(panel, *bcfg, 0, 0, width, height, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
@@ -683,26 +445,13 @@ void drawSurveyScreen() {
   char ssid[33];
   wifiselector::panelText((const uint8_t *)ssidBytes, strlen(ssidBytes), ssid,
                           sizeof(ssid));
-  char name[33];
-  wifiselector::panelText((const uint8_t *)cfgName.c_str(), cfgName.length(),
-                          name, sizeof(name));
-  char signal[8], quality[24], address[24], firmware[24], battery[24];
-  if (connected && rssi != 0) {
-    snprintf(signal, sizeof(signal), "%d", rssi);
-    snprintf(quality, sizeof(quality), "dBm, %s",
-             surveyQualityWord(connected, rssi));
-  } else {
-    snprintf(signal, sizeof(signal), "--");
-    snprintf(quality, sizeof(quality), "%s",
-             surveyQualityWord(connected, rssi));
-  }
+  char address[24], battery[24];
   if (connected) {
     snprintf(address, sizeof(address), "IP %s",
              WiFi.localIP().toString().c_str());
   } else {
     snprintf(address, sizeof(address), "IP --");
   }
-  snprintf(firmware, sizeof(firmware), "FW %s", FW_VERSION);
   // Only for a board with a battery and a reading that has not aged out, as
   // on the idle card.
   const bool showBattery = panelstate::shouldShowBatteryLine(
@@ -714,80 +463,37 @@ void drawSurveyScreen() {
         toChargeWord(lastBattery.charge));
   }
 
-  using namespace wifistatus;
-  const char *text[ROW_COUNT] = {};
-  text[ROW_NETWORK] =
-      haveSsid ? ssid : (connected ? "connected" : "not connected");
-  text[ROW_SIGNAL] = signal;
-  text[ROW_QUALITY] = quality;
-  text[ROW_ADDRESS] = address;
-  text[ROW_NAME] = name;
-  text[ROW_FIRMWARE] = firmware;
-  text[ROW_BATTERY] = showBattery ? battery : "";
-  // How to close it, longest wording first; the longest that fits its row is
-  // drawn, and the layout is sized for the shortest. The knob carrier's BOOT
-  // is its mute, so it closes nothing there.
+  // How to close it, longest wording first. The knob carrier's BOOT is its
+  // mute, so it closes nothing there.
   static const char *const BOOT_AND_TAP[] = {
-      "PRESS BOOT OR TAP TO CLOSE", "BOOT OR TAP TO CLOSE", "BOOT/TAP: CLOSE"};
-  static const char *const BOOT_ONLY[] = {"PRESS BOOT TO CLOSE",
-                                          "BOOT: CLOSE"};
-  static const char *const TAP_ONLY[] = {"TAP OUTSIDE TO CLOSE",
-                                         "TAP TO CLOSE"};
+      "Press Boot or tap to close", "Boot or tap to close", "Press to close"};
+  static const char *const BOOT_ONLY[] = {"Press Boot to close",
+                                          "Press to close"};
+  static const char *const TAP_ONLY[] = {"Tap outside to close",
+                                         "Tap to close"};
   const bool bootCloses = bcfg->hasBootButton() && !bcfg->hasEncoder();
-  const char *const *hints = nullptr;
-  size_t hintCount = 0;
+  const char *hint = "close";
   if (bootCloses && touchAvailable) {
-    hints = BOOT_AND_TAP;
-    hintCount = sizeof(BOOT_AND_TAP) / sizeof(BOOT_AND_TAP[0]);
+    hint = BOOT_AND_TAP[0];
   } else if (bootCloses) {
-    hints = BOOT_ONLY;
-    hintCount = sizeof(BOOT_ONLY) / sizeof(BOOT_ONLY[0]);
+    hint = BOOT_ONLY[0];
   } else if (touchAvailable) {
-    hints = TAP_ONLY;
-    hintCount = sizeof(TAP_ONLY) / sizeof(TAP_ONLY[0]);
+    hint = TAP_ONLY[0];
   }
-  text[ROW_HINT] = hintCount > 0 ? hints[hintCount - 1] : "";
-  const bool roundGlass = bcfg->panel->roundDisplay;
-  Layout layout = wifistatus::layout(w, hgt, roundGlass, text);
-  for (size_t i = 0; i < hintCount; ++i) {
-    if (textWidth(hints[i], layout.style[ROW_HINT]) <=
-        layout.spanWidth[ROW_HINT]) {
-      text[ROW_HINT] = hints[i];
-      break;
-    }
+  char qualityLabel[24];
+  snprintf(qualityLabel, sizeof(qualityLabel), "%s",
+           surveyQualityWord(connected, rssi));
+  if (qualityLabel[0] >= 'a' && qualityLabel[0] <= 'z') {
+    qualityLabel[0] = (char)(qualityLabel[0] - 'a' + 'A');
   }
-  layout = wifistatus::layout(w, hgt, roundGlass, text);
-
-  memset(bufB, 0, FRAME_BYTES);  // black field: maximum contrast, no burn-in
-  const uint16_t meterColor = surveyQualityColor(connected, rssi);
-  for (int row = 0; row < ROW_COUNT; ++row) {
-    if (layout.scale[row] == 0) continue;
-    char line[48];
-    fitStatusText(line, sizeof(line), text[row], layout.maxChars((Row)row));
-    const TextStyle style = layout.style[row];
-    const int lineW = textWidth(line, style);
-    uint16_t color = 0xFFFF;
-    if (row == ROW_SIGNAL || row == ROW_QUALITY) color = meterColor;
-    if (row == ROW_HINT) color = 0x8410;
-    int x = layout.centreX - lineW / 2;
-    if (layout.marquee[row]) {
-      const int travel = lineW - layout.spanWidth[row];
-      const int phase = travel > 0 ? (millis() / 60) % (travel + 1) : 0;
-      x = layout.spanX[row] - phase;
-    }
-    drawTextClipped(bufB, w, hgt, x, layout.y[row], line, color, style,
-                    layout.spanX[row], layout.y[row], layout.spanWidth[row],
-                    layout.rowHeight[row]);
-  }
-  if (layout.dividerWidth > 0) {
-    fillRect565(bufB, w, hgt, layout.dividerX, layout.dividerY,
-                layout.dividerWidth, 1, 0x4208);
-  }
-  const wifiselector::Rect presetsButton =
-      wifiselector::surveyPresetButton(w, hgt, roundGlass);
-  drawWifiControl(w, hgt, presetsButton,
-                  touchAvailable ? "WIFI PRESETS" : "HOLD BOOT: PRESETS",
-                  touchAvailable);
+  const char *network = haveSsid ? ssid : (connected ? "Connected" : "No WiFi");
+  const char *ipValue = connected ? address + 3 : "--";
+  char firmwareValue[16];
+  snprintf(firmwareValue, sizeof(firmwareValue), "%s", FW_VERSION);
+  staticui::Panel screen = {bufB, w, hgt, bcfg->panel->roundDisplay};
+  staticui::drawSurvey(screen, network, rssi, qualityLabel, ipValue,
+                       firmwareValue, showBattery ? battery : "", hint,
+                       touchAvailable);
 
   if (queuePanelBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
@@ -849,9 +555,13 @@ void showInfoBar(const char *text) {
   strncpy(infoBarText, text, sizeof(infoBarText) - 1);
   infoBarText[sizeof(infoBarText) - 1] = 0;
   infoBarStyle = infoBarTextStyle(infoBarText, w, hgt);
-  const int lineH = textLineHeight(infoBarStyle);
-  panelstate::infoBarRowRange(w, hgt, bcfg->panel->roundDisplay, lineH, infoBarY0,
-                              infoBarY1);
+  int lineH = textLineHeight(infoBarStyle) + 10;
+  if (w < 170) lineH += textLineHeight(infoBarStyle);
+  const int margin =
+      wifiselector::safeMargin(w, hgt, bcfg->panel->roundDisplay);
+  infoBarY0 = margin;
+  infoBarY1 = margin + lineH;
+  if (infoBarY1 > hgt) infoBarY1 = hgt;
   infoBarUntil = millis() + INFO_BAR_MS;
 
   if (!waitForDmaIdle(200)) return;
@@ -863,8 +573,11 @@ void showInfoBar(const char *text) {
   if (!bootscreen::composeRows(bufB + off, w, infoBarY0, infoBarY1)) {
     memcpy(bufB + off, bufA + off, bytes);  // bufA stays pristine for the overlay
   }
-  int textX = panelstate::centeredX(w, textWidth(infoBarText, infoBarStyle));
-  drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarStyle);
+  staticui::Panel screen = {bufB, w, hgt, bcfg->panel->roundDisplay};
+  staticui::drawStatusPill(
+      screen, {0, (int16_t)infoBarY0, (int16_t)w,
+               (int16_t)(infoBarY1 - infoBarY0)},
+      "Streaming", infoBarText);
 
   if (queuePanelBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1, bufB + off) !=
       ESP_OK) {
@@ -942,8 +655,11 @@ void redrawInfoBarOverRun() {
   size_t off = (size_t)infoBarY0 * rowBytes;
   size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
   memcpy(bufB + off, bufA + off, bytes);
-  int textX = panelstate::centeredX(w, textWidth(infoBarText, infoBarStyle));
-  drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarStyle);
+  staticui::Panel screen = {bufB, w, hgt, bcfg->panel->roundDisplay};
+  staticui::drawStatusPill(
+      screen, {0, (int16_t)infoBarY0, (int16_t)w,
+               (int16_t)(infoBarY1 - infoBarY0)},
+      "Streaming", infoBarText);
   if (queuePanelBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1, bufB + off) !=
       ESP_OK) {
     statDrawErrors = statDrawErrors + 1;

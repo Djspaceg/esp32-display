@@ -23,6 +23,7 @@ GAME_STORE_OUT="$TMP/test_game_store"
 DOOM_STORE_WAD_OUT="$TMP/test_doom_store_wad"
 QUAKE_INPUT_OUT="$TMP/test_quake_input"
 BOOT_SCREEN_OUT="$TMP/test_boot_screen"
+BOOT_SCREEN_C6_OUT="$TMP/test_boot_screen_c6"
 DSI_BACKLIGHT_OUT="$TMP/test_dsi_backlight"
 COPROCESSOR_OUT="$TMP/test_coprocessor_update"
 STREAM_UPDATE_OUT="$TMP/test_stream_update"
@@ -268,6 +269,11 @@ clang++ "${CXXFLAGS[@]}" \
   -I"$HERE/../libraries/espdisp_board/src" \
   -o "$BOOT_SCREEN_OUT" "$HERE/test_boot_screen.cpp"
 "$BOOT_SCREEN_OUT"
+clang++ "${CXXFLAGS[@]}" \
+  -DCONFIG_IDF_TARGET_ESP32C6 \
+  -I"$HERE/../libraries/espdisp_board/src" \
+  -o "$BOOT_SCREEN_C6_OUT" "$HERE/test_boot_screen.cpp"
+"$BOOT_SCREEN_C6_OUT"
 python3 "$HERE/../../tools/generate_boot_image.py" --check
 
 # The P4 boards' backlight through the real DSI backend: every lit level,

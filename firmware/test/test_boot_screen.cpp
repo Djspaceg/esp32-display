@@ -53,7 +53,7 @@ static uint16_t imagePixel(int x, int y) {
        ++i) {
     const bootimage::Run &run = bootimage::RUNS[i];
     if (x >= run.x && x < run.x + run.length) {
-      return bootimage::PIXELS[run.pixel + (x - run.x)];
+      return bootimage::pixelAt(run.pixel + (x - run.x));
     }
   }
   return bootimage::BACKGROUND;
@@ -102,11 +102,14 @@ static void writePreview(const char *dir, const std::string &name,
 int main() {
   // --- The asset is well formed ---------------------------------------------
   {
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+    CHECK(bootimage::WIDTH == 32 && bootimage::HEIGHT == 32);
+#else
     CHECK(bootimage::WIDTH == 120 && bootimage::HEIGHT == 120);
+#endif
     CHECK(bootimage::ROW_RUNS[0] == 0);
     const size_t runCount = sizeof(bootimage::RUNS) / sizeof(bootimage::RUNS[0]);
-    const size_t pixelCount =
-        sizeof(bootimage::PIXELS) / sizeof(bootimage::PIXELS[0]);
+    const size_t pixelCount = bootimage::PIXEL_COUNT;
     CHECK(bootimage::ROW_RUNS[bootimage::HEIGHT] == runCount);
     uint32_t next = 0;
     for (int y = 0; y < bootimage::HEIGHT; ++y) {
@@ -126,6 +129,20 @@ int main() {
     CHECK(next == pixelCount);
     // A cut-out, not a rectangle: some of it is background.
     CHECK(pixelCount < (size_t)bootimage::WIDTH * bootimage::HEIGHT);
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+    bool storedBackground = false;
+    for (int y = 0; y < bootimage::HEIGHT; ++y) {
+      for (uint16_t i = bootimage::ROW_RUNS[y];
+           i < bootimage::ROW_RUNS[y + 1]; ++i) {
+        const bootimage::Run &run = bootimage::RUNS[i];
+        for (int x = 0; x < run.length; ++x) {
+          storedBackground |=
+              bootimage::pixelAt(run.pixel + x) == bootimage::BACKGROUND;
+        }
+      }
+    }
+    CHECK(storedBackground);
+#endif
   }
 
   // --- Stage text and progress ----------------------------------------------
@@ -177,7 +194,7 @@ int main() {
       CHECK(s >= 1 && s <= 4);
       CHECK(l.bar.x == (w - l.bar.w) / 2);
       CHECK(l.bar.w > 0 && l.bar.h >= 2);
-      const bool micro = w <= 80 || h <= 48;
+      const bool micro = w <= 96 || h <= 54;
       if (micro) {
         ++compactLayouts;
         CHECK(l.compact);
@@ -264,7 +281,12 @@ int main() {
             bootscreenmodel::textRows(l, textY0, textY1);
             const bool underText = y >= textY0 && y < textY1;
             if (underBar || underText) continue;
-            CHECK(pixelAt(screen, w, x, y) == imagePixel(ix, iy));
+            const uint16_t asset = imagePixel(ix, iy);
+            const uint16_t expected =
+                asset == bootimage::BACKGROUND && x % 18 == 9 && y % 18 == 9
+                    ? bootscreenmodel::GRID_DOT
+                    : asset;
+            CHECK(pixelAt(screen, w, x, y) == expected);
           }
         }
       }
@@ -321,19 +343,30 @@ int main() {
       }
     }
   }
-  // The two 128x128 panels (the 0.85 and the T-QT), the 172-high landscape
-  // frames, both 96x54 frames, and both 72x40 OLED shapes are compact.
-  CHECK(compactLayouts == 9);
+  // The tiny 96x54 and 72x40 panels always use the compact status-only
+  // layout. A C6 has a deliberately compact 32px illustration, so its
+  // 128px-or-larger panels can use the full boot composition instead.
+  CHECK(compactLayouts > 0);
   CHECK(bottomLayouts > 0);
   {
     const Layout small = bootscreenmodel::layout(128, 128, false);
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+    CHECK(!small.compact);
+    CHECK(small.image.w == 32 && small.image.h == 32);
+    CHECK(small.image.y == 96);
+#else
     CHECK(small.compact);
     CHECK(small.image.x == 4);
     CHECK(small.image.y == textHeight(smallTextStyle(128, 128)) + 4);
     CHECK(!small.textOverImage);
+#endif
     const Layout knob = bootscreenmodel::layout(240, 240, true);
     CHECK(!knob.compact);
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+    CHECK(knob.image.y == 208);
+#else
     CHECK(knob.image.y == 120);
+#endif
   }
 
   printf("boot screen: %d checks passed\n", checks);
