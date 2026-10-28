@@ -21,7 +21,7 @@
 	<key>CMIOExtension</key>
 	<dict>
 		<key>CMIOExtensionMachServiceName</key>
-		<string>com.espdisplay.camera-extension.service</string>
+		<string>$(TeamIdentifierPrefix)group.com.espdisplay.camera.extension</string>
 	</dict>
 	<key>NSSystemExtensionUsageDescription</key>
 	<string>Provides the XIAOML Kit camera to video apps while ESPDisplaySender is running.</string>

@@ -11,7 +11,22 @@
 		A00000000000000000000211 /* app-icon-square.png in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000111 /* app-icon-square.png */; };
 		A00000000000000000000212 /* ESPDisplaySender.sdef in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000112 /* ESPDisplaySender.sdef */; };
 		A00000000000000000000304 /* SenderCore in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000303 /* SenderCore */; };
+		B00000000000000000000210 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000110 /* main.swift */; };
+		B00000000000000000000211 /* CoreMediaIO.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000111 /* CoreMediaIO.framework */; };
+		B00000000000000000000212 /* CoreMedia.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000112 /* CoreMedia.framework */; };
+		B00000000000000000000213 /* CoreVideo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000113 /* CoreVideo.framework */; };
+		B00000000000000000000214 /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B00000000000000000000114 /* IOKit.framework */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		B00000000000000000000402 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B00000000000000000000002;
+			remoteInfo = ESPDisplayCamera;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		A00000000000000000000003 /* ESPDisplaySender.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ESPDisplaySender.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -19,6 +34,14 @@
 		A00000000000000000000110 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		A00000000000000000000111 /* app-icon-square.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = ../app-icon-square.png; sourceTree = "<group>"; };
 		A00000000000000000000112 /* ESPDisplaySender.sdef */ = {isa = PBXFileReference; lastKnownFileType = text.sdef; path = Resources/ESPDisplaySender.sdef; sourceTree = "<group>"; };
+		B00000000000000000000003 /* ESPDisplayCamera.systemextension */ = {isa = PBXFileReference; explicitFileType = wrapper.system-extension; includeInIndex = 0; path = ESPDisplayCamera.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
+		B00000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = ../CameraExtension/Info.plist; sourceTree = "<group>"; };
+		B00000000000000000000109 /* CameraExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ../CameraExtension/CameraExtension.entitlements; sourceTree = "<group>"; };
+		B00000000000000000000110 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../CameraExtension/main.swift; sourceTree = "<group>"; };
+		B00000000000000000000111 /* CoreMediaIO.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMediaIO.framework; path = System/Library/Frameworks/CoreMediaIO.framework; sourceTree = SDKROOT; };
+		B00000000000000000000112 /* CoreMedia.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMedia.framework; path = System/Library/Frameworks/CoreMedia.framework; sourceTree = SDKROOT; };
+		B00000000000000000000113 /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = System/Library/Frameworks/CoreVideo.framework; sourceTree = SDKROOT; };
+		B00000000000000000000114 /* IOKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOKit.framework; path = System/Library/Frameworks/IOKit.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -27,6 +50,17 @@
 			buildActionMask = 2147483647;
 			files = (
 				A00000000000000000000304 /* SenderCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B00000000000000000000011 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B00000000000000000000211 /* CoreMediaIO.framework in Frameworks */,
+				B00000000000000000000212 /* CoreMedia.framework in Frameworks */,
+				B00000000000000000000213 /* CoreVideo.framework in Frameworks */,
+				B00000000000000000000214 /* IOKit.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -40,6 +74,7 @@
 				A00000000000000000000111 /* app-icon-square.png */,
 				A00000000000000000000112 /* ESPDisplaySender.sdef */,
 				A00000000000000000000006 /* Sources */,
+				B00000000000000000000006 /* CameraExtension */,
 				A00000000000000000000005 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -48,6 +83,7 @@
 			isa = PBXGroup;
 			children = (
 				A00000000000000000000003 /* ESPDisplaySender.app */,
+				B00000000000000000000003 /* ESPDisplayCamera.systemextension */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -68,6 +104,20 @@
 			path = ESPDisplaySender;
 			sourceTree = "<group>";
 		};
+		B00000000000000000000006 /* CameraExtension */ = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000009 /* Info.plist */,
+				B00000000000000000000109 /* CameraExtension.entitlements */,
+				B00000000000000000000110 /* main.swift */,
+				B00000000000000000000111 /* CoreMediaIO.framework */,
+				B00000000000000000000112 /* CoreMedia.framework */,
+				B00000000000000000000113 /* CoreVideo.framework */,
+				B00000000000000000000114 /* IOKit.framework */,
+			);
+			name = CameraExtension;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -85,6 +135,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				B00000000000000000000403 /* PBXTargetDependency */,
 			);
 			name = ESPDisplaySender;
 			packageProductDependencies = (
@@ -93,6 +144,24 @@
 			productName = ESPDisplaySender;
 			productReference = A00000000000000000000003 /* ESPDisplaySender.app */;
 			productType = "com.apple.product-type.application";
+		};
+		B00000000000000000000002 /* ESPDisplayCamera */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B00000000000000000000025 /* Build configuration list for PBXNativeTarget "ESPDisplayCamera" */;
+			buildPhases = (
+				B00000000000000000000010 /* Sources */,
+				B00000000000000000000011 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ESPDisplayCamera;
+			packageProductDependencies = (
+			);
+			productName = ESPDisplayCamera;
+			productReference = B00000000000000000000003 /* ESPDisplayCamera.systemextension */;
+			productType = "com.apple.product-type.system-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -106,6 +175,11 @@
 				TargetAttributes = {
 					A00000000000000000000002 = {
 						CreatedOnToolsVersion = 16.0;
+						ProvisioningStyle = Automatic;
+					};
+					B00000000000000000000002 = {
+						CreatedOnToolsVersion = 16.0;
+						ProvisioningStyle = Automatic;
 					};
 				};
 			};
@@ -126,6 +200,7 @@
 			projectRoot = "";
 			targets = (
 				A00000000000000000000002 /* ESPDisplaySender */,
+				B00000000000000000000002 /* ESPDisplayCamera */,
 			);
 		};
 /* End PBXProject section */
@@ -198,7 +273,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B00000000000000000000010 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B00000000000000000000210 /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		B00000000000000000000403 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B00000000000000000000002 /* ESPDisplayCamera */;
+			targetProxy = B00000000000000000000402 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A00000000000000000000020 /* Debug */ = {
@@ -283,6 +374,52 @@
 			};
 			name = Release;
 		};
+		B00000000000000000000022 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ../CameraExtension/CameraExtension.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = 4D22XL743H;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ../CameraExtension/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				OTHER_SWIFT_FLAGS = "-parse-as-library";
+				PRODUCT_BUNDLE_IDENTIFIER = com.espdisplay.camera-extension;
+				PRODUCT_NAME = ESPDisplayCamera;
+				PROVISIONING_PROFILE_REQUIRED = YES;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				SYSTEM_EXTENSION_API_ONLY = YES;
+			};
+			name = Debug;
+		};
+		B00000000000000000000023 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ../CameraExtension/CameraExtension.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = 4D22XL743H;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ../CameraExtension/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				OTHER_SWIFT_FLAGS = "-parse-as-library";
+				PRODUCT_BUNDLE_IDENTIFIER = com.espdisplay.camera-extension;
+				PRODUCT_NAME = ESPDisplayCamera;
+				PROVISIONING_PROFILE_REQUIRED = YES;
+				SKIP_INSTALL = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				SYSTEM_EXTENSION_API_ONLY = YES;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -300,6 +437,15 @@
 			buildConfigurations = (
 				A00000000000000000000022 /* Debug */,
 				A00000000000000000000023 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B00000000000000000000025 /* Build configuration list for PBXNativeTarget "ESPDisplayCamera" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B00000000000000000000022 /* Debug */,
+				B00000000000000000000023 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
