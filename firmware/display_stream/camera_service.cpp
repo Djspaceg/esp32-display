@@ -1,6 +1,9 @@
 #include "camera_service.h"
 
 #include <Arduino.h>
+
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+
 #include <esp_camera.h>
 
 #include <board_config.h>
@@ -15,7 +18,7 @@ namespace {
 const board::GeneratedCamera *camera = nullptr;
 bool available = false;
 bool requested = false;
-cameraproto::Resolution resolution = cameraproto::Resolution::Qvga;
+cameraproto::Resolution cameraResolution = cameraproto::Resolution::Qvga;
 uint16_t nextFrameId = 0;
 uint32_t lastFrameAt = 0;
 
@@ -26,7 +29,7 @@ framesize_t frameSize(cameraproto::Resolution value) {
 bool applyResolution() {
   sensor_t *sensor = esp_camera_sensor_get();
   if (!sensor) return false;
-  return sensor->set_framesize(sensor, frameSize(resolution)) == 0;
+  return sensor->set_framesize(sensor, frameSize(cameraResolution)) == 0;
 }
 
 }  // namespace
@@ -56,7 +59,7 @@ bool startCameraService() {
   config.pin_reset = camera->reset;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = frameSize(resolution);
+  config.frame_size = frameSize(cameraResolution);
   config.jpeg_quality = 12;
   config.fb_count = psramFound() ? 2 : 1;
   config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
@@ -79,7 +82,7 @@ bool handleCameraCommand(const uint8_t *data, size_t len) {
   if (!available) return false;
   cameraproto::Command command;
   if (!cameraproto::parseCommand(data, len, command)) return false;
-  resolution = command.resolution;
+  cameraResolution = command.resolution;
   if (!applyResolution()) return false;
   requested = command.kind == cameraproto::COMMAND_START;
   if (!requested) Serial.println("camera: stopped by sender");
@@ -119,7 +122,7 @@ void serviceCamera() {
     const size_t payload = min(cameraproto::MAX_FRAGMENT_PAYLOAD,
                                frame->len - offset);
     const size_t header = cameraproto::writeFrameHeader(
-        packet, sizeof(packet), resolution, frameId, (uint16_t)index,
+        packet, sizeof(packet), cameraResolution, frameId, (uint16_t)index,
         (uint16_t)fragments);
     if (header == 0) break;
     memcpy(packet + header, frame->buf + offset, payload);
@@ -128,3 +131,21 @@ void serviceCamera() {
   }
   esp_camera_fb_return(frame);
 }
+
+#else
+
+bool startCameraService() {
+  return false;
+}
+
+bool cameraAvailable() {
+  return false;
+}
+
+bool handleCameraCommand(const uint8_t *, size_t) {
+  return false;
+}
+
+void serviceCamera() {}
+
+#endif
