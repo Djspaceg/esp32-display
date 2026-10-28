@@ -301,6 +301,10 @@ final class FrameSender {
     /// The Network framework's explicit Local Network privacy verdict for the
     /// exact UDP path this sender is trying to use.
     private let onLocalNetworkDenied: ((String) -> Void)?
+    /// A real unicast device path became satisfied. It is deliberately
+    /// distinct from the mDNS multicast probe, which may be ready while
+    /// Local Network access blocks device traffic.
+    private let onLocalNetworkPathReady: (() -> Void)?
 
     private(set) var framesSent: UInt64 = 0
     private(set) var sendErrors: UInt64 = 0
@@ -606,7 +610,8 @@ final class FrameSender {
          adaptivePacing: Bool = true,
          geometry: PanelGeometry = .panel172x320,
          onDeviceEvent: ((DeviceEvent) -> Void)? = nil,
-         onLocalNetworkDenied: ((String) -> Void)? = nil) {
+         onLocalNetworkDenied: ((String) -> Void)? = nil,
+         onLocalNetworkPathReady: (() -> Void)? = nil) {
         self.host = host
         self.port = port
         self.serviceEndpoint = nil
@@ -620,13 +625,15 @@ final class FrameSender {
         self._adaptivePacing = adaptivePacing
         self.onDeviceEvent = onDeviceEvent
         self.onLocalNetworkDenied = onLocalNetworkDenied
+        self.onLocalNetworkPathReady = onLocalNetworkPathReady
     }
 
     init(endpoint: NWEndpoint, spacingMicros: UInt32 = 200,
          adaptivePacing: Bool = true,
          geometry: PanelGeometry = .panel172x320,
          onDeviceEvent: ((DeviceEvent) -> Void)? = nil,
-         onLocalNetworkDenied: ((String) -> Void)? = nil) {
+         onLocalNetworkDenied: ((String) -> Void)? = nil,
+         onLocalNetworkPathReady: (() -> Void)? = nil) {
         self.host = "\(endpoint)"
         self.port = 0
         self.serviceEndpoint = endpoint
@@ -640,6 +647,7 @@ final class FrameSender {
         self._adaptivePacing = adaptivePacing
         self.onDeviceEvent = onDeviceEvent
         self.onLocalNetworkDenied = onLocalNetworkDenied
+        self.onLocalNetworkPathReady = onLocalNetworkPathReady
     }
 
     enum FrameTransport: Equatable {
@@ -799,6 +807,13 @@ final class FrameSender {
             switch state {
             case .failed(let error):
                 FileHandle.standardError.write(Data("UDP connection failed: \(error)\n".utf8))
+                if LocalNetworkPermissionProbe.isLocalNetworkDenied(error) {
+                    self.onLocalNetworkDenied?("UDP connection: \(error)")
+                }
+            case .waiting(let error):
+                if LocalNetworkPermissionProbe.isLocalNetworkDenied(error) {
+                    self.onLocalNetworkDenied?("UDP connection: \(error)")
+                }
             case .ready:
                 break
             default:
@@ -806,11 +821,17 @@ final class FrameSender {
             }
         }
         conn.pathUpdateHandler = { [weak self] path in
-            guard path.status == .unsatisfied,
-                  LocalNetworkPermissionProbe.isLocalNetworkDenied(
-                    path.unsatisfiedReason)
-            else { return }
-            self?.onLocalNetworkDenied?("UDP path: \(path)")
+            guard let self else { return }
+            if path.status == .satisfied {
+                // This is the sender's unicast device connection. A device
+                // may still be booting, but the Local Network gate is open.
+                self.onLocalNetworkPathReady?()
+            } else if path.status == .unsatisfied,
+                      LocalNetworkPermissionProbe.isLocalNetworkDenied(
+                        path.unsatisfiedReason)
+            {
+                self.onLocalNetworkDenied?("UDP path: \(path)")
+            }
         }
         conn.start(queue: queue)
 

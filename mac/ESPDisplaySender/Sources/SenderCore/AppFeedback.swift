@@ -54,6 +54,7 @@ enum AppIssue: String, CaseIterable, Sendable {
     case accessibility
     case systemAudioRecording
     case localNetwork
+    case cameraExtension
 
     var title: String {
         switch self {
@@ -64,6 +65,7 @@ enum AppIssue: String, CaseIterable, Sendable {
         case .accessibility: return MacPermission.accessibility.title
         case .systemAudioRecording: return MacPermission.systemAudioRecording.title
         case .localNetwork: return MacPermission.localNetwork.title
+        case .cameraExtension: return MacPermission.cameraExtension.title
         }
     }
 
@@ -76,6 +78,7 @@ enum AppIssue: String, CaseIterable, Sendable {
         case .accessibility: return .accessibility
         case .systemAudioRecording: return .systemAudioRecording
         case .localNetwork: return .localNetwork
+        case .cameraExtension: return .cameraExtension
         case .deviceConfig, .persistence, .wifiPresetSync: return nil
         }
     }

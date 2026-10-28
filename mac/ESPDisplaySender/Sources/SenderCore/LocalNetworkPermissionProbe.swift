@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Network
 
@@ -16,10 +17,14 @@ final class LocalNetworkPermissionProbe {
         /// A Bonjour browse becoming ready is not proof that the app can send
         /// packets to a local IPv4 address.
         case browserReady
+        /// A FrameSender unicast device path is satisfied. This is the
+        /// positive Local Network signal; multicast mDNS readiness is not.
+        case unicastPathReady
         case deviceAnswered
     }
 
     private var browser: NWBrowser?
+    private var accessConnection: NWConnection?
     private let queue = DispatchQueue(label: "espdisp.local-network-permission")
     private var generation: UInt64 = 0
     private var lastStartedAt = Date.distantPast
@@ -41,6 +46,20 @@ final class LocalNetworkPermissionProbe {
         reason == .localNetworkDenied
     }
 
+    /// Network.framework can expose a Local Network block as a policy path,
+    /// DNS-SD PolicyDenied, or a UDP "No route to host" error. The latter
+    /// matters for known devices whose sender never needs Bonjour again.
+    static func isLocalNetworkDenied(_ error: NWError) -> Bool {
+        switch error {
+        case .dns(let code):
+            return isPolicyDeniedDNSServiceError(Int32(code))
+        case .posix(let code):
+            return code.rawValue == EHOSTUNREACH
+        default:
+            return false
+        }
+    }
+
     static func shouldRecheck(
         lastStartedAt: Date, now: Date, interval: TimeInterval = recheckInterval
     ) -> Bool {
@@ -56,6 +75,7 @@ final class LocalNetworkPermissionProbe {
 
     private func startLocked() {
         browser?.cancel()
+        accessConnection?.cancel()
         generation &+= 1
         let callbackGeneration = generation
         lastStartedAt = Date()
@@ -77,8 +97,7 @@ final class LocalNetworkPermissionProbe {
             case .ready:
                 self.onObservation(.browserReady)
             case .waiting(let error), .failed(let error):
-                if case .dns(let code) = error,
-                   Self.isPolicyDeniedDNSServiceError(Int32(code)) {
+                if Self.isLocalNetworkDenied(error) {
                     self.onObservation(
                         .policyDenied(technicalDetail: String(describing: error)))
                 }
@@ -87,6 +106,48 @@ final class LocalNetworkPermissionProbe {
             }
         }
         browser.start(queue: queue)
+        startAccessConnection(callbackGeneration: callbackGeneration)
+    }
+
+    /// A standard PTR query for this app's Bonjour service. It is a real,
+    /// harmless local datagram rather than an invented packet sent to a board.
+    private static let mdnsQuery = Data([
+        0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+        8, 95, 101, 115, 112, 100, 105, 115, 112,
+        4, 95, 117, 100, 112,
+        5, 108, 111, 99, 97, 108, 0,
+        0, 12, 0, 1,
+    ])
+
+    /// Browsing alone can become ready when device UDP paths are prohibited.
+    /// Sending the usual mDNS lookup makes the permission request explicit at
+    /// launch, including a LaunchAgent launch, without touching a board. Its
+    /// ready state deliberately does not clear guidance: build 628.1 showed
+    /// it could be ready while device unicast paths were still prohibited.
+    private func startAccessConnection(callbackGeneration: UInt64) {
+        let connection = NWConnection(
+            host: "224.0.0.251", port: 5_353, using: .udp)
+        accessConnection = connection
+        connection.pathUpdateHandler = { [weak self] path in
+            guard let self, self.generation == callbackGeneration else { return }
+            if Self.isLocalNetworkDenied(path.unsatisfiedReason) {
+                self.onObservation(.policyDenied(technicalDetail: "mDNS path: \(path)"))
+            }
+        }
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self, self.generation == callbackGeneration else { return }
+            switch state {
+            case .waiting(let error), .failed(let error):
+                if Self.isLocalNetworkDenied(error) {
+                    self.onObservation(
+                        .policyDenied(technicalDetail: String(describing: error)))
+                }
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+        connection.send(content: Self.mdnsQuery, completion: .contentProcessed { _ in })
     }
 
     /// Run a new browse periodically after a denial, and when the foreground
@@ -105,6 +166,8 @@ final class LocalNetworkPermissionProbe {
         queue.async { [weak self] in
             self?.browser?.cancel()
             self?.browser = nil
+            self?.accessConnection?.cancel()
+            self?.accessConnection = nil
             self?.generation &+= 1
         }
     }

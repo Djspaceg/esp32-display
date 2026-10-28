@@ -703,6 +703,8 @@ final class SettingsWindowTests: XCTestCase {
                         controls.filter { $0 is NSSlider }.count, 2, "no sliders on \(label)")
                 case .wifiNetworks:
                     break
+                case .permissions:
+                    break
                 }
                 for control in controls where control.window != nil {
                     let frame = control.convert(control.bounds, to: host)

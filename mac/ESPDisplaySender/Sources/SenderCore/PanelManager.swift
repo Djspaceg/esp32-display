@@ -64,6 +64,24 @@ final class PanelManager: ObservableObject {
     var accessibilityNoticeDismissed = false
     /// The status of screen capture after its most recent real attempt.
     private var screenRecordingPermissionState = ScreenRecordingPermissionState.ready
+    /// The live rows in Settings and the first-launch checklist. They are
+    /// rebuilt from the real permission probes every time the manager refreshes.
+    @Published private(set) var permissionChecklist: [PermissionChecklistItem] = []
+    /// A foreground launch presents this automatically while any capability is
+    /// unavailable. Background launches leave it queued until a window exists.
+    @Published var permissionChecklistPresented = false
+    @Published private(set) var activePermissionRequest: MacPermission?
+    private let permissionPromptHistory = PermissionPromptHistory()
+    private var localNetworkChecklistStatus: PermissionChecklistStatus?
+    private var localNetworkTechnicalDetail: String?
+    private var cameraExtensionNeedsApproval = false
+    private var cameraExtensionActivated = false
+    private var cameraExtensionTechnicalDetail: String?
+    private var automaticPermissionSequence = false
+    private var permissionChecklistDismissedThisLaunch = false
+    private var foregroundStartupUnblocked = false
+    private var foregroundStartupContinuation: CheckedContinuation<Void, Never>?
+    private var screenRecordingTechnicalDetail: String?
     /// Standing problems, at most one per kind, in the order first reported.
     @Published private(set) var issues: [ReportedIssue] = []
     /// What each source currently reports under an issue kind, in report order.
@@ -672,7 +690,8 @@ final class PanelManager: ObservableObject {
     func recordScreenCaptureAttempt(succeeded: Bool, technicalDetail: String? = nil) {
         screenRecordingPermissionState.observeCaptureResult(
             works: succeeded, authorized: CGPreflightScreenCaptureAccess())
-        publishScreenRecordingPermission(technicalDetail: technicalDetail)
+        screenRecordingTechnicalDetail = technicalDetail
+        refreshPermissionChecklist()
     }
 
     /// Re-check grants when the app returns from System Settings and on the
@@ -688,22 +707,24 @@ final class PanelManager: ObservableObject {
         let authorized = CGPreflightScreenCaptureAccess()
         screenRecordingPermissionState.observeAuthorization(authorized)
         guard screenRecordingPermissionState != .ready else {
-            resolve(.screenRecording)
+            screenRecordingTechnicalDetail = nil
+            refreshPermissionChecklist()
             return
         }
-        publishScreenRecordingPermission()
-        guard authorized else { return }
-        Task { [weak self] in
-            do {
-                _ = try await SCShareableContent.excludingDesktopWindows(
-                    false, onScreenWindowsOnly: false)
-                await MainActor.run {
-                    self?.recordScreenCaptureAttempt(succeeded: true)
-                }
-            } catch {
-                await MainActor.run {
-                    self?.recordScreenCaptureAttempt(
-                        succeeded: false, technicalDetail: error.localizedDescription)
+        refreshPermissionChecklist()
+        if authorized {
+            Task { [weak self] in
+                do {
+                    _ = try await SCShareableContent.excludingDesktopWindows(
+                        false, onScreenWindowsOnly: false)
+                    await MainActor.run {
+                        self?.recordScreenCaptureAttempt(succeeded: true)
+                    }
+                } catch {
+                    await MainActor.run {
+                        self?.recordScreenCaptureAttempt(
+                            succeeded: false, technicalDetail: error.localizedDescription)
+                    }
                 }
             }
         }
@@ -711,63 +732,272 @@ final class PanelManager: ObservableObject {
 
     /// Ask macOS itself for a grant when it still has a prompt to show.
     func requestPermissionAccess(for issue: AppIssue) {
-        switch issue.permission {
+        guard let permission = issue.permission else { return }
+        requestPermissionAccess(for: permission)
+    }
+
+    /// The checklist's action path. It records the attempt under this exact
+    /// signed app identity, so a new signature correctly starts at "Not yet
+    /// asked" instead of inheriting a stale denial label.
+    func requestPermissionAccess(for permission: MacPermission) {
+        activePermissionRequest = permission
+        switch permission {
         case .screenRecording:
             _ = CGRequestScreenCaptureAccess()
+            permissionPromptHistory.markRequested(permission)
             refreshMacPermissionGuidance()
         case .accessibility:
             requestMediaKeyAuthorization()
+            permissionPromptHistory.markRequested(permission)
         case .systemAudioRecording:
-            SystemAudioAccess.system.request? { [weak self] _ in
-                Task { @MainActor in self?.refreshMacPermissionGuidance() }
+            guard let request = SystemAudioAccess.system.request else {
+                refreshMacPermissionGuidance()
+                return
+            }
+            request { [weak self] _ in
+                Task { @MainActor in
+                    self?.permissionPromptHistory.markRequested(permission)
+                    self?.refreshMacPermissionGuidance()
+                }
             }
         case .localNetwork:
+            localNetworkChecklistStatus = nil
+            localNetworkTechnicalDetail = nil
             requestLocalNetworkAuthorization()
-        case nil:
-            break
+            unblockForegroundStartup()
+            refreshPermissionChecklist()
+        case .cameraExtension:
+            cameraExtensionNeedsApproval = false
+            cameraExtensionTechnicalDetail = nil
+            CameraExtensionInstaller.activate { [weak self] result in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.permissionPromptHistory.markRequested(permission)
+                    switch result {
+                    case .installed:
+                        self.cameraExtensionNeedsApproval = false
+                        self.cameraExtensionActivated = true
+                        self.cameraExtensionTechnicalDetail = nil
+                        self.operationOutcome = .success(
+                            "Camera extension installed",
+                            "ESPDisplay XIAOML Camera is ready in video apps.")
+                    case .needsUserApproval:
+                        self.cameraExtensionNeedsApproval = true
+                        self.operationOutcome = .success(
+                            "Camera extension needs approval",
+                            "Approve ESPDisplay Camera Extension in System Settings, "
+                                + "then return here.")
+                    case .failed(let error):
+                        self.cameraExtensionNeedsApproval = true
+                        self.cameraExtensionTechnicalDetail = error.localizedDescription
+                        self.operationOutcome = .failure(
+                            "Camera extension could not install",
+                            error.localizedDescription)
+                    }
+                    self.refreshPermissionChecklist()
+                }
+            }
         }
     }
 
-    /// Local Network does not offer a preflight API. A browser alone can be
-    /// ready while its device endpoints are prohibited, so only a response
-    /// from a device proves the permission works again.
+    /// Local Network does not offer a preflight API. Bonjour and multicast
+    /// mDNS may be ready while unicast device paths are prohibited, so the
+    /// sender's satisfied unicast path is the positive signal.
     func observeLocalNetworkPermission(_ observation: LocalNetworkPermissionProbe.Observation) {
         switch observation {
         case .policyDenied(let technicalDetail):
-            report(
-                .localNetwork,
-                detail: MacPermission.localNetwork.message(for: .needsAccess),
-                technicalDetail: technicalDetail,
-                permissionState: .needsAccess)
+            permissionPromptHistory.markRequested(.localNetwork)
+            localNetworkChecklistStatus = .blocked
+            localNetworkTechnicalDetail = technicalDetail
+            refreshPermissionChecklist()
         case .browserReady:
             break
+        case .unicastPathReady:
+            localNetworkChecklistStatus = .allowed
+            localNetworkTechnicalDetail = nil
+            refreshPermissionChecklist()
         case .deviceAnswered:
-            resolve(.localNetwork)
+            localNetworkChecklistStatus = .allowed
+            localNetworkTechnicalDetail = nil
+            refreshPermissionChecklist()
         }
     }
 
-    private func publishScreenRecordingPermission(technicalDetail: String? = nil) {
-        guard let state = screenRecordingPermissionState.issueState else {
-            resolve(.screenRecording)
+    private func refreshSystemAudioRecordingAuthorization() {
+        refreshPermissionChecklist()
+    }
+
+    /// The same source powers the checklist and the in-context banners. A
+    /// "not yet asked" row is proactive guidance, not an error banner.
+    private func refreshPermissionChecklist() {
+        let next = MacPermission.allCases.map(permissionChecklistItem)
+        if permissionChecklist != next {
+            permissionChecklist = next
+        }
+        if let activePermissionRequest,
+           next.first(where: { $0.permission == activePermissionRequest })?.isReady == true {
+            self.activePermissionRequest = nil
+        }
+        for item in next {
+            publishPermissionIssue(for: item)
+        }
+        let allRequiredReady = next
+            .filter { $0.permission.isRequiredAtLaunch }
+            .allSatisfy(\.isReady)
+        if allRequiredReady {
+            permissionChecklistPresented = false
+            permissionChecklistDismissedThisLaunch = false
+            automaticPermissionSequence = false
+            activePermissionRequest = nil
+            unblockForegroundStartup()
+        } else if !permissionChecklistDismissedThisLaunch {
+            permissionChecklistPresented = true
+        }
+        advanceAutomaticPermissionSequence()
+    }
+
+    private func permissionChecklistItem(
+        for permission: MacPermission
+    ) -> PermissionChecklistItem {
+        let status: PermissionChecklistStatus
+        let requiresRelaunch: Bool
+        switch permission {
+        case .screenRecording:
+            switch screenRecordingPermissionState {
+            case .ready:
+                status = .allowed
+                requiresRelaunch = false
+            case .needsAccess:
+                status = permissionPromptHistory.wasRequested(permission)
+                    ? .blocked : .notYetAsked
+                requiresRelaunch = false
+            case .grantedNeedsRelaunch:
+                status = .allowed
+                requiresRelaunch = true
+            }
+        case .localNetwork:
+            status = localNetworkChecklistStatus
+                ?? (permissionPromptHistory.wasRequested(permission)
+                    ? .blocked : .notYetAsked)
+            requiresRelaunch = false
+        case .systemAudioRecording:
+            switch SystemAudioAccess.system.status() {
+            case .authorized:
+                status = .allowed
+            case .denied:
+                status = .blocked
+            case .notDetermined:
+                status = .notYetAsked
+            case .unknown:
+                status = permissionPromptHistory.wasRequested(permission)
+                    ? .blocked : .notYetAsked
+            }
+            requiresRelaunch = false
+        case .accessibility:
+            status = mediaKeysAuthorized()
+                ? .allowed
+                : (permissionPromptHistory.wasRequested(permission)
+                    ? .blocked : .notYetAsked)
+            requiresRelaunch = false
+        case .cameraExtension:
+            status = (cameraExtensionActivated || CameraExtensionInstaller.isInstalled)
+                ? .allowed
+                : (cameraExtensionNeedsApproval
+                    || permissionPromptHistory.wasRequested(permission)
+                    ? .blocked : .notYetAsked)
+            requiresRelaunch = false
+        }
+        return PermissionChecklistItem(
+            permission: permission, status: status, requiresRelaunch: requiresRelaunch)
+    }
+
+    private func publishPermissionIssue(for item: PermissionChecklistItem) {
+        let issue = item.permission.appIssue
+        guard item.status == .blocked || item.requiresRelaunch else {
+            resolve(issue, source: "permission checklist")
             return
         }
+        let state: PermissionIssueState = item.requiresRelaunch
+            ? .grantedNeedsRelaunch : .needsAccess
+        let technicalDetail: String?
+        switch item.permission {
+        case .screenRecording:
+            technicalDetail = screenRecordingTechnicalDetail
+        case .localNetwork:
+            technicalDetail = localNetworkTechnicalDetail
+        case .cameraExtension:
+            technicalDetail = cameraExtensionTechnicalDetail
+        case .systemAudioRecording, .accessibility:
+            technicalDetail = nil
+        }
         report(
-            .screenRecording,
-            detail: MacPermission.screenRecording.message(for: state),
+            issue,
+            source: "permission checklist",
+            detail: item.permission.message(for: state),
             technicalDetail: technicalDetail,
             permissionState: state)
     }
 
-    private func refreshSystemAudioRecordingAuthorization() {
-        switch SystemAudioAccess.system.status() {
-        case .denied:
-            report(
-                .systemAudioRecording,
-                detail: MacPermission.systemAudioRecording.message(for: .needsAccess),
-                permissionState: .needsAccess)
-        case .authorized, .notDetermined, .unknown:
-            resolve(.systemAudioRecording)
+    /// Called once the first interactive window has a checklist on screen.
+    /// The next row is requested only after the previous row really becomes
+    /// usable, so macOS never receives a stack of simultaneous prompts.
+    func beginAutomaticPermissionRequests() {
+        permissionChecklistDismissedThisLaunch = false
+        automaticPermissionSequence = true
+        refreshPermissionChecklist()
+    }
+
+    func dismissPermissionChecklist() {
+        automaticPermissionSequence = false
+        permissionChecklistDismissedThisLaunch = true
+        permissionChecklistPresented = false
+        unblockForegroundStartup()
+    }
+
+    /// Foreground capture and discovery wait until the visible checklist has
+    /// reached the Local Network row. That keeps their own first-use prompts
+    /// from racing ahead of the explained Screen Recording request. A
+    /// background LaunchAgent intentionally does not wait because it has no
+    /// visible checklist.
+    func waitForForegroundStartupPermissionSetup() async {
+        guard !foregroundStartupUnblocked else { return }
+        await withCheckedContinuation { continuation in
+            foregroundStartupContinuation = continuation
         }
+    }
+
+    private func unblockForegroundStartup() {
+        guard !foregroundStartupUnblocked else { return }
+        foregroundStartupUnblocked = true
+        foregroundStartupContinuation?.resume()
+        foregroundStartupContinuation = nil
+    }
+
+    private func advanceAutomaticPermissionSequence() {
+        guard automaticPermissionSequence else { return }
+        if let activePermissionRequest,
+           let active = permissionChecklist.first(where: {
+               $0.permission == activePermissionRequest
+           })
+        {
+            guard active.isReady else { return }
+            self.activePermissionRequest = nil
+        }
+        let requiredItems = permissionChecklist.filter {
+            $0.permission.isRequiredAtLaunch
+        }
+        guard let permission = PermissionRequestSequence.next(in: requiredItems),
+              let item = requiredItems.first(where: { $0.permission == permission })
+        else { return }
+        activePermissionRequest = permission
+        if permission == .localNetwork {
+            unblockForegroundStartup()
+        }
+        guard PermissionRequestSequence.shouldRequestAutomatically(item) else {
+            automaticPermissionSequence = false
+            return
+        }
+        requestPermissionAccess(for: permission)
     }
 
 

@@ -90,6 +90,13 @@ struct ManagerView: View {
             }
             .frame(width: 560, height: 620)
         }
+        .sheet(
+            isPresented: Binding(
+                get: { manager.permissionChecklistPresented },
+                set: { if !$0 { manager.dismissPermissionChecklist() } })
+        ) {
+            PermissionChecklistSheet(manager: manager)
+        }
         .onReceive(
             NotificationCenter.default.publisher(for: .espDisplayRecoverBoard)
         ) { _ in
@@ -397,10 +404,51 @@ private struct IssueBanner: View {
     }
 }
 
+/// The first-launch companion to the permanent Settings > Permissions section.
+/// It names each capability before macOS receives the corresponding request,
+/// then holds the sequence at a blocked row instead of stacking prompts.
+private struct PermissionChecklistSheet: View {
+    @ObservedObject var manager: PanelManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Permissions")
+                .font(.title2.weight(.semibold))
+            Text("macOS requests the setup needed for sending one permission at "
+                + "a time. The next row waits until the current one works.")
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    PermissionChecklistRows(manager: manager)
+                }
+            }
+            HStack {
+                Button("Open Permissions Settings") {
+                    SettingsPane.open(.permissions)
+                }
+                Spacer()
+                Button("Not Now") {
+                    manager.dismissPermissionChecklist()
+                }
+            }
+        }
+        .padding(22)
+        .frame(width: 620, height: 520)
+        .textSelection(.enabled)
+        .task {
+            // Let the explanation render before the first macOS prompt.
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            manager.beginAutomaticPermissionRequests()
+        }
+    }
+}
+
 /// Starts the installed app again before ending this process. This is only
 /// called from the banner button, so a status update never launches or brings
 /// the app to the foreground on its own.
-private enum AppRelauncher {
+enum AppRelauncher {
     static func relaunch() {
         guard let appURL = Bundle.main.bundleURL as URL? else { return }
         let configuration = NSWorkspace.OpenConfiguration()
@@ -821,21 +869,7 @@ struct PanelDetailView: View {
             }
             LabeledContent("Other apps") {
                 Button("Install Camera Extension") {
-                    CameraExtensionInstaller.activate { result in
-                        Task { @MainActor in
-                            switch result {
-                            case .success:
-                                manager.operationOutcome = .success(
-                                    "Camera extension installed",
-                                    "Approve it in System Settings, then choose "
-                                        + "ESPDisplay XIAOML Camera in your video app.")
-                            case .failure(let error):
-                                manager.operationOutcome = .failure(
-                                    "Camera extension could not install",
-                                    error.localizedDescription)
-                            }
-                        }
-                    }
+                    manager.requestPermissionAccess(for: MacPermission.cameraExtension)
                 }
             }
         } header: {

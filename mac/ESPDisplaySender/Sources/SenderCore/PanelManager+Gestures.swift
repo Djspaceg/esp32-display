@@ -234,7 +234,7 @@ extension PanelManager {
         guard let panel = panels.first(where: { $0.serviceName == serviceName }),
               panel.assignmentsNeedAccessibility, !mediaKeysAuthorized()
         else { return }
-        requestMediaKeyAuthorization()
+        requestPermissionAccess(for: MacPermission.accessibility)
     }
 
     /// Send the board the map this app wants, if what it last reported is

@@ -234,12 +234,13 @@ public enum ESPDisplaySenderApp {
                     localNetworkPermissionProbe.refresh()
                 }
             }
-            // This runs for interactive and LaunchAgent starts. A background
-            // launch that cannot show macOS's prompt still records a denial;
-            // the shared banner is waiting the next time its window is shown.
-            localNetworkPermissionProbe.start()
-            if !opts.listDisplays && !opts.listWindows {
-                manager.startMacAudioRouting()
+            // Foreground launches make this request from the visible
+            // checklist, after its explanation. A LaunchAgent launch has no
+            // visible sheet, so it makes the same browse here: if macOS
+            // cannot show the prompt, its denial is queued for the next
+            // visible window instead.
+            if launchedInBackground && !opts.listDisplays && !opts.listWindows {
+                localNetworkPermissionProbe.start()
             }
             let window = ManagerWindowController(manager: manager)
             CocoaScriptingContext.install(manager: manager, window: window)
@@ -258,6 +259,14 @@ public enum ESPDisplaySenderApp {
 
         Task {
             do {
+                if !launchedInBackground && !opts.listDisplays && !opts.listWindows {
+                    await panelManager.waitForForegroundStartupPermissionSetup()
+                }
+                if !opts.listDisplays && !opts.listWindows {
+                    await MainActor.run {
+                        panelManager.startMacAudioRouting()
+                    }
+                }
                 try await runSender(opts: opts, panelManager: panelManager)
             } catch {
                 FileHandle.standardError.write(Data("fatal: \(error)\n".utf8))
@@ -298,6 +307,11 @@ public enum ESPDisplaySenderApp {
             Task { @MainActor in
                 panelManager.observeLocalNetworkPermission(
                     .policyDenied(technicalDetail: technicalDetail))
+            }
+        }
+        func reportLocalNetworkPathReady() {
+            Task { @MainActor in
+                panelManager.observeLocalNetworkPermission(.unicastPathReady)
             }
         }
         func reportDeviceAnswer(
@@ -346,7 +360,8 @@ public enum ESPDisplaySenderApp {
                 return FrameSender(host: opts.host, port: opts.port,
                                    spacingMicros: opts.spacingMicros,
                                    adaptivePacing: opts.adaptivePacing,
-                                   onLocalNetworkDenied: reportLocalNetworkDenied)
+                                   onLocalNetworkDenied: reportLocalNetworkDenied,
+                                   onLocalNetworkPathReady: reportLocalNetworkPathReady)
             }
             print("discovering devices (_espdisp._udp) ...")
             while true {
@@ -362,7 +377,8 @@ public enum ESPDisplaySenderApp {
                                        spacingMicros: opts.spacingMicros,
                                        adaptivePacing: opts.adaptivePacing,
                                        geometry: geometry,
-                                       onLocalNetworkDenied: reportLocalNetworkDenied)
+                                       onLocalNetworkDenied: reportLocalNetworkDenied,
+                                       onLocalNetworkPathReady: reportLocalNetworkPathReady)
                 }
                 print("no devices found yet - still browsing ...")
             }
@@ -587,7 +603,8 @@ public enum ESPDisplaySenderApp {
                             reportDeviceAnswer(
                                 event, name: "device", sessionID: sessionID)
                         },
-                        onLocalNetworkDenied: reportLocalNetworkDenied),
+                        onLocalNetworkDenied: reportLocalNetworkDenied,
+                        onLocalNetworkPathReady: reportLocalNetworkPathReady),
                     allowUnowned: true)
             } else {
                 // Discovery attaches sessions only to records the user added.
@@ -634,7 +651,8 @@ public enum ESPDisplaySenderApp {
                                     reportDeviceAnswer(
                                         event, name: device.name, sessionID: sessionID)
                                 },
-                                onLocalNetworkDenied: reportLocalNetworkDenied),
+                                onLocalNetworkDenied: reportLocalNetworkDenied,
+                                onLocalNetworkPathReady: reportLocalNetworkPathReady),
                             source: currentSources[device.name]?
                                 .sessionSource(defaultDisplay: opts.displayName),
                             audioDescriptor: device.metadata.audioDescriptor,

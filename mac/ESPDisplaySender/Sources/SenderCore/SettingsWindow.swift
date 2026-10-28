@@ -12,6 +12,7 @@ import SwiftUI
 /// order they fill every board's ten preset slots, which are added, edited,
 /// removed and reordered here and nowhere else.
 enum SettingsPane: String, CaseIterable, Identifiable {
+    case permissions
     case general
     case streaming
     case wifiNetworks
@@ -20,6 +21,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .permissions: return "Permissions"
         case .general: return "General"
         case .streaming: return "Streaming"
         case .wifiNetworks: return "WiFi Networks"
@@ -28,6 +30,8 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 
     var summary: String {
         switch self {
+        case .permissions:
+            return "Check the macOS access this app needs before a feature fails."
         case .general:
             return "How the device list is ordered and how long Identify lasts."
         case .streaming:
@@ -39,6 +43,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
+        case .permissions: return "checklist"
         case .general: return "gearshape.fill"
         case .streaming: return "play.rectangle.fill"
         case .wifiNetworks: return "wifi"
@@ -47,6 +52,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 
     var tint: Color {
         switch self {
+        case .permissions: return .teal
         case .general: return .gray
         case .streaming: return .indigo
         case .wifiNetworks: return .blue
@@ -57,6 +63,9 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     /// names of the settings on it.
     var keywords: [String] {
         switch self {
+        case .permissions:
+            return ["privacy", "screen recording", "local network", "audio", "accessibility",
+                    "camera", "extension", "permission"]
         case .general:
             return ["sort", "order", "device list", "display list", "sidebar", "identify", "led"]
         case .streaming:
@@ -154,6 +163,7 @@ struct SettingsView: View {
     @ViewBuilder
     private var detail: some View {
         switch navigation.pane {
+        case .permissions: PermissionsSettingsPane(manager: manager)
         case .general: GeneralSettingsPane(manager: manager)
         case .streaming: StreamingSettingsPane(manager: manager)
         case .wifiNetworks: WifiSettingsPane(manager: manager)
@@ -279,6 +289,73 @@ private struct SettingsForm<Content: View>: View {
     }
 }
 
+/// Shared by the permanent Settings section and the launch-time checklist.
+/// Its status and actions come entirely from `PanelManager`, so an in-context
+/// banner cannot disagree with the app's own Permissions page.
+struct PermissionChecklistRows: View {
+    @ObservedObject var manager: PanelManager
+
+    var body: some View {
+        ForEach(manager.permissionChecklist) { item in
+            let isActive = manager.activePermissionRequest == item.permission
+            let waitingForAnother = manager.activePermissionRequest != nil && !isActive
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.title)
+                            .fontWeight(.medium)
+                        Text(item.purpose)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 10)
+                    Text(item.statusText)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(statusColor(item.status))
+                }
+                if isActive && !item.isReady {
+                    Text("This is the next permission request.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                HStack(spacing: 8) {
+                    if item.requiresRelaunch {
+                        Button("Relaunch ESPDisplaySender") {
+                            AppRelauncher.relaunch()
+                        }
+                    } else if item.status == .blocked {
+                        Button(item.permission.settingsButtonTitle) {
+                            NSWorkspace.shared.open(item.permission.settingsURL)
+                        }
+                        Button("Request Again") {
+                            manager.requestPermissionAccess(for: item.permission)
+                        }
+                        .disabled(waitingForAnother)
+                    } else if item.status == .notYetAsked {
+                        Button("Request Access") {
+                            manager.requestPermissionAccess(for: item.permission)
+                        }
+                        .disabled(waitingForAnother)
+                        Button(item.permission.settingsButtonTitle) {
+                            NSWorkspace.shared.open(item.permission.settingsURL)
+                        }
+                    }
+                }
+                .controlSize(.small)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func statusColor(_ status: PermissionChecklistStatus) -> Color {
+        switch status {
+        case .allowed: return .green
+        case .notYetAsked: return .secondary
+        case .blocked: return .orange
+        }
+    }
+}
+
 // MARK: - Panes
 
 /// Settings take effect as they are made, as System Settings' do. Each
@@ -289,6 +366,27 @@ private func change(_ manager: PanelManager, _ edit: (inout SenderSettings) -> V
     var updated = manager.settings
     edit(&updated)
     manager.updateSettings(updated)
+}
+
+private struct PermissionsSettingsPane: View {
+    @ObservedObject var manager: PanelManager
+
+    var body: some View {
+        SettingsForm(pane: .permissions) {
+            Section {
+                PermissionChecklistRows(manager: manager)
+            } header: {
+                Text("Mac Access")
+            } footer: {
+                Text("The first available request runs one at a time after an "
+                    + "install or re-sign. A row stays here until macOS reports "
+                    + "that this copy of the app can use the feature.")
+            }
+        }
+        .onAppear {
+            manager.refreshMacPermissionGuidance(forceLocalNetworkProbe: true)
+        }
+    }
 }
 
 private struct GeneralSettingsPane: View {

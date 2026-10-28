@@ -75,7 +75,7 @@ final class CameraPreview: ObservableObject {
 /// permission is needed for the app-to-extension handoff.
 final class CameraExtensionBridge {
     static let shared = CameraExtensionBridge()
-    private static let deviceName = "ESPDisplay XIAOML Camera"
+    static let deviceName = "ESPDisplay XIAOML Camera"
 
     private let queue = DispatchQueue(label: "espdisplay.camera-extension")
     private let formatDescription: CMVideoFormatDescription

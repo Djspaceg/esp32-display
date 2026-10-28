@@ -56,11 +56,66 @@ final class MacPermissionGuidanceTests: XCTestCase {
             .accessibility,
             .systemAudioRecording,
             .localNetwork,
+            .cameraExtension,
         ] {
             XCTAssertFalse(permission.settingsButtonTitle.isEmpty)
             XCTAssertTrue((3...4).contains(permission.steps.count))
             XCTAssertFalse(permission.message(for: .needsAccess).isEmpty)
         }
+    }
+
+    func testChecklistKeepsTheFirstUnavailablePermissionAsTheNextRequest() {
+        let items = [
+            PermissionChecklistItem(
+                permission: .screenRecording, status: .allowed, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .localNetwork, status: .notYetAsked, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .systemAudioRecording, status: .notYetAsked, requiresRelaunch: false),
+        ]
+
+        XCTAssertEqual(PermissionRequestSequence.next(in: items), .localNetwork)
+        XCTAssertTrue(PermissionRequestSequence.shouldRequestAutomatically(items[1]))
+    }
+
+    func testCameraExtensionIsVisibleButNotInTheAutomaticSetupSequence() {
+        XCTAssertFalse(MacPermission.cameraExtension.isRequiredAtLaunch)
+        XCTAssertFalse(MacPermission.requestOrder.contains(.cameraExtension))
+        XCTAssertEqual(
+            MacPermission.allCases,
+            [.screenRecording, .localNetwork, .systemAudioRecording, .accessibility,
+             .cameraExtension])
+        XCTAssertEqual(
+            MacPermission.requestOrder,
+            [.screenRecording, .localNetwork, .systemAudioRecording, .accessibility])
+    }
+
+    func testChecklistDoesNotAutoRequestPastABlockedPermission() {
+        let blocked = PermissionChecklistItem(
+            permission: .screenRecording, status: .blocked, requiresRelaunch: false)
+        let later = PermissionChecklistItem(
+            permission: .localNetwork, status: .notYetAsked, requiresRelaunch: false)
+
+        XCTAssertEqual(PermissionRequestSequence.next(in: [blocked, later]), .screenRecording)
+        XCTAssertFalse(PermissionRequestSequence.shouldRequestAutomatically(blocked))
+    }
+
+    func testChecklistShowsAllowedButRelaunchRequiredSeparately() {
+        let item = PermissionChecklistItem(
+            permission: .screenRecording, status: .allowed, requiresRelaunch: true)
+
+        XCTAssertEqual(item.statusText, "Allowed - relaunch required")
+        XCTAssertFalse(item.isReady)
+    }
+
+    func testCameraExtensionWordingExplainsWhatItDoes() {
+        let permission = MacPermission.cameraExtension
+
+        XCTAssertEqual(
+            permission.purpose,
+            "Makes device camera frames available to other video apps.")
+        XCTAssertEqual(permission.settingsButtonTitle, "Open Extensions Settings")
+        XCTAssertFalse(permission.message(for: .needsAccess).localizedCaseInsensitiveContains("declin"))
     }
 
     func testLocalNetworkPolicyDeniedDNSCodeIsRecognized() {
@@ -70,8 +125,15 @@ final class MacPermissionGuidanceTests: XCTestCase {
             LocalNetworkPermissionProbe.isPolicyDeniedDNSServiceError(-65_569))
     }
 
+    func testLocalNetworkNoRouteToHostIsRecognized() {
+        XCTAssertTrue(
+            LocalNetworkPermissionProbe.isLocalNetworkDenied(.posix(.EHOSTUNREACH)))
+        XCTAssertFalse(
+            LocalNetworkPermissionProbe.isLocalNetworkDenied(.posix(.ECONNREFUSED)))
+    }
+
     @MainActor
-    func testLocalNetworkBannerWaitsForAReachableDevice() {
+    func testLocalNetworkBrowserAndMDNSReadyDoNotClearAProhibitedUnicastPath() {
         let manager = PanelManager(
             previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
 
@@ -83,7 +145,12 @@ final class MacPermissionGuidanceTests: XCTestCase {
         XCTAssertEqual(manager.issues.first?.permissionState, .needsAccess)
         manager.observeLocalNetworkPermission(.browserReady)
         XCTAssertTrue(manager.issues.contains { $0.issue == .localNetwork })
-        manager.observeLocalNetworkPermission(.deviceAnswered)
+        // Build 628.1 reported Bonjour and mDNS ready while device UDP paths
+        // were "unsatisfied (Local network prohibited)".
+        manager.observeLocalNetworkPermission(
+            .policyDenied(technicalDetail: "unicast path: Local network prohibited"))
+        XCTAssertTrue(manager.issues.contains { $0.issue == .localNetwork })
+        manager.observeLocalNetworkPermission(.unicastPathReady)
         XCTAssertFalse(manager.issues.contains { $0.issue == .localNetwork })
     }
 

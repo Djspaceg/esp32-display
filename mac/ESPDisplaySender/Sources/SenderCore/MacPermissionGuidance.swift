@@ -4,11 +4,28 @@ import Foundation
 /// Settings link, actions and walkthrough together prevents each feature from
 /// inventing a slightly different explanation when a rebuilt app loses a
 /// grant tied to its old signature.
-enum MacPermission: Equatable, Sendable {
+enum MacPermission: String, CaseIterable, Equatable, Sendable {
     case screenRecording
-    case accessibility
-    case systemAudioRecording
     case localNetwork
+    case systemAudioRecording
+    case accessibility
+    case cameraExtension
+
+    /// Order prompts by the features a new sender needs first, then the
+    /// optional controls it can make ready before a device tries to use them.
+    static let requestOrder: [MacPermission] = [
+        .screenRecording,
+        .localNetwork,
+        .systemAudioRecording,
+        .accessibility,
+    ]
+
+    /// The camera extension remains visible in the checklist, but it is a
+    /// separate optional feature rather than permission needed to send a
+    /// picture or reach a device.
+    var isRequiredAtLaunch: Bool {
+        self != .cameraExtension
+    }
 
     var title: String {
         switch self {
@@ -16,6 +33,32 @@ enum MacPermission: Equatable, Sendable {
         case .accessibility: return "Accessibility permission needed"
         case .systemAudioRecording: return "System Audio Recording permission needed"
         case .localNetwork: return "Local Network permission needed"
+        case .cameraExtension: return "Camera extension approval needed"
+        }
+    }
+
+    var checklistTitle: String {
+        switch self {
+        case .screenRecording: return "Screen Recording"
+        case .localNetwork: return "Local Network"
+        case .systemAudioRecording: return "System Audio Recording"
+        case .accessibility: return "Accessibility"
+        case .cameraExtension: return "Camera Extension"
+        }
+    }
+
+    var purpose: String {
+        switch self {
+        case .screenRecording:
+            return "Sends pictures from this Mac to devices."
+        case .localNetwork:
+            return "Finds and reaches devices over WiFi or Ethernet."
+        case .systemAudioRecording:
+            return "Plays this Mac's sound on device speakers."
+        case .accessibility:
+            return "Lets device controls change this Mac's playback and volume."
+        case .cameraExtension:
+            return "Makes device camera frames available to other video apps."
         }
     }
 
@@ -30,6 +73,9 @@ enum MacPermission: Equatable, Sendable {
         case .localNetwork:
             return URL(string: "x-apple.systempreferences:"
                 + "com.apple.preference.security?Privacy_LocalNetwork")!
+        case .cameraExtension:
+            return URL(string: "x-apple.systempreferences:"
+                + "com.apple.LoginItems-Settings.extension")!
         }
     }
 
@@ -43,6 +89,8 @@ enum MacPermission: Equatable, Sendable {
             return "Open System Audio Recording Settings"
         case .localNetwork:
             return "Open Local Network Settings"
+        case .cameraExtension:
+            return "Open Extensions Settings"
         }
     }
 
@@ -75,6 +123,12 @@ enum MacPermission: Equatable, Sendable {
                 "Turn on ESPDisplaySender, or turn it off and on again if it is already on.",
                 "Relaunch ESPDisplaySender.",
             ]
+        case .cameraExtension:
+            return [
+                "Request installation.",
+                "Approve ESPDisplay Camera Extension in Login Items & Extensions.",
+                "Relaunch ESPDisplaySender if macOS asks for it.",
+            ]
         }
     }
 
@@ -104,6 +158,21 @@ enum MacPermission: Equatable, Sendable {
             return "ESPDisplaySender isn't allowed to reach devices on your local network."
         case (.localNetwork, .grantedNeedsRelaunch):
             return "Permission granted - relaunch to reach devices on your local network."
+        case (.cameraExtension, .needsAccess):
+            return "ESPDisplaySender cannot make the device camera available to other "
+                + "video apps until its camera extension is approved."
+        case (.cameraExtension, .grantedNeedsRelaunch):
+            return "Camera extension approved - relaunch if it does not appear in video apps."
+        }
+    }
+
+    var appIssue: AppIssue {
+        switch self {
+        case .screenRecording: return .screenRecording
+        case .localNetwork: return .localNetwork
+        case .systemAudioRecording: return .systemAudioRecording
+        case .accessibility: return .accessibility
+        case .cameraExtension: return .cameraExtension
         }
     }
 }
