@@ -71,7 +71,7 @@ final class MacPermissionGuidanceTests: XCTestCase {
     }
 
     @MainActor
-    func testLocalNetworkBannerClearsWhenABrowseBecomesReadyWithoutADevice() {
+    func testLocalNetworkBannerWaitsForAReachableDevice() {
         let manager = PanelManager(
             previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
 
@@ -81,8 +81,33 @@ final class MacPermissionGuidanceTests: XCTestCase {
             manager.issues.first?.detail,
             "ESPDisplaySender isn't allowed to reach devices on your local network.")
         XCTAssertEqual(manager.issues.first?.permissionState, .needsAccess)
-        manager.observeLocalNetworkPermission(.authorized)
+        manager.observeLocalNetworkPermission(.browserReady)
+        XCTAssertTrue(manager.issues.contains { $0.issue == .localNetwork })
+        manager.observeLocalNetworkPermission(.deviceAnswered)
         XCTAssertFalse(manager.issues.contains { $0.issue == .localNetwork })
+    }
+
+    func testLocalNetworkEndpointPathDenialUsesTheExplicitPrivacyReason() {
+        XCTAssertTrue(
+            LocalNetworkPermissionProbe.isLocalNetworkDenied(.localNetworkDenied))
+        XCTAssertFalse(LocalNetworkPermissionProbe.isLocalNetworkDenied(nil))
+        XCTAssertFalse(
+            LocalNetworkPermissionProbe.isLocalNetworkDenied(.notAvailable))
+    }
+
+    func testLocalNetworkProbeRechecksOnItsInterval() {
+        let lastStarted = Date(timeIntervalSinceReferenceDate: 100)
+
+        XCTAssertFalse(
+            LocalNetworkPermissionProbe.shouldRecheck(
+                lastStartedAt: lastStarted,
+                now: lastStarted.addingTimeInterval(
+                    LocalNetworkPermissionProbe.recheckInterval - 0.1)))
+        XCTAssertTrue(
+            LocalNetworkPermissionProbe.shouldRecheck(
+                lastStartedAt: lastStarted,
+                now: lastStarted.addingTimeInterval(
+                    LocalNetworkPermissionProbe.recheckInterval)))
     }
 
     func testOldBrowserCallbacksAreIgnoredAfterANewAccessRequest() {

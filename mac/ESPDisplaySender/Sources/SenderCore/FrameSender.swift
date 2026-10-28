@@ -298,6 +298,9 @@ final class FrameSender {
     private let brightnessInterval: TimeInterval = 0.05
     private var prevStats = DeviceStats()
     private let onDeviceEvent: ((DeviceEvent) -> Void)?
+    /// The Network framework's explicit Local Network privacy verdict for the
+    /// exact UDP path this sender is trying to use.
+    private let onLocalNetworkDenied: ((String) -> Void)?
 
     private(set) var framesSent: UInt64 = 0
     private(set) var sendErrors: UInt64 = 0
@@ -602,7 +605,8 @@ final class FrameSender {
     init(host: String, port: UInt16, spacingMicros: UInt32 = 200,
          adaptivePacing: Bool = true,
          geometry: PanelGeometry = .panel172x320,
-         onDeviceEvent: ((DeviceEvent) -> Void)? = nil) {
+         onDeviceEvent: ((DeviceEvent) -> Void)? = nil,
+         onLocalNetworkDenied: ((String) -> Void)? = nil) {
         self.host = host
         self.port = port
         self.serviceEndpoint = nil
@@ -615,12 +619,14 @@ final class FrameSender {
         self.spacingInitial = spacingMicros
         self._adaptivePacing = adaptivePacing
         self.onDeviceEvent = onDeviceEvent
+        self.onLocalNetworkDenied = onLocalNetworkDenied
     }
 
     init(endpoint: NWEndpoint, spacingMicros: UInt32 = 200,
          adaptivePacing: Bool = true,
          geometry: PanelGeometry = .panel172x320,
-         onDeviceEvent: ((DeviceEvent) -> Void)? = nil) {
+         onDeviceEvent: ((DeviceEvent) -> Void)? = nil,
+         onLocalNetworkDenied: ((String) -> Void)? = nil) {
         self.host = "\(endpoint)"
         self.port = 0
         self.serviceEndpoint = endpoint
@@ -633,6 +639,7 @@ final class FrameSender {
         self.spacingInitial = spacingMicros
         self._adaptivePacing = adaptivePacing
         self.onDeviceEvent = onDeviceEvent
+        self.onLocalNetworkDenied = onLocalNetworkDenied
     }
 
     enum FrameTransport: Equatable {
@@ -797,6 +804,13 @@ final class FrameSender {
             default:
                 break
             }
+        }
+        conn.pathUpdateHandler = { [weak self] path in
+            guard path.status == .unsatisfied,
+                  LocalNetworkPermissionProbe.isLocalNetworkDenied(
+                    path.unsatisfiedReason)
+            else { return }
+            self?.onLocalNetworkDenied?("UDP path: \(path)")
         }
         conn.start(queue: queue)
 

@@ -2261,7 +2261,10 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
         activationObserver = NotificationCenter.default
             .publisher(for: NSApplication.didBecomeActiveNotification)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.manager.refreshMacPermissionGuidance() }
+            .sink {
+                [weak self] _ in self?.manager.refreshMacPermissionGuidance(
+                    forceLocalNetworkProbe: true)
+            }
         settingsWindow.onClose = { [weak self] in
             self?.enterAccessoryModeWhenNoWindowsAreVisible()
         }

@@ -49,6 +49,9 @@ final class PanelManager: ObservableObject {
     /// Re-starts the Bonjour permission probe. Installed by the app bootstrap;
     /// tests and previews leave it inert.
     var requestLocalNetworkAuthorization: () -> Void = {}
+    /// Rechecks the Local Network probe after its small interval, or
+    /// immediately after the foreground app becomes active.
+    var refreshLocalNetworkAuthorization: (_ immediately: Bool) -> Void = { _ in }
     var mediaKeySender: (MediaControl.Key) -> String? = { MediaControl.send($0) }
     /// Posts a recorded key combination; replaced by tests, like the media key.
     var keyPressSender: (KeyCombo) -> String? = { MediaControl.press($0) }
@@ -675,7 +678,10 @@ final class PanelManager: ObservableObject {
     /// Re-check grants when the app returns from System Settings and on the
     /// existing two-second housekeeping timer. The screen-capture probe runs
     /// only while there is an unresolved capture issue.
-    func refreshMacPermissionGuidance() {
+    func refreshMacPermissionGuidance(forceLocalNetworkProbe: Bool = false) {
+        if forceLocalNetworkProbe || issues.contains(where: { $0.issue == .localNetwork }) {
+            refreshLocalNetworkAuthorization(forceLocalNetworkProbe)
+        }
         refreshMediaKeyAuthorization()
         refreshSystemAudioRecordingAuthorization()
 
@@ -722,9 +728,9 @@ final class PanelManager: ObservableObject {
         }
     }
 
-    /// Local Network does not offer a preflight API. A policy-denied Bonjour
-    /// browse is the actionable failure; a returned device is proof the
-    /// permission works again and dismisses the banner on its own.
+    /// Local Network does not offer a preflight API. A browser alone can be
+    /// ready while its device endpoints are prohibited, so only a response
+    /// from a device proves the permission works again.
     func observeLocalNetworkPermission(_ observation: LocalNetworkPermissionProbe.Observation) {
         switch observation {
         case .policyDenied(let technicalDetail):
@@ -733,7 +739,9 @@ final class PanelManager: ObservableObject {
                 detail: MacPermission.localNetwork.message(for: .needsAccess),
                 technicalDetail: technicalDetail,
                 permissionState: .needsAccess)
-        case .authorized, .deviceAnswered:
+        case .browserReady:
+            break
+        case .deviceAnswered:
             resolve(.localNetwork)
         }
     }

@@ -227,6 +227,13 @@ public enum ESPDisplaySenderApp {
             manager.requestLocalNetworkAuthorization = {
                 localNetworkPermissionProbe.start()
             }
+            manager.refreshLocalNetworkAuthorization = { immediately in
+                if immediately {
+                    localNetworkPermissionProbe.start()
+                } else {
+                    localNetworkPermissionProbe.refresh()
+                }
+            }
             // This runs for interactive and LaunchAgent starts. A background
             // launch that cannot show macOS's prompt still records a denial;
             // the shared banner is waiting the next time its window is shown.
@@ -287,6 +294,20 @@ public enum ESPDisplaySenderApp {
 
         // Sessions register here; backlight sync fans out to all of them.
         let registry = SessionRegistry()
+        func reportLocalNetworkDenied(_ technicalDetail: String) {
+            Task { @MainActor in
+                panelManager.observeLocalNetworkPermission(
+                    .policyDenied(technicalDetail: technicalDetail))
+            }
+        }
+        func reportDeviceAnswer(
+            _ event: FrameSender.DeviceEvent, name: String, sessionID: UUID
+        ) {
+            Task { @MainActor in
+                panelManager.observeLocalNetworkPermission(.deviceAnswered)
+                panelManager.update(event, for: name, sessionID: sessionID)
+            }
+        }
         // Panels follow the Mac's display state - not their own content
         // activity. Screensaver and system sleep both count, so a panel goes
         // dark exactly when the Mac's own screens do.
@@ -324,7 +345,8 @@ public enum ESPDisplaySenderApp {
                 // there is nowhere better for a resolution to come from here.
                 return FrameSender(host: opts.host, port: opts.port,
                                    spacingMicros: opts.spacingMicros,
-                                   adaptivePacing: opts.adaptivePacing)
+                                   adaptivePacing: opts.adaptivePacing,
+                                   onLocalNetworkDenied: reportLocalNetworkDenied)
             }
             print("discovering devices (_espdisp._udp) ...")
             while true {
@@ -339,7 +361,8 @@ public enum ESPDisplaySenderApp {
                     return FrameSender(endpoint: device.endpoint,
                                        spacingMicros: opts.spacingMicros,
                                        adaptivePacing: opts.adaptivePacing,
-                                       geometry: geometry)
+                                       geometry: geometry,
+                                       onLocalNetworkDenied: reportLocalNetworkDenied)
                 }
                 print("no devices found yet - still browsing ...")
             }
@@ -561,11 +584,10 @@ public enum ESPDisplaySenderApp {
                         spacingMicros: streaming.spacingMicros,
                         adaptivePacing: streaming.adaptivePacing,
                         onDeviceEvent: { event in
-                            Task { @MainActor in
-                                panelManager.update(
-                                    event, for: "device", sessionID: sessionID)
-                            }
-                        }),
+                            reportDeviceAnswer(
+                                event, name: "device", sessionID: sessionID)
+                        },
+                        onLocalNetworkDenied: reportLocalNetworkDenied),
                     allowUnowned: true)
             } else {
                 // Discovery attaches sessions only to records the user added.
@@ -609,12 +631,10 @@ public enum ESPDisplaySenderApp {
                                 adaptivePacing: streaming.adaptivePacing,
                                 geometry: geometry,
                                 onDeviceEvent: { event in
-                                    Task { @MainActor in
-                                        panelManager.update(
-                                            event, for: device.name,
-                                            sessionID: sessionID)
-                                    }
-                                }),
+                                    reportDeviceAnswer(
+                                        event, name: device.name, sessionID: sessionID)
+                                },
+                                onLocalNetworkDenied: reportLocalNetworkDenied),
                             source: currentSources[device.name]?
                                 .sessionSource(defaultDisplay: opts.displayName),
                             audioDescriptor: device.metadata.audioDescriptor,
