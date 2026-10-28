@@ -1,5 +1,5 @@
 {
-  "built_at": "2026-10-27T23:24:32Z",
+  "built_at": "2026-10-28T02:13:58Z",
   "chip": "esp32s3",
   "family": "s3-4m",
   "format": 1,
@@ -27,12 +27,12 @@
     },
     {
       "address": 65536,
-      "bytes": 423120,
+      "bytes": 423184,
       "file": "app.bin",
       "role": "app",
-      "sha256": "8b6d76fe4c09e4283ed090cf69a462560b07789a0442260f0fc1d27629aa3088"
+      "sha256": "337a8c84d7acfef0592adab6f6fa295f225f5309a3301798747a5c4b0cdc9996"
     }
   ],
-  "source_commit": "98fc090210005c8f72812859e6c244c03c84864a",
+  "source_commit": "72ffff122ae6cd6128c2c2a3810c503182c28487",
   "source_dirty": false
 }
