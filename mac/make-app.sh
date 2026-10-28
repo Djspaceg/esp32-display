@@ -49,20 +49,22 @@ discard_scratch() {
 }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/signing-team.sh"
 WORKSPACE="$(cd "$HERE/.." && pwd)"
 PROJECT="$HERE/ESPDisplaySender/ESPDisplaySender.xcodeproj"
 SCHEME="ESPDisplaySender App"
-APP_PARENT="/Applications"
+if [[ "$ESPDISP_CAMERA_EXTENSION" == "1" ]]; then
+  APP_PARENT="/Applications"
+else
+  APP_PARENT="$HOME/Applications"
+fi
 APP="$APP_PARENT/ESPDisplaySender.app"
 STAGED_APP="$APP_PARENT/.ESPDisplaySender.app.staged"
-LEGACY_APP="$HOME/Applications/ESPDisplaySender.app"
+LEGACY_APP="/Applications/ESPDisplaySender.app"
 SCRATCH_PARENT="$WORKSPACE"
 DERIVED_DATA="$(mktemp -d "$SCRATCH_PARENT/.espdisplaysender.XXXXXX")"
 
-[[ -d "$APP_PARENT" ]] || {
-  echo "error: application directory is missing: $APP_PARENT" >&2
-  exit 1
-}
+mkdir -p "$APP_PARENT"
 
 cleanup() {
   discard_scratch "$DERIVED_DATA" "$SCRATCH_PARENT" "build directory"
@@ -111,6 +113,9 @@ xcodebuild \
   -destination "platform=macOS" \
   -derivedDataPath "$DERIVED_DATA" \
   -allowProvisioningUpdates \
+  DEVELOPMENT_TEAM="$ESPDISP_DEVELOPMENT_TEAM" \
+  ESPDISP_CAMERA_EXTENSION="$ESPDISP_CAMERA_EXTENSION" \
+  CODE_SIGN_ENTITLEMENTS="$([[ "$ESPDISP_CAMERA_EXTENSION" == "1" ]] && echo ESPDisplaySender.entitlements || echo ESPDisplaySender.personal.entitlements)" \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
   build
 
