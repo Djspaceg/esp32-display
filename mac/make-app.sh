@@ -123,23 +123,32 @@ codesign --verify --deep --strict --verbose=1 "$STAGED_APP"
 
 # The outgoing install is moved to the Trash rather than deleted, so a bad
 # build is recoverable and nothing recursive ever runs against /Applications.
-# The cost is that repeated rebuilds accumulate bundles in the Trash.
-if [[ -e "$APP" ]]; then
-  require_under "$APP" "$APP_PARENT" "installed app"
-  RETIRED="$HOME/.Trash/ESPDisplaySender.app.$(date +%Y%m%d-%H%M%S)"
+# Moving a running bundle is safe: its existing process keeps using the moved
+# files, while the new path is ready for the next launch. The old build number
+# makes a retired copy identifiable, and a numeric suffix preserves both when
+# the same build is installed more than once.
+retire_app() {
+  local target="$1" parent="$2" label="$3" info build retired suffix
+  [[ -e "$target" ]] || return 0
+  require_under "$target" "$parent" "$label"
+  info="$target/Contents/Info.plist"
+  build="$(plutil -extract CFBundleVersion raw -o - "$info" 2>/dev/null || true)"
+  build="${build//[^A-Za-z0-9._-]/_}"
+  [[ -n "$build" ]] || build="unknown"
+  retired="$HOME/.Trash/ESPDisplaySender.app.build-$build"
+  suffix=2
+  while [[ -e "$retired" || -L "$retired" ]]; do
+    retired="$HOME/.Trash/ESPDisplaySender.app.build-$build-$suffix"
+    ((suffix += 1))
+  done
   mkdir -p "$HOME/.Trash"
-  require_under "$RETIRED" "$HOME/.Trash" "retired app"
-  mv -- "$APP" "$RETIRED"
-  echo "previous install moved to $RETIRED"
-fi
-if [[ -e "$LEGACY_APP" ]]; then
-  require_under "$LEGACY_APP" "$HOME/Applications" "legacy installed app"
-  RETIRED="$HOME/.Trash/ESPDisplaySender.app.$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$HOME/.Trash"
-  require_under "$RETIRED" "$HOME/.Trash" "retired legacy app"
-  mv -- "$LEGACY_APP" "$RETIRED"
-  echo "legacy install moved to $RETIRED"
-fi
+  require_under "$retired" "$HOME/.Trash" "retired app"
+  mv -- "$target" "$retired"
+  echo "$label moved to $retired"
+}
+
+retire_app "$APP" "$APP_PARENT" "previous install"
+retire_app "$LEGACY_APP" "$HOME/Applications" "legacy install"
 mv -- "$STAGED_APP" "$APP"
 
 codesign --display --verbose=2 "$APP"
