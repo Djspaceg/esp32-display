@@ -26,6 +26,7 @@ BOOT_SCREEN_OUT="$TMP/test_boot_screen"
 DSI_BACKLIGHT_OUT="$TMP/test_dsi_backlight"
 COPROCESSOR_OUT="$TMP/test_coprocessor_update"
 STREAM_UPDATE_OUT="$TMP/test_stream_update"
+UI_PRIMITIVES_OUT="$TMP/test_ui_primitives"
 CXXFLAGS=(
   -std=c++17 -Wall -Wextra -Werror
   -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -38,6 +39,10 @@ CXXFLAGS=(
 clang++ "${CXXFLAGS[@]}" \
   -o "$OUT" "$HERE/test_band_protocol.cpp"
 "$OUT"
+
+clang++ "${CXXFLAGS[@]}" \
+  -o "$UI_PRIMITIVES_OUT" "$HERE/test_ui_primitives.cpp"
+"$UI_PRIMITIVES_OUT"
 
 clang++ "${CXXFLAGS[@]}" \
   -DCONFIG_IDF_TARGET_ESP32S3 \
