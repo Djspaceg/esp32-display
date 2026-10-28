@@ -53,6 +53,7 @@ enum AppIssue: String, CaseIterable, Sendable {
     case wifiPresetSync
     case accessibility
     case systemAudioRecording
+    case localNetwork
 
     var title: String {
         switch self {
@@ -62,6 +63,7 @@ enum AppIssue: String, CaseIterable, Sendable {
         case .wifiPresetSync: return "WiFi presets could not be copied"
         case .accessibility: return MacPermission.accessibility.title
         case .systemAudioRecording: return MacPermission.systemAudioRecording.title
+        case .localNetwork: return MacPermission.localNetwork.title
         }
     }
 
@@ -73,6 +75,7 @@ enum AppIssue: String, CaseIterable, Sendable {
         case .screenRecording: return .screenRecording
         case .accessibility: return .accessibility
         case .systemAudioRecording: return .systemAudioRecording
+        case .localNetwork: return .localNetwork
         case .deviceConfig, .persistence, .wifiPresetSync: return nil
         }
     }

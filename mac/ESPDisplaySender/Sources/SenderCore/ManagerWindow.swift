@@ -355,6 +355,7 @@ private struct IssueBanner: View {
                     }
                     if issue.permissionState == .grantedNeedsRelaunch
                         || permission == .screenRecording
+                        || permission == .localNetwork
                     {
                         Button("Relaunch ESPDisplaySender", action: onRelaunch)
                             .controlSize(.small)

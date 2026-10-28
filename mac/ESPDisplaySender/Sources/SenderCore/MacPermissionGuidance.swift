@@ -8,12 +8,14 @@ enum MacPermission: Equatable, Sendable {
     case screenRecording
     case accessibility
     case systemAudioRecording
+    case localNetwork
 
     var title: String {
         switch self {
         case .screenRecording: return "Screen Recording permission needed"
         case .accessibility: return "Accessibility permission needed"
         case .systemAudioRecording: return "System Audio Recording permission needed"
+        case .localNetwork: return "Local Network permission needed"
         }
     }
 
@@ -25,6 +27,9 @@ enum MacPermission: Equatable, Sendable {
         case .screenRecording, .systemAudioRecording:
             return URL(string: "x-apple.systempreferences:"
                 + "com.apple.preference.security?Privacy_ScreenCapture")!
+        case .localNetwork:
+            return URL(string: "x-apple.systempreferences:"
+                + "com.apple.preference.security?Privacy_LocalNetwork")!
         }
     }
 
@@ -36,6 +41,8 @@ enum MacPermission: Equatable, Sendable {
             return "Open Accessibility Settings"
         case .systemAudioRecording:
             return "Open System Audio Recording Settings"
+        case .localNetwork:
+            return "Open Local Network Settings"
         }
     }
 
@@ -62,6 +69,12 @@ enum MacPermission: Equatable, Sendable {
                 "Turn on this copy of ESPDisplaySender.",
                 "Resume sending Mac sound to the device.",
             ]
+        case .localNetwork:
+            return [
+                "Open Local Network Settings.",
+                "Turn on ESPDisplaySender, or turn it off and on again if it is already on.",
+                "Relaunch ESPDisplaySender.",
+            ]
         }
     }
 
@@ -87,6 +100,10 @@ enum MacPermission: Equatable, Sendable {
                 + "silence. A rebuilt or re-signed app needs permission again."
         case (.systemAudioRecording, .grantedNeedsRelaunch):
             return "Permission granted - resume sending Mac sound to the device."
+        case (.localNetwork, .needsAccess):
+            return "ESPDisplaySender isn't allowed to reach devices on your local network."
+        case (.localNetwork, .grantedNeedsRelaunch):
+            return "Permission granted - relaunch to reach devices on your local network."
         }
     }
 }

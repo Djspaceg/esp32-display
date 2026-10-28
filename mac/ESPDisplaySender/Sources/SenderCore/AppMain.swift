@@ -133,6 +133,7 @@ func parseOptions() -> Options {
 private enum RetainedComponents {
     static var managerWindow: ManagerWindowController?
     static var applicationDelegate: ESPDisplayApplicationDelegate?
+    static var localNetworkPermissionProbe: LocalNetworkPermissionProbe?
 }
 
 /// Process entry point. The executable target's main.swift calls this and
@@ -218,6 +219,18 @@ public enum ESPDisplaySenderApp {
             let manager = PanelManager(
                 settings: overrides, defaultDisplayName: opts.displayName,
                 coversScreenDevices: !opts.listDisplays && !opts.listWindows)
+            let localNetworkPermissionProbe = LocalNetworkPermissionProbe { observation in
+                Task { @MainActor in
+                    manager.observeLocalNetworkPermission(observation)
+                }
+            }
+            manager.requestLocalNetworkAuthorization = {
+                localNetworkPermissionProbe.start()
+            }
+            // This runs for interactive and LaunchAgent starts. A background
+            // launch that cannot show macOS's prompt still records a denial;
+            // the shared banner is waiting the next time its window is shown.
+            localNetworkPermissionProbe.start()
             if !opts.listDisplays && !opts.listWindows {
                 manager.startMacAudioRouting()
             }
@@ -232,6 +245,7 @@ public enum ESPDisplaySenderApp {
             NSApplication.shared.delegate = delegate
             RetainedComponents.managerWindow = window
             RetainedComponents.applicationDelegate = delegate
+            RetainedComponents.localNetworkPermissionProbe = localNetworkPermissionProbe
             return manager
         }
 

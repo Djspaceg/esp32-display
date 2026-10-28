@@ -55,10 +55,38 @@ final class MacPermissionGuidanceTests: XCTestCase {
             MacPermission.screenRecording,
             .accessibility,
             .systemAudioRecording,
+            .localNetwork,
         ] {
             XCTAssertFalse(permission.settingsButtonTitle.isEmpty)
-            XCTAssertEqual(permission.steps.count, 4)
+            XCTAssertTrue((3...4).contains(permission.steps.count))
             XCTAssertFalse(permission.message(for: .needsAccess).isEmpty)
         }
+    }
+
+    func testLocalNetworkPolicyDeniedDNSCodeIsRecognized() {
+        XCTAssertTrue(
+            LocalNetworkPermissionProbe.isPolicyDeniedDNSServiceError(-65_570))
+        XCTAssertFalse(
+            LocalNetworkPermissionProbe.isPolicyDeniedDNSServiceError(-65_569))
+    }
+
+    @MainActor
+    func testLocalNetworkBannerClearsWhenABrowseBecomesReadyWithoutADevice() {
+        let manager = PanelManager(
+            previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+
+        manager.observeLocalNetworkPermission(
+            .policyDenied(technicalDetail: "PolicyDenied(-65570)"))
+        XCTAssertEqual(
+            manager.issues.first?.detail,
+            "ESPDisplaySender isn't allowed to reach devices on your local network.")
+        XCTAssertEqual(manager.issues.first?.permissionState, .needsAccess)
+        manager.observeLocalNetworkPermission(.authorized)
+        XCTAssertFalse(manager.issues.contains { $0.issue == .localNetwork })
+    }
+
+    func testOldBrowserCallbacksAreIgnoredAfterANewAccessRequest() {
+        XCTAssertFalse(LocalNetworkPermissionProbe.isCurrent(1, currentGeneration: 2))
+        XCTAssertTrue(LocalNetworkPermissionProbe.isCurrent(2, currentGeneration: 2))
     }
 }

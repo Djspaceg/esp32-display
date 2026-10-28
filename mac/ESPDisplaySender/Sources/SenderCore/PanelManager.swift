@@ -46,6 +46,9 @@ final class PanelManager: ObservableObject {
     var requestMediaKeyAuthorization: () -> Void = {
         MediaControl.requestAuthorizationOnce()
     }
+    /// Re-starts the Bonjour permission probe. Installed by the app bootstrap;
+    /// tests and previews leave it inert.
+    var requestLocalNetworkAuthorization: () -> Void = {}
     var mediaKeySender: (MediaControl.Key) -> String? = { MediaControl.send($0) }
     /// Posts a recorded key combination; replaced by tests, like the media key.
     var keyPressSender: (KeyCombo) -> String? = { MediaControl.press($0) }
@@ -712,8 +715,26 @@ final class PanelManager: ObservableObject {
             SystemAudioAccess.system.request? { [weak self] _ in
                 Task { @MainActor in self?.refreshMacPermissionGuidance() }
             }
+        case .localNetwork:
+            requestLocalNetworkAuthorization()
         case nil:
             break
+        }
+    }
+
+    /// Local Network does not offer a preflight API. A policy-denied Bonjour
+    /// browse is the actionable failure; a returned device is proof the
+    /// permission works again and dismisses the banner on its own.
+    func observeLocalNetworkPermission(_ observation: LocalNetworkPermissionProbe.Observation) {
+        switch observation {
+        case .policyDenied(let technicalDetail):
+            report(
+                .localNetwork,
+                detail: MacPermission.localNetwork.message(for: .needsAccess),
+                technicalDetail: technicalDetail,
+                permissionState: .needsAccess)
+        case .authorized, .deviceAnswered:
+            resolve(.localNetwork)
         }
     }
 
