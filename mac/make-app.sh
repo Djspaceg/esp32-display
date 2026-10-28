@@ -49,18 +49,13 @@ discard_scratch() {
 }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-source "$HERE/signing-team.sh"
 WORKSPACE="$(cd "$HERE/.." && pwd)"
 PROJECT="$HERE/ESPDisplaySender/ESPDisplaySender.xcodeproj"
 SCHEME="ESPDisplaySender App"
-if [[ "$ESPDISP_CAMERA_EXTENSION" == "1" ]]; then
-  APP_PARENT="/Applications"
-else
-  APP_PARENT="$HOME/Applications"
-fi
+APP_PARENT="/Applications"
 APP="$APP_PARENT/ESPDisplaySender.app"
 STAGED_APP="$APP_PARENT/.ESPDisplaySender.app.staged"
-LEGACY_APP="/Applications/ESPDisplaySender.app"
+LEGACY_APP="$HOME/Applications/ESPDisplaySender.app"
 SCRATCH_PARENT="$WORKSPACE"
 DERIVED_DATA="$(mktemp -d "$SCRATCH_PARENT/.espdisplaysender.XXXXXX")"
 
@@ -113,9 +108,6 @@ xcodebuild \
   -destination "platform=macOS" \
   -derivedDataPath "$DERIVED_DATA" \
   -allowProvisioningUpdates \
-  DEVELOPMENT_TEAM="$ESPDISP_DEVELOPMENT_TEAM" \
-  ESPDISP_CAMERA_EXTENSION="$ESPDISP_CAMERA_EXTENSION" \
-  CODE_SIGN_ENTITLEMENTS="$([[ "$ESPDISP_CAMERA_EXTENSION" == "1" ]] && echo ESPDisplaySender.entitlements || echo ESPDisplaySender.personal.entitlements)" \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
   build
 

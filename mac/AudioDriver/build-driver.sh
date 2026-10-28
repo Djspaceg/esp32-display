@@ -11,11 +11,15 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-source "$HERE/../signing-team.sh"
+PROJECT_FILE="$HERE/../ESPDisplaySender/ESPDisplaySender.xcodeproj/project.pbxproj"
 OUT="$HERE/build"
 BUNDLE="$OUT/ESPDisplayAudio.driver"
 
-TEAM="$ESPDISP_DEVELOPMENT_TEAM"
+TEAM="$(sed -n 's/.*DEVELOPMENT_TEAM = \([A-Z0-9]*\);.*/\1/p' "$PROJECT_FILE" | sort -u)"
+if [[ -z "$TEAM" || "$TEAM" == *$'\n'* ]]; then
+  echo "error: expected one DEVELOPMENT_TEAM in $PROJECT_FILE, found: ${TEAM:-none}" >&2
+  exit 1
+fi
 
 mkdir -p "$OUT"
 # Compiled under its final name inside a scratch folder, then moved into

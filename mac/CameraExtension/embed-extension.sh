@@ -5,10 +5,6 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-if [[ "${ESPDISP_CAMERA_EXTENSION:-0}" != "1" ]]; then
-  echo "camera extension omitted for this signing team"
-  exit 0
-fi
 APP="${CODESIGNING_FOLDER_PATH:?CODESIGNING_FOLDER_PATH is not set}"
 DESTINATION="$APP/Contents/Library/SystemExtensions/ESPDisplayCamera.systemextension"
 EXECUTABLE="$DESTINATION/Contents/MacOS/ESPDisplayCamera"
