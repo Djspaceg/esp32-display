@@ -15,6 +15,7 @@ static const uint8_t FRAME_FRAGMENT = 0x80;
 static const size_t COMMAND_BYTES = 8;
 static const size_t FRAME_HEADER_BYTES = 14;
 static const size_t MAX_FRAGMENT_PAYLOAD = 1200;
+static const size_t MAX_FRAGMENTS = 256;
 
 enum class Resolution : uint8_t {
   Qvga = 1,
@@ -57,6 +58,7 @@ inline size_t writeFrameHeader(uint8_t *out, size_t capacity,
                                uint16_t fragmentIndex,
                                uint16_t fragmentCount) {
   if (capacity < FRAME_HEADER_BYTES || fragmentCount == 0 ||
+      fragmentCount > MAX_FRAGMENTS ||
       fragmentIndex >= fragmentCount) {
     return 0;
   }

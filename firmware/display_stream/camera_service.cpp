@@ -108,7 +108,7 @@ void serviceCamera() {
   const size_t fragments =
       (frame->len + cameraproto::MAX_FRAGMENT_PAYLOAD - 1) /
       cameraproto::MAX_FRAGMENT_PAYLOAD;
-  if (fragments == 0 || fragments > UINT16_MAX) {
+  if (fragments == 0 || fragments > cameraproto::MAX_FRAGMENTS) {
     esp_camera_fb_return(frame);
     return;
   }
