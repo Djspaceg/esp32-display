@@ -250,8 +250,9 @@ int main() {
             if (x < 0 || y < 0 || x >= w || y >= h) continue;
             const bool underBar = y >= l.bar.y && y < l.bar.y + l.bar.h &&
                                   x >= l.bar.x && x < l.bar.x + l.bar.w;
-            const bool underText =
-                y >= l.textY - 1 && y <= l.textY + 7 * s + 1;
+            int textY0 = 0, textY1 = 0;
+            bootscreenmodel::textRows(l, textY0, textY1);
+            const bool underText = y >= textY0 && y < textY1;
             if (underBar || underText) continue;
             CHECK(pixelAt(screen, w, x, y) == imagePixel(ix, iy));
           }
@@ -268,7 +269,9 @@ int main() {
             bootscreenmodel::BAR_READY);
       // Some of the status text is drawn, in the text rows.
       int lit = 0;
-      for (int y = l.textY; y < l.textY + 7 * s; ++y) {
+      int textY0 = 0, textY1 = 0;
+      bootscreenmodel::textRows(l, textY0, textY1);
+      for (int y = textY0; y < textY1; ++y) {
         for (int x = 0; x < w; ++x) {
           lit += pixelAt(screen, w, x, y) == bootscreenmodel::TEXT_COLOR;
         }

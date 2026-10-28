@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "glyph_draw.h"
 #include "wifi_selector_model.h"
 
 namespace wifistatus {
@@ -35,6 +36,8 @@ enum Row : uint8_t {
 // caller shortens anything longer).
 struct Layout {
   uint8_t scale[ROW_COUNT] = {};
+  TextStyle style[ROW_COUNT] = {};
+  int16_t rowHeight[ROW_COUNT] = {};
   int16_t y[ROW_COUNT] = {};
   int16_t spanX[ROW_COUNT] = {};
   int16_t spanWidth[ROW_COUNT] = {};
@@ -46,10 +49,13 @@ struct Layout {
   int16_t top = 0;
   int16_t bottom = 0;
   bool fits = false;
+  bool marquee[ROW_COUNT] = {};
 
   size_t maxChars(Row row) const {
     if (scale[row] == 0) return 0;
-    return (size_t)(spanWidth[row] / (6 * scale[row]));
+    // A compatibility helper for callers choosing among fixed hint strings.
+    // Actual layout below always uses textWidth() rather than this estimate.
+    return (size_t)(spanWidth[row] / 3);
   }
 };
 
@@ -89,11 +95,23 @@ inline void rowSpan(int width, int height, bool roundDisplay, int y0, int y1,
   spanWidth = 2 * half;
 }
 
-// lengths[row] is the length of the row's text, 0 for a row with none (no
-// battery on this board). The network and name rows may be shortened to fit;
-// the others hold short, bounded text.
+inline TextStyle styleFor(Row row, int width, int height, int scale) {
+  if (useClassicText(width, height)) return {TextFamily::Classic, 1};
+  if (row == ROW_SIGNAL) {
+    if (scale >= 8) return {TextFamily::Mono, 40};
+    if (scale >= 3) return {TextFamily::Mono, 24};
+    return {TextFamily::Mono, 12};
+  }
+  if (scale >= 3) return {TextFamily::Small, 18};
+  if (scale >= 2) return {TextFamily::Small, 13};
+  return {TextFamily::Small, 9};
+}
+
+// Every row's actual text. Network and name rows may marquee where a legal
+// SSID or panel name is wider than even the smallest embedded face; no bytes
+// are dropped or replaced with an ellipsis.
 inline Layout layout(int width, int height, bool roundDisplay,
-                     const size_t lengths[ROW_COUNT]) {
+                     const char *const text[ROW_COUNT]) {
   const int margin = wifiselector::safeMargin(width, height, roundDisplay);
   const wifiselector::Rect button =
       wifiselector::surveyPresetButton(width, height, roundDisplay);
@@ -108,15 +126,28 @@ inline Layout layout(int width, int height, bool roundDisplay,
                : shortSide >= 240 ? 2
                                   : 1;
   int signal = 4 * detail;
-  bool hint = lengths[ROW_HINT] > 0;
-  bool quality = lengths[ROW_QUALITY] > 0;
+  bool hint = text[ROW_HINT] != nullptr && text[ROW_HINT][0] != 0;
+  bool quality = text[ROW_QUALITY] != nullptr && text[ROW_QUALITY][0] != 0;
+  bool battery = text[ROW_BATTERY] != nullptr && text[ROW_BATTERY][0] != 0;
+  bool firmware = text[ROW_FIRMWARE] != nullptr && text[ROW_FIRMWARE][0] != 0;
+  bool name = text[ROW_NAME] != nullptr && text[ROW_NAME][0] != 0;
+  bool address = text[ROW_ADDRESS] != nullptr && text[ROW_ADDRESS][0] != 0;
   // Shrinks only, so this ends: each pass either fits or gives something up.
   for (;;) {
     uint8_t want[ROW_COUNT] = {};
     for (int row = 0; row < ROW_COUNT; ++row) {
-      if (lengths[row] > 0) want[row] = (uint8_t)detail;
+      if (text[row] != nullptr && text[row][0] != 0) {
+        want[row] = (uint8_t)detail;
+      }
     }
-    want[ROW_SIGNAL] = lengths[ROW_SIGNAL] > 0 ? (uint8_t)signal : 0;
+    want[ROW_SIGNAL] =
+        text[ROW_SIGNAL] != nullptr && text[ROW_SIGNAL][0] != 0
+            ? (uint8_t)signal
+            : 0;
+    if (!battery) want[ROW_BATTERY] = 0;
+    if (!firmware) want[ROW_FIRMWARE] = 0;
+    if (!name) want[ROW_NAME] = 0;
+    if (!address) want[ROW_ADDRESS] = 0;
     if (!quality) want[ROW_QUALITY] = 0;
     want[ROW_HINT] = hint ? (uint8_t)(detail > 1 ? detail - 1 : 1) : 0;
 
@@ -129,7 +160,9 @@ inline Layout layout(int width, int height, bool roundDisplay,
     for (int pass = 0; pass < 64; ++pass) {
       // A third of a detail glyph's height between rows, and never under
       // 4 px: at 1 px per glyph scale the 1.75" round's lines ran together.
-      int gap = (7 * detail + 2) / 3;
+      const TextStyle detailStyle =
+          styleFor(ROW_ADDRESS, width, height, detail);
+      int gap = textHeight(detailStyle) / 3;
       if (gap < 4) gap = 4;
       const bool divider = want[ROW_ADDRESS] > 0 &&
                            (want[ROW_SIGNAL] > 0 || want[ROW_QUALITY] > 0);
@@ -137,7 +170,7 @@ inline Layout layout(int width, int height, bool roundDisplay,
       int rows = 0;
       for (int row = 0; row < ROW_COUNT; ++row) {
         if (want[row] == 0) continue;
-        total += 7 * want[row];
+        total += textHeight(styleFor((Row)row, width, height, want[row]));
         ++rows;
       }
       if (rows > 1) total += gap * (rows - 1);
@@ -150,6 +183,7 @@ inline Layout layout(int width, int height, bool roundDisplay,
       for (int row = 0; row < ROW_COUNT; ++row) {
         result.scale[row] = want[row];
         if (want[row] == 0) continue;
+        result.style[row] = styleFor((Row)row, width, height, want[row]);
         if (divider && row == ROW_ADDRESS) {
           result.dividerY = (int16_t)y;
           int x = 0, span = 0;
@@ -159,18 +193,20 @@ inline Layout layout(int width, int height, bool roundDisplay,
           result.dividerWidth = (int16_t)(span - 2 * (span / 6));
           y += gap + 1;
         }
-        const int rowHeight = 7 * want[row];
+        const int rowHeight = textHeight(result.style[row]);
         int x = 0, span = 0;
         rowSpan(width, height, roundDisplay, y, y + rowHeight, x, span);
         result.y[row] = (int16_t)y;
+        result.rowHeight[row] = (int16_t)rowHeight;
         result.spanX[row] = (int16_t)x;
         result.spanWidth[row] = (int16_t)span;
-        const bool shortened = row == ROW_NETWORK || row == ROW_NAME;
-        const size_t needed = shortened && lengths[row] > 16 ? 16 : lengths[row];
-        if (want[row] > 1 && (size_t)(span / (6 * want[row])) < needed) {
+        const int needed = textWidth(text[row], result.style[row]);
+        if (needed > span && want[row] > 1) {
           --want[row];
           shrank = true;
         }
+        result.marquee[row] = needed > span &&
+                              (row == ROW_NETWORK || row == ROW_NAME);
         y += rowHeight + gap;
       }
       if (!shrank) break;
@@ -178,20 +214,45 @@ inline Layout layout(int width, int height, bool roundDisplay,
     if (result.fits) return result;
     // The meter gives way first, then the detail rows, and how to close the
     // screen goes only when nothing else can.
-    if (signal > 2 * detail && signal > 3) {
+    if (battery) {
+      // The battery line is valuable but optional. On 128px glass it yields
+      // before the network, live meter, address, and identity rather than
+      // squeezing those rows into unreadable overlap.
+      battery = false;
+    } else if (hint) {
+      hint = false;
+    } else if (quality) {
+      quality = false;
+    } else if (firmware) {
+      firmware = false;
+    } else if (name) {
+      name = false;
+    } else if (address) {
+      address = false;
+    } else if (signal > 2 * detail && signal > 3) {
       --signal;
     } else if (detail > 1) {
       --detail;
     } else if (signal > 2) {
       --signal;
-    } else if (hint) {
-      hint = false;
-    } else if (quality) {
-      quality = false;
     } else {
       return result;
     }
   }
+}
+
+// Kept for the host tests and callers that only have bounded lengths. Actual
+// firmware uses the text overload above, so it measures the real glyphs.
+inline Layout layout(int width, int height, bool roundDisplay,
+                     const size_t lengths[ROW_COUNT]) {
+  char values[ROW_COUNT][33] = {};
+  const char *text[ROW_COUNT] = {};
+  for (int row = 0; row < ROW_COUNT; ++row) {
+    const size_t length = lengths[row] > 32 ? 32 : lengths[row];
+    for (size_t i = 0; i < length; ++i) values[row][i] = 'W';
+    text[row] = values[row];
+  }
+  return layout(width, height, roundDisplay, text);
 }
 
 }  // namespace wifistatus

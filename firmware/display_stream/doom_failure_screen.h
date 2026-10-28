@@ -85,7 +85,10 @@ inline void compose(uint8_t *buf, int width, int height, bool roundDisplay,
   const int textWidth = width - 2 * margin;
   int scale = 2;
   if ((int)strlen(headline) * 6 * scale > textWidth) scale = 1;
-  const int columns = textWidth / (6 * scale);
+  // IBM Plex Sans has proportional widths. A conservative average keeps a
+  // word-wrapped reason inside this card; final placement still uses the
+  // renderer's measured width below.
+  const int columns = textWidth / (scale == 1 ? 8 : 12);
 
   char lines[MAX_REASON_LINES][LINE_CAP];
   const int reasonLines =
@@ -99,8 +102,9 @@ inline void compose(uint8_t *buf, int width, int height, bool roundDisplay,
   if (y < margin) y = margin;
 
   auto centered = [&](const char *text, int atY) {
-    const int x = (width - (int)strlen(text) * 6 * scale) / 2;
-    drawOutlinedText(buf, width, height, x, atY, text, scale);
+    const TextStyle style = smallTextStyle(width, height);
+    const int x = (width - ::textWidth(text, style)) / 2;
+    drawOutlinedText(buf, width, height, x, atY, text, style);
   };
   centered(headline, y);
   y += lineH * 2;

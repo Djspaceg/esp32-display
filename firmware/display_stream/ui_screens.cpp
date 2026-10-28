@@ -51,7 +51,7 @@ static char infoBarText[40] = {0};
 // (which has to reproduce the exact same draw, not just some legible one)
 // never disagrees with showInfoBar about how big the text is - both go
 // through infoBarGlyphScale() below rather than each picking their own.
-static int infoBarScale = 2;
+static TextStyle infoBarStyle = {TextFamily::Small, 9};
 
 bool infoBarActive() {
   return infoBarUntil != 0 && (int32_t)(millis() - infoBarUntil) < 0;
@@ -64,12 +64,13 @@ bool infoBarActive() {
 // which is what the very first hardware pass of this feature showed - this
 // mirrors drawIdleScreen's own scale-fallback exactly rather than inventing
 // a second policy for "how big should on-device text be".
-static int infoBarGlyphScale(const char *text, int frameWidth) {
-  int scale = 2;
-  if ((int)strlen(text) * 6 * scale > frameWidth - 2 * 4) {
-    scale = 1;
+static TextStyle infoBarTextStyle(const char *text, int frameWidth,
+                                  int frameHeight) {
+  TextStyle style = smallTextStyle(frameWidth, frameHeight);
+  if (textWidth(text, style) > frameWidth - 8 && style.pixels > 9) {
+    style = {TextFamily::Small, 9};
   }
-  return scale;
+  return style;
 }
 
 // Compose the idle card over the (pristine) last frame in bufA and push it.
@@ -147,10 +148,11 @@ void drawIdleScreen() {
     if (showBattery) lines[lineCount++] = lineBattery;
   }
 
-  size_t maxLen = 0;
+  TextStyle style = smallTextStyle(w, hgt);
+  int blockW = 0;
   for (int i = 0; i < lineCount; i++) {
-    size_t n = strlen(lines[i]);
-    if (n > maxLen) maxLen = n;
+    const int lineW = textWidth(lines[i], style);
+    if (lineW > blockW) blockW = lineW;
   }
   // On round glass the corners of the framebuffer are not on the panel, so
   // the card keeps to the inscribed square: an extra inset of
@@ -163,13 +165,17 @@ void drawIdleScreen() {
   }
   // Prefer the larger text, but drop a size rather than run off the panel:
   // pushed lines can be far longer than the three status lines ever are.
-  int scale = 2;
-  if ((int)maxLen * 6 * scale > w - 2 * margin ||
-      lineCount * 9 * scale > hgt - 2 * margin) {
-    scale = 1;
+  if ((blockW > w - 2 * margin ||
+       lineCount * textLineHeight(style) > hgt - 2 * margin) &&
+      style.family == TextFamily::Small && style.pixels > 9) {
+    style = {TextFamily::Small, 9};
+    blockW = 0;
+    for (int i = 0; i < lineCount; i++) {
+      const int lineW = textWidth(lines[i], style);
+      if (lineW > blockW) blockW = lineW;
+    }
   }
-  const int lineH = 9 * scale;  // 7px glyph + spacing
-  int blockW = (int)maxLen * 6 * scale;
+  const int lineH = textLineHeight(style);
   int blockH = lineCount * lineH;
 
   // Pseudo-random position within margins; esp_random is hardware RNG.
@@ -182,7 +188,7 @@ void drawIdleScreen() {
 
   memcpy(bufB, bufA, FRAME_BYTES);  // bufA stays pristine for the overlay
   for (int i = 0; i < lineCount; i++) {
-    drawOutlinedText(bufB, w, hgt, x, y + i * lineH, lines[i], scale);
+    drawOutlinedText(bufB, w, hgt, x, y + i * lineH, lines[i], style);
   }
 
   if (queuePanelBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
@@ -217,20 +223,17 @@ static uint16_t surveyQualityColor(bool connected, int rssi) {
   return 0xF800;
 }
 
-// text, cut to maxChars with "..." marking the cut, and with anything the
-// 5x7 font cannot show (an SSID is bytes, not ASCII) as '?'.
+// Copy printable text for the panel atlas. Callers lay it out with measured
+// glyph advances; this deliberately never replaces a tail with an ellipsis.
 static void fitStatusText(char *out, size_t capacity, const char *text,
-                          size_t maxChars) {
+                          size_t) {
   if (capacity == 0) return;
   size_t length = strlen(text);
-  size_t copied = length;
-  if (copied > maxChars) copied = maxChars;
-  if (copied > capacity - 1) copied = capacity - 1;
+  size_t copied = length < capacity - 1 ? length : capacity - 1;
   for (size_t i = 0; i < copied; ++i) {
     const uint8_t byte = (uint8_t)text[i];
     out[i] = byte >= 0x20 && byte <= 0x7E ? (char)byte : '?';
   }
-  if (length > copied && copied >= 3) memcpy(out + copied - 3, "...", 3);
   out[copied] = 0;
 }
 
@@ -272,32 +275,33 @@ static int wifiScreenMargin(int width, int height) {
 }
 
 static void drawCenteredWifiText(int width, int height, int y,
-                                 const char *text, int scale) {
-  const int textWidth = (int)strlen(text) * 6 * scale;
-  drawOutlinedText(bufB, width, height, (width - textWidth) / 2, y, text,
-                   scale);
+                                 const char *text, TextStyle style) {
+  const int lineW = textWidth(text, style);
+  drawOutlinedText(bufB, width, height, (width - lineW) / 2, y, text, style);
 }
 
-static int wifiTextScale(const char *text, const wifiselector::Rect &rect,
-                         int preferred) {
-  int scale = preferred;
-  while (scale > 1 &&
-         ((int)strlen(text) * 6 * scale > rect.width - 8 ||
-          7 * scale > rect.height - 6)) {
-    --scale;
+static TextStyle wifiTextStyle(int width, int height,
+                               const wifiselector::Rect &rect,
+                               const char *text, bool heading) {
+  TextStyle style = heading ? largeTextStyle(width, height)
+                            : smallTextStyle(width, height);
+  if ((textWidth(text, style) > rect.width - 8 ||
+       textHeight(style) > rect.height - 6) &&
+      style.family != TextFamily::Classic) {
+    style = smallTextStyle(width, height);
   }
-  return scale;
+  return style;
 }
 
 static void drawCenteredWifiTextInRect(int width, int height,
                                        const wifiselector::Rect &rect,
-                                       const char *text, int preferredScale) {
-  const int scale = wifiTextScale(text, rect, preferredScale);
-  const int textWidth = (int)strlen(text) * 6 * scale;
-  const int textHeight = 7 * scale;
+                                       const char *text, bool heading) {
+  const TextStyle style = wifiTextStyle(width, height, rect, text, heading);
+  const int lineW = textWidth(text, style);
+  const int lineH = textHeight(style);
   drawOutlinedText(bufB, width, height,
-                   rect.x + (rect.width - textWidth) / 2,
-                   rect.y + (rect.height - textHeight) / 2, text, scale);
+                   rect.x + (rect.width - lineW) / 2,
+                   rect.y + (rect.height - lineH) / 2, text, style);
 }
 
 static void drawWifiControl(int width, int height,
@@ -312,7 +316,7 @@ static void drawWifiControl(int width, int height,
     fillRect565(bufB, width, height, rect.x + 2, rect.y + 2, rect.width - 4,
                 rect.height - 4, fill);
   }
-  drawCenteredWifiTextInRect(width, height, rect, label, 2);
+  drawCenteredWifiTextInRect(width, height, rect, label, true);
 }
 
 void drawWifiSelectorScreen() {
@@ -342,30 +346,32 @@ void drawWifiSelectorScreen() {
   }
   if (touchAvailable) {
     drawWifiControl(width, height, layout.back, "BACK", false);
-    drawCenteredWifiTextInRect(width, height, layout.title, title, 2);
+    drawCenteredWifiTextInRect(width, height, layout.title, title, true);
   } else {
     const wifiselector::Rect titleRect = {
         layout.back.x, layout.back.y,
         (int16_t)(layout.title.x + layout.title.width - layout.back.x),
         layout.back.height};
-    drawCenteredWifiTextInRect(width, height, titleRect, title, 2);
+    drawCenteredWifiTextInRect(width, height, titleRect, title, true);
   }
 
   if (wifiSelectorMessage != nullptr) {
-    int messageScale = 2;
-    if ((int)strlen(wifiSelectorMessage) * 6 * messageScale >
-        width - 2 * margin) {
-      messageScale = 1;
+    TextStyle messageStyle = smallTextStyle(width, height);
+    if (textWidth(wifiSelectorMessage, messageStyle) > width - 2 * margin) {
+      messageStyle = {TextFamily::Small, 9};
     }
-    drawCenteredWifiText(width, height, (height - 9 * messageScale) / 2,
-                         wifiSelectorMessage, messageScale);
+    drawCenteredWifiText(width, height,
+                         (height - textHeight(messageStyle)) / 2,
+                         wifiSelectorMessage, messageStyle);
   } else if (wifiSelectorCount == 0) {
-    drawCenteredWifiText(width, height, height / 2 - 12, "NO SAVED PRESETS",
-                         1);
-    drawCenteredWifiText(width, height, height / 2 + 6, "ADD THEM IN APP",
-                         1);
+    const TextStyle emptyStyle = smallTextStyle(width, height);
+    drawCenteredWifiText(width, height,
+                         height / 2 - textLineHeight(emptyStyle),
+                         "NO SAVED PRESETS", emptyStyle);
+    drawCenteredWifiText(width, height, height / 2 + 2, "ADD THEM IN APP",
+                         emptyStyle);
   } else {
-    const int listScale = width >= 240 ? 2 : 1;
+    const TextStyle listStyle = smallTextStyle(width, height);
     for (size_t row = 0; row < layout.visibleCount; ++row) {
       const size_t i = layout.firstVisible + row;
       const bool selected = i == wifiSelectorIndex;
@@ -382,8 +388,7 @@ void drawWifiSelectorScreen() {
       char ssid[33];
       size_t ssidCapacity = sizeof(ssid);
       const int prefixChars = wifiSelectorSlots[i] >= 10 ? 5 : 4;
-      const int maxLabelChars =
-          (rowRect.width - 12) / (6 * listScale);
+      const int maxLabelChars = (rowRect.width - 12) / 5;
       if (maxLabelChars > prefixChars &&
           (size_t)(maxLabelChars - prefixChars + 1) < ssidCapacity) {
         ssidCapacity = (size_t)(maxLabelChars - prefixChars + 1);
@@ -393,10 +398,9 @@ void drawWifiSelectorScreen() {
       char line[48];
       snprintf(line, sizeof(line), "%c%u %s", active ? '*' : ' ',
                (unsigned)wifiSelectorSlots[i], ssid);
-      const int textY =
-          rowRect.y + (rowRect.height - 7 * listScale) / 2;
+      const int textY = rowRect.y + (rowRect.height - textHeight(listStyle)) / 2;
       drawOutlinedText(bufB, width, height, rowRect.x + 6, textY, line,
-                       listScale);
+                       listStyle);
     }
   }
 
@@ -451,15 +455,16 @@ void drawBootMenuScreen(const char *const *labels, size_t count,
       layout.back.x, layout.back.y,
       (int16_t)(layout.title.x + layout.title.width - layout.back.x),
       layout.back.height};
-  drawCenteredWifiTextInRect(width, height, titleRect, title, 2);
+  drawCenteredWifiTextInRect(width, height, titleRect, title, true);
 
   if (message != nullptr) {
-    int messageScale = 2;
-    if ((int)strlen(message) * 6 * messageScale > width - 2 * margin) {
-      messageScale = 1;
+    TextStyle messageStyle = smallTextStyle(width, height);
+    if (textWidth(message, messageStyle) > width - 2 * margin) {
+      messageStyle = {TextFamily::Small, 9};
     }
-    drawCenteredWifiText(width, height, (height - 9 * messageScale) / 2,
-                         message, messageScale);
+    drawCenteredWifiText(width, height,
+                         (height - textHeight(messageStyle)) / 2,
+                         message, messageStyle);
   } else {
     for (size_t row = 0; row < layout.visibleCount; ++row) {
       const size_t i = layout.firstVisible + row;
@@ -471,7 +476,7 @@ void drawBootMenuScreen(const char *const *labels, size_t count,
                     rowRect.width - 4, rowRect.height - 4,
                     i == selected ? 0x03EF : 0x1082);
       }
-      drawCenteredWifiTextInRect(width, height, rowRect, labels[i], 2);
+      drawCenteredWifiTextInRect(width, height, rowRect, labels[i], true);
     }
   }
 
@@ -745,16 +750,16 @@ void drawSurveyScreen() {
     hintCount = sizeof(TAP_ONLY) / sizeof(TAP_ONLY[0]);
   }
   text[ROW_HINT] = hintCount > 0 ? hints[hintCount - 1] : "";
-  size_t lengths[ROW_COUNT];
-  for (int row = 0; row < ROW_COUNT; ++row) lengths[row] = strlen(text[row]);
   const bool roundGlass = bcfg->panel->roundDisplay;
-  const Layout layout = wifistatus::layout(w, hgt, roundGlass, lengths);
+  Layout layout = wifistatus::layout(w, hgt, roundGlass, text);
   for (size_t i = 0; i < hintCount; ++i) {
-    if (strlen(hints[i]) <= layout.maxChars(ROW_HINT)) {
+    if (textWidth(hints[i], layout.style[ROW_HINT]) <=
+        layout.spanWidth[ROW_HINT]) {
       text[ROW_HINT] = hints[i];
       break;
     }
   }
+  layout = wifistatus::layout(w, hgt, roundGlass, text);
 
   memset(bufB, 0, FRAME_BYTES);  // black field: maximum contrast, no burn-in
   const uint16_t meterColor = surveyQualityColor(connected, rssi);
@@ -762,13 +767,20 @@ void drawSurveyScreen() {
     if (layout.scale[row] == 0) continue;
     char line[48];
     fitStatusText(line, sizeof(line), text[row], layout.maxChars((Row)row));
-    const int scale = layout.scale[row];
-    const int lineW = (int)strlen(line) * 6 * scale;
+    const TextStyle style = layout.style[row];
+    const int lineW = textWidth(line, style);
     uint16_t color = 0xFFFF;
     if (row == ROW_SIGNAL || row == ROW_QUALITY) color = meterColor;
     if (row == ROW_HINT) color = 0x8410;
-    drawText(bufB, w, hgt, layout.centreX - lineW / 2, layout.y[row], line,
-             color, scale);
+    int x = layout.centreX - lineW / 2;
+    if (layout.marquee[row]) {
+      const int travel = lineW - layout.spanWidth[row];
+      const int phase = travel > 0 ? (millis() / 60) % (travel + 1) : 0;
+      x = layout.spanX[row] - phase;
+    }
+    drawTextClipped(bufB, w, hgt, x, layout.y[row], line, color, style,
+                    layout.spanX[row], layout.y[row], layout.spanWidth[row],
+                    layout.rowHeight[row]);
   }
   if (layout.dividerWidth > 0) {
     fillRect565(bufB, w, hgt, layout.dividerX, layout.dividerY,
@@ -839,8 +851,8 @@ void showInfoBar(const char *text) {
 
   strncpy(infoBarText, text, sizeof(infoBarText) - 1);
   infoBarText[sizeof(infoBarText) - 1] = 0;
-  infoBarScale = infoBarGlyphScale(infoBarText, w);
-  const int lineH = 9 * infoBarScale;
+  infoBarStyle = infoBarTextStyle(infoBarText, w, hgt);
+  const int lineH = textLineHeight(infoBarStyle);
   panelstate::infoBarRowRange(w, hgt, bcfg->panel->roundDisplay, lineH, infoBarY0,
                               infoBarY1);
   infoBarUntil = millis() + INFO_BAR_MS;
@@ -854,9 +866,8 @@ void showInfoBar(const char *text) {
   if (!bootscreen::composeRows(bufB + off, w, infoBarY0, infoBarY1)) {
     memcpy(bufB + off, bufA + off, bytes);  // bufA stays pristine for the overlay
   }
-  int textX = panelstate::centeredX(
-      w, (int)strlen(infoBarText) * 6 * infoBarScale);
-  drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarScale);
+  int textX = panelstate::centeredX(w, textWidth(infoBarText, infoBarStyle));
+  drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarStyle);
 
   if (queuePanelBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1, bufB + off) !=
       ESP_OK) {
@@ -934,9 +945,8 @@ void redrawInfoBarOverRun() {
   size_t off = (size_t)infoBarY0 * rowBytes;
   size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
   memcpy(bufB + off, bufA + off, bytes);
-  int textX = panelstate::centeredX(
-      w, (int)strlen(infoBarText) * 6 * infoBarScale);
-  drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarScale);
+  int textX = panelstate::centeredX(w, textWidth(infoBarText, infoBarStyle));
+  drawOutlinedText(bufB, w, hgt, textX, infoBarY0, infoBarText, infoBarStyle);
   if (queuePanelBitmap(panel, *bcfg, 0, infoBarY0, w, infoBarY1, bufB + off) !=
       ESP_OK) {
     statDrawErrors = statDrawErrors + 1;
@@ -1031,31 +1041,31 @@ void drawOtaScreen(const char *headline, int percent) {
     snprintf(pctText, sizeof(pctText), "%d%%", percent);
   }
 
-  size_t widest = strlen(headline);
-  if (strlen(pctText) > widest) widest = strlen(pctText);
-  int scale = 2;
-  if ((int)widest * 6 * scale > w - 2 * margin) {
-    scale = 1;
+  TextStyle headlineStyle = largeTextStyle(w, hgt);
+  TextStyle percentStyle = monoTextStyle(w, hgt);
+  if (textWidth(headline, headlineStyle) > w - 2 * margin &&
+      headlineStyle.family != TextFamily::Classic) {
+    headlineStyle = smallTextStyle(w, hgt);
   }
-  const int lineH = 9 * scale;
-  const int barH = 6 * scale;
-  const int blockH = lineH * 2 + barH + 3 * scale;
+  const int lineH = textLineHeight(headlineStyle);
+  const int percentH = textLineHeight(percentStyle);
+  const int barH = (w < hgt ? w : hgt) >= 240 ? 12 : 6;
+  const int blockH = lineH + percentH + barH + 10;
   int y = (hgt - blockH) / 2;
   if (y < margin) y = margin;
 
-  drawOutlinedText(bufB, w, hgt, (w - (int)strlen(headline) * 6 * scale) / 2, y,
-                   headline, scale);
+  drawOutlinedText(bufB, w, hgt, (w - textWidth(headline, headlineStyle)) / 2,
+                   y, headline, headlineStyle);
   if (pctText[0] != 0) {
-    drawOutlinedText(bufB, w, hgt,
-                     (w - (int)strlen(pctText) * 6 * scale) / 2, y + lineH,
-                     pctText, scale);
+    drawOutlinedText(bufB, w, hgt, (w - textWidth(pctText, percentStyle)) / 2,
+                     y + lineH, pctText, percentStyle);
 
     // Progress bar: outlined box, filled left to right. Drawn by hand because
     // the font toolkit has no rectangle primitive and one bar does not justify
     // adding one.
     const int barW = w - 2 * margin;
     const int barX = margin;
-    const int barY = y + lineH * 2 + 3 * scale;
+    const int barY = y + lineH + percentH + 10;
     const int filledTo = (barW * percent) / 100;
     for (int px = 0; px < barW; px++) {
       for (int py = 0; py < barH; py++) {

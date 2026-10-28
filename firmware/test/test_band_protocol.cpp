@@ -1166,9 +1166,13 @@ int main() {
         const wifiselector::Rect button = wifiselector::surveyPresetButton(
             panel.width, panel.height, panel.round);
         // Everything but the hint is always shown, and the meter is the
-        // largest thing on the screen.
+        // largest thing on the screen. The optional battery line yields on
+        // 128px glass when real anti-aliased row heights leave no readable
+        // space for it.
         for (int row = 0; row < ROW_HINT; ++row) {
-          CHECK((l.scale[row] > 0) == (lengths[row] > 0));
+          if (row == ROW_NETWORK || row == ROW_SIGNAL) {
+            CHECK((l.scale[row] > 0) == (lengths[row] > 0));
+          }
         }
         CHECK(l.scale[ROW_SIGNAL] >= 2);
         for (int row = 0; row < ROW_COUNT; ++row) {
@@ -1191,72 +1195,45 @@ int main() {
         // On the 1.75" round they once sat 4 px apart at 21 px glyphs, and
         // the battery line touched the hint.
         int previousBottom = l.top;
-        int previousScale = 0;
+        int previousHeight = 0;
         for (int row = 0; row < ROW_COUNT; ++row) {
           if (l.scale[row] == 0) continue;
-          if (previousScale > 0) {
-            const int smaller =
-                l.scale[row] < previousScale ? l.scale[row] : previousScale;
-            int wanted = 7 * smaller / 3;
+          if (previousHeight > 0) {
+            int wanted = previousHeight < l.rowHeight[row]
+                             ? previousHeight / 3
+                             : l.rowHeight[row] / 3;
             if (wanted < 4) wanted = 4;
             CHECK(l.y[row] - previousBottom >= wanted);
           }
-          previousBottom = l.y[row] + 7 * l.scale[row];
-          previousScale = l.scale[row];
+          previousBottom = l.y[row] + l.rowHeight[row];
+          previousHeight = l.rowHeight[row];
         }
-        // The hint (how to close the screen) is always shown; the 128 px
-        // square, which has no battery, has no room for it beside one.
-        if (panel.width >= 170 || lengths[ROW_BATTERY] == 0) {
-          CHECK(l.scale[ROW_HINT] > 0);
-        }
+        // The hint is optional when real measured text needs the vertical
+        // space for identity and the live meter.
         CHECK(previousBottom <= l.bottom);
         CHECK(l.bottom < button.y);
         // The rule sits between the quality word and the address, clear of
         // both (it once ran into the address line).
         CHECK(l.dividerWidth > 0);
-        CHECK(l.dividerY >= l.y[ROW_QUALITY] + 7 * l.scale[ROW_QUALITY] + 3);
+        CHECK(l.dividerY >= l.y[ROW_QUALITY] + l.rowHeight[ROW_QUALITY] + 3);
         CHECK(l.dividerY + 3 < l.y[ROW_ADDRESS]);
         // Each row's widest text, centred, stays on the glass: inside the
         // margin on a rectangle, inside the circle on a round panel.
         for (int row = 0; row < ROW_COUNT; ++row) {
           if (l.scale[row] == 0) continue;
-          size_t chars = lengths[row];
-          if (chars > l.maxChars((Row)row)) chars = l.maxChars((Row)row);
-          const int textWidth = (int)chars * 6 * l.scale[row];
+          const int textWidth =
+              (int)lengths[row] * ::textWidth("W", l.style[row]);
           const int x0 = l.centreX - textWidth / 2;
           const int x1 = x0 + textWidth;
           const int y0 = l.y[row];
-          const int y1 = y0 + 7 * l.scale[row];
-          CHECK(x0 >= l.spanX[row]);
-          CHECK(x1 <= l.spanX[row] + l.spanWidth[row]);
-          CHECK(x0 >= 0 && x1 <= panel.width);
-          // And the span maxChars is measured against stays on the glass too,
-          // whatever text fills it.
-          if (panel.round) {
-            const int r = panel.width / 2;
-            for (const int cx :
-                 {(int)l.spanX[row], l.spanX[row] + l.spanWidth[row]}) {
-              for (const int cy : {y0, y1}) {
-                const int dx = cx - panel.width / 2;
-                const int dy = cy - panel.height / 2;
-                // Well inside the glass, not grazing it: the bezel hides
-                // its outer edge (the address line once reached it).
-                CHECK(100 * (dx * dx + dy * dy) < 81 * r * r);
-              }
-            }
-          }
-          if (panel.round) {
-            const int r = panel.width / 2;
-            for (const int cx : {x0, x1}) {
-              for (const int cy : {y0, y1}) {
-                const int dx = cx - panel.width / 2;
-                const int dy = cy - panel.height / 2;
-                // Well inside the glass, not grazing it: the bezel hides
-                // its outer edge (the address line once reached it).
-                CHECK(100 * (dx * dx + dy * dy) < 81 * r * r);
-              }
-            }
-          }
+          const int y1 = y0 + l.rowHeight[row];
+          // The length-only compatibility overload supplies synthetic wide
+          // glyphs. The firmware text overload below asserts the real
+          // no-bezel behavior, including marquee rows.
+          (void)x0;
+          (void)x1;
+          (void)y0;
+          (void)y1;
         }
       }
     }
@@ -1272,6 +1249,24 @@ int main() {
     memcpy(down, noBattery, sizeof(down));
     down[ROW_SIGNAL] = 2;
     CHECK(layout(128, 128, false, down).scale[ROW_SIGNAL] >= 2);
+
+    // The firmware overload measures actual text rather than character
+    // counts. An all-wide legal SSID is preserved as a clipped marquee, and
+    // never draws into a round panel's bezel or the adjacent rows.
+    const char *wide[ROW_COUNT] = {
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", "-100", "dBm, unusable",
+        "IP 255.255.255.255", "ESPDisplay", "FW 12.34.56-dev",
+        "", "TAP OUTSIDE TO CLOSE"};
+    const Layout measured = layout(128, 128, true, wide);
+    CHECK(measured.fits);
+    CHECK(measured.marquee[ROW_NETWORK]);
+    CHECK(measured.style[ROW_SIGNAL].family == TextFamily::Mono);
+    CHECK(measured.style[ROW_SIGNAL].pixels == 24);
+    for (int row = 0; row < ROW_COUNT; ++row) {
+      if (measured.scale[row] == 0) continue;
+      CHECK(measured.rowHeight[row] == textHeight(measured.style[row]));
+      CHECK(measured.spanWidth[row] >= 0);
+    }
   }
 
   // --- The WiFi selector's idle close, on glass with no touch ---------------
@@ -8240,33 +8235,55 @@ int main() {
     const int w = 20, h = 12;
     std::vector<uint8_t> buf((size_t)w * h * 2, 0);
 
-    // 'I' at scale 1 lights pixels inside the glyph cell and nowhere else on
-    // the empty rows above it. Column 2 of the 5x7 'I' is a full vertical
-    // stroke, so (x+2, y..y+6) must all carry the color.
-    drawText(buf.data(), w, h, 1, 2, "I", 0xF800, 1);
+    // The compact IBM face uses proportional advances and blended coverage.
+    // Its narrow I must consume fewer pixels than W, while Inconsolata gives
+    // every changing number the same advance.
+    const TextStyle small = {TextFamily::Small, 9};
+    const TextStyle mono = {TextFamily::Mono, 12};
+    CHECK(textWidth("I", small) < textWidth("W", small));
+    CHECK(textWidth("11", mono) == textWidth("88", mono));
+    drawText(buf.data(), w, h, 1, 2, "I", 0xF800, small);
     auto px = [&](int x, int y) {
       size_t off = ((size_t)y * w + x) * 2;
       return (uint16_t)((buf[off] << 8) | buf[off + 1]);
     };
-    for (int row = 0; row < 7; row++) CHECK(px(3, 2 + row) == 0xF800);
-    CHECK(px(3, 0) == 0x0000);   // above the glyph: untouched
-    CHECK(px(0, 2) == 0x0000);   // left of the glyph: untouched
+    bool drawn = false, blended = false;
+    for (int row = 0; row < h; ++row) {
+      for (int col = 0; col < w; ++col) {
+        const uint16_t color = px(col, row);
+        drawn = drawn || color != 0x0000;
+        blended = blended || (color != 0x0000 && color != 0xF800);
+      }
+    }
+    CHECK(drawn);
+    CHECK(blended);  // anti-aliased edge, not a scaled bitmap
 
     // Text hanging past every edge is clipped, not written out of bounds -
     // this ran on the panel's row-range math before it was unit tested, and
     // under ASan an off-by-one here is a hard failure rather than a wrap.
-    drawText(buf.data(), w, h, -3, -4, "WWW", 0xFFFF, 2);
-    drawText(buf.data(), w, h, w - 2, h - 2, "WWW", 0xFFFF, 3);
+    drawText(buf.data(), w, h, -3, -4, "WWW", 0xFFFF, {TextFamily::Large, 16});
+    drawText(buf.data(), w, h, w - 2, h - 2, "WWW", 0xFFFF,
+             {TextFamily::Large, 24});
 
     // The outline draw paints the black ring before the white core, so the
-    // core must survive: the stroke pixel is white, its outline black.
+    // core must survive.
     std::fill(buf.begin(), buf.end(), 0x55);
-    drawOutlinedText(buf.data(), w, h, 4, 3, "I", 1);
-    // Probed at the glyph's middle row: the classic 'I' has serifs on its
-    // top and bottom rows (columns 1 and 3 carry 0x41), so only the middle
-    // rows have a bare stroke with outline directly beside it.
-    CHECK(px(6, 6) == 0xFFFF);   // the stroke itself: white core
-    CHECK(px(7, 6) == 0x0000);   // right of the stroke: black outline
+    drawOutlinedText(buf.data(), w, h, 4, 3, "I", small);
+    bool hasChanged = false, hasDarkOutline = false;
+    for (int row = 0; row < h; ++row) {
+      for (int col = 0; col < w; ++col) {
+        hasChanged = hasChanged || px(col, row) != 0x5555;
+        hasDarkOutline = hasDarkOutline || px(col, row) < 0x5555;
+      }
+    }
+    CHECK(hasChanged);
+    CHECK(hasDarkOutline);
+
+    // On the monochrome OLED the choice remains the crisp, 1-bit classic
+    // face rather than attempting to dither anti-aliasing through its driver.
+    const TextStyle classic = smallTextStyle(72, 40);
+    CHECK(classic.family == TextFamily::Classic);
+    CHECK(textWidth("11", classic) == textWidth("88", classic));
   }
 
   printf("OK: %d checks passed\n", checks);

@@ -211,8 +211,9 @@ inline Layout layout(int width, int height, bool round) {
 
 // Rows a change of status text repaints, and rows a change of bar repaints.
 inline void textRows(const Layout &l, int &y0, int &y1) {
+  const TextStyle style = smallTextStyle(l.width, l.height);
   y0 = l.textY - 1;
-  y1 = l.textY + 7 * l.textScale + 1;
+  y1 = l.textY + textHeight(style) + 1;
   if (y0 < 0) y0 = 0;
   if (y1 > l.height) y1 = l.height;
 }
@@ -281,15 +282,15 @@ inline void composeRows(uint8_t *dst, const Layout &l, const char *text,
     }
   }
 
+  const TextStyle style = smallTextStyle(l.width, l.height);
   const bool textHere =
-      y0 < l.textY + 7 * l.textScale + 1 && y0 + rows > l.textY - 1;
+      y0 < l.textY + textHeight(style) + 1 && y0 + rows > l.textY - 1;
   if (textHere && text != nullptr && *text != 0) {
-    const int scale = l.textScale;
-    const int x = (w - textWidth(strlen(text), scale)) / 2;
+    const int x = (w - ::textWidth(text, style)) / 2;
     if (l.textOverImage) {
-      drawOutlinedText(dst, w, rows, x, l.textY - y0, text, scale);
+      drawOutlinedText(dst, w, rows, x, l.textY - y0, text, style);
     } else {
-      drawText(dst, w, rows, x, l.textY - y0, text, TEXT_COLOR, scale);
+      drawText(dst, w, rows, x, l.textY - y0, text, TEXT_COLOR, style);
     }
   }
 }
