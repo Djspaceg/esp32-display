@@ -13,7 +13,11 @@ ENTITLEMENTS="$HERE/CameraExtension.entitlements"
 SOURCE="$HERE/main.swift"
 IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
 
-[[ "$DESTINATION" == *.app/Contents/Library/SystemExtensions/ESPDisplayCamera.systemextension ]] || {
+[[ -n "$APP" && "$APP" == /* && "$APP" != "/" ]] || {
+  echo "error: unexpected app path $APP" >&2
+  exit 1
+}
+[[ "$DESTINATION" == "$APP"/Contents/Library/SystemExtensions/ESPDisplayCamera.systemextension ]] || {
   echo "error: unexpected camera extension destination $DESTINATION" >&2
   exit 1
 }
