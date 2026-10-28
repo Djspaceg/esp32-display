@@ -57,7 +57,10 @@ inline int safeMargin(int width, int height, bool roundDisplay) {
   int margin = 4;
   if (roundDisplay) {
     const int diameter = width < height ? width : height;
-    margin += diameter * 1465 / 10000;
+    // 18% leaves every corner of a control rectangle visibly inside the
+    // circle. The mathematical inscribed-square inset is 14.65%, but its
+    // border pixels lie on the bezel and were visibly cut on 1.85" glass.
+    margin += diameter * 18 / 100;
   }
   return margin;
 }

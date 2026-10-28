@@ -21,13 +21,13 @@ static const char FOOTER[] = "Restarting";
 static const int MAX_REASON_LINES = 4;
 static const int LINE_CAP = 64;
 
-// Round glass hides the framebuffer corners, so text keeps to the inscribed
-// square exactly as drawOtaScreen does.
+// Round glass hides the framebuffer corners, so text stays visibly clear of
+// the bezel by using the same 18% inset as the other panel UI.
 inline int textMargin(int width, int height, bool roundDisplay) {
   int margin = 4;
   if (roundDisplay) {
     const int d = width < height ? width : height;
-    margin += (int)(0.1465f * (float)d);
+    margin += d * 18 / 100;
   }
   return margin;
 }

@@ -210,8 +210,18 @@ int main() {
       } else {
         ++compactLayouts;
         CHECK(h < 2 * bootimage::HEIGHT);
-        CHECK(l.image.y == (h - bootimage::HEIGHT) / 2);
-        if (!l.textOverImage) CHECK(l.textY + 7 * s <= l.image.y);
+        const int statusHeight = textHeight(smallTextStyle(w, h));
+        const bool statusFirst =
+            h < bootimage::HEIGHT + statusHeight + 8;
+        if (statusFirst) {
+          CHECK(!l.textOverImage);
+          CHECK(l.textY == 1);
+          CHECK(l.image.y == statusHeight + 4);
+          CHECK(l.textY + statusHeight <= l.image.y);
+        } else {
+          CHECK(l.image.y == (h - bootimage::HEIGHT) / 2);
+          if (!l.textOverImage) CHECK(l.textY + 7 * s <= l.image.y);
+        }
         // The bar is in the bottom margin when there is one.
         if (h - (l.image.y + l.image.h) >= 4) {
           CHECK(l.bar.y >= l.image.y + l.image.h);
@@ -318,7 +328,9 @@ int main() {
   {
     const Layout small = bootscreenmodel::layout(128, 128, false);
     CHECK(small.compact);
-    CHECK(small.image.x == 4 && small.image.y == 4);
+    CHECK(small.image.x == 4);
+    CHECK(small.image.y == textHeight(smallTextStyle(128, 128)) + 4);
+    CHECK(!small.textOverImage);
     const Layout knob = bootscreenmodel::layout(240, 240, true);
     CHECK(!knob.compact);
     CHECK(knob.image.y == 120);

@@ -154,15 +154,10 @@ void drawIdleScreen() {
     const int lineW = textWidth(lines[i], style);
     if (lineW > blockW) blockW = lineW;
   }
-  // On round glass the corners of the framebuffer are not on the panel, so
-  // the card keeps to the inscribed square: an extra inset of
-  // r*(1 - 1/sqrt(2)) per edge, ~14.6% of the diameter. Rectangular panels
-  // keep the original 4px margin exactly.
-  int margin = 4;
-  if (bcfg->panel->roundDisplay) {
-    int d = w < hgt ? w : hgt;
-    margin += (int)(0.1465f * (float)d);
-  }
+  // Keep every outlined glyph visibly inside round glass. This is shared
+  // with controls and status rows so an idle card cannot touch the bezel.
+  const int margin = wifiselector::safeMargin(
+      w, hgt, bcfg->panel->roundDisplay);
   // Prefer the larger text, but drop a size rather than run off the panel:
   // pushed lines can be far longer than the three status lines ever are.
   if ((blockW > w - 2 * margin ||
@@ -386,21 +381,23 @@ void drawWifiSelectorScreen() {
       }
 
       char ssid[33];
-      size_t ssidCapacity = sizeof(ssid);
-      const int prefixChars = wifiSelectorSlots[i] >= 10 ? 5 : 4;
-      const int maxLabelChars = (rowRect.width - 12) / 5;
-      if (maxLabelChars > prefixChars &&
-          (size_t)(maxLabelChars - prefixChars + 1) < ssidCapacity) {
-        ssidCapacity = (size_t)(maxLabelChars - prefixChars + 1);
-      }
       wifiselector::displaySsid(wifiSelectorCredentials[i], ssid,
-                                ssidCapacity);
+                                sizeof(ssid));
       char line[48];
       snprintf(line, sizeof(line), "%c%u %s", active ? '*' : ' ',
                (unsigned)wifiSelectorSlots[i], ssid);
       const int textY = rowRect.y + (rowRect.height - textHeight(listStyle)) / 2;
-      drawOutlinedText(bufB, width, height, rowRect.x + 6, textY, line,
-                       listStyle);
+      const int textX = rowRect.x + 6;
+      const int visibleWidth = rowRect.width - 12;
+      const int lineWidth = textWidth(line, listStyle);
+      int marqueeX = textX;
+      if (lineWidth > visibleWidth) {
+        const int travel = lineWidth - visibleWidth;
+        marqueeX -= (int)((millis() / 60) % (unsigned long)(travel + 1));
+      }
+      drawTextClipped(bufB, width, height, marqueeX, textY, line, 0xFFFF,
+                      listStyle, textX, rowRect.y + 2, visibleWidth,
+                      rowRect.height - 4);
     }
   }
 
@@ -1018,13 +1015,9 @@ void drawOtaScreen(const char *headline, int percent) {
 
   const int w = PANEL_GEOMETRY.frameWidth(panelLandscape);
   const int hgt = PANEL_GEOMETRY.frameHeight(panelLandscape);
-  // Round glass hides the framebuffer corners, so keep to the inscribed square
-  // exactly as drawIdleScreen does.
-  int margin = 4;
-  if (bcfg->panel->roundDisplay) {
-    int d = w < hgt ? w : hgt;
-    margin += (int)(0.1465f * (float)d);
-  }
+  // Use the same visibly safe round-glass inset as every other UI screen.
+  const int margin = wifiselector::safeMargin(
+      w, hgt, bcfg->panel->roundDisplay);
 
   // Deep blue: unmistakable next to the boot fills (gray waiting for WiFi, teal
   // ready, dark red no WiFi), so the state is readable across a room.

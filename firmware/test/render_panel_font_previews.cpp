@@ -9,6 +9,7 @@
 
 #include "../display_stream/boot_screen_model.h"
 #include "../display_stream/glyph_draw.h"
+#include "../display_stream/wifi_status_model.h"
 
 static void put(std::vector<uint8_t> &pixels, int width, int x, int y,
                 uint16_t color) {
@@ -45,6 +46,33 @@ static void centered(std::vector<uint8_t> &pixels, int width, int height,
        style, color, outline);
 }
 
+static TextStyle fittingStyle(int width, int height, int availableWidth,
+                              int availableHeight, const char *value,
+                              bool heading) {
+  TextStyle style = heading ? largeTextStyle(width, height)
+                            : smallTextStyle(width, height);
+  if ((textWidth(value, style) > availableWidth - 2 ||
+       textHeight(style) > availableHeight - 2) &&
+      style.family != TextFamily::Classic) {
+    style = smallTextStyle(width, height);
+  }
+  if ((textWidth(value, style) > availableWidth - 2 ||
+       textHeight(style) > availableHeight - 2) &&
+      style.family != TextFamily::Classic) {
+    style = {TextFamily::Small, 9};
+  }
+  return style;
+}
+
+static void centeredInRect(std::vector<uint8_t> &pixels, int width, int height,
+                           const wifiselector::Rect &rect, const char *value,
+                           bool heading, uint16_t color) {
+  const TextStyle style =
+      fittingStyle(width, height, rect.width, rect.height, value, heading);
+  text(pixels, width, height, rect.x + (rect.width - textWidth(value, style)) / 2,
+       rect.y + (rect.height - textHeight(style)) / 2, value, style, color);
+}
+
 static void maskRound(std::vector<uint8_t> &pixels, int width, int height) {
   const int side = width < height ? width : height;
   const long radius2 = (long)side * side;
@@ -65,43 +93,57 @@ static void boot(std::vector<uint8_t> &pixels, int width, int height,
                                bootscreenmodel::BAR_PROGRESS, 0, height);
 }
 
-static void survey(std::vector<uint8_t> &pixels, int width, int height) {
+static void survey(std::vector<uint8_t> &pixels, int width, int height,
+                   bool round) {
   fill(pixels, width, 0, 0, width, height, 0);
-  const TextStyle small = smallTextStyle(width, height);
-  const TextStyle mono = monoTextStyle(width, height);
-  centered(pixels, width, height, height / 12, "studio-wifi", small, 0xFFFF);
-  centered(pixels, width, height, height / 4, "-64", mono, 0x07E0);
-  centered(pixels, width, height, height / 4 + textLineHeight(mono), "dBm, good",
-           small, 0x07E0);
-  centered(pixels, width, height, height * 5 / 8, "IP 192.168.1.42", small,
-           0xFFFF);
-  centered(pixels, width, height, height * 5 / 8 + textLineHeight(small),
-           "ESPDisplay", small, 0xFFFF);
-  fill(pixels, width, 4, height - textLineHeight(small) - 5, width - 4,
-       height - 4, 0x03EF);
-  centered(pixels, width, height, height - textLineHeight(small) - 4,
-           "WIFI PRESETS", small, 0xFFFF);
-}
-
-static void picker(std::vector<uint8_t> &pixels, int width, int height) {
-  fill(pixels, width, 0, 0, width, height, 0x0006);
-  const TextStyle small = smallTextStyle(width, height);
-  const TextStyle large = largeTextStyle(width, height);
-  centered(pixels, width, height, 4, "WIFI PRESETS", large, 0xFFFF);
-  const int rowH = textLineHeight(small) + 8;
-  const int start = height / 3;
-  for (int row = 0; row < 2; ++row) {
-    const int y = start + row * rowH;
-    fill(pixels, width, 5, y, width - 5, y + rowH - 2,
-         row == 0 ? 0x03EF : 0x1082);
-    text(pixels, width, height, 8, y + 3,
-         row == 0 ? "*1 studio-wifi" : " 2 backup-link", small, 0xFFFF);
+  const char *rows[wifistatus::ROW_COUNT] = {
+      "studio-wifi", "-64", "dBm, good", "IP 192.168.1.42",
+      "ESPDisplay", "FW 2.1.0", "Battery 82% charging", "BOOT: CLOSE"};
+  const wifistatus::Layout layout =
+      wifistatus::layout(width, height, round, rows);
+  for (int row = 0; row < wifistatus::ROW_COUNT; ++row) {
+    if (layout.scale[row] == 0) continue;
+    const int lineW = textWidth(rows[row], layout.style[row]);
+    text(pixels, width, height, layout.centreX - lineW / 2, layout.y[row],
+         rows[row], layout.style[row],
+         row == wifistatus::ROW_SIGNAL || row == wifistatus::ROW_QUALITY
+             ? 0x07E0
+             : 0xFFFF);
   }
-  fill(pixels, width, 5, height - rowH - 4, width - 5, height - 4, 0x03EF);
-  centered(pixels, width, height, height - rowH - 1, "CONNECT", small, 0xFFFF);
+  const wifiselector::Rect button =
+      wifiselector::surveyPresetButton(width, height, round);
+  fill(pixels, width, button.x, button.y, button.x + button.width,
+       button.y + button.height, 0x03EF);
+  centeredInRect(pixels, width, height, button, "WIFI PRESETS", true, 0xFFFF);
 }
 
-static void idle(std::vector<uint8_t> &pixels, int width, int height) {
+static void picker(std::vector<uint8_t> &pixels, int width, int height,
+                   bool round) {
+  fill(pixels, width, 0, 0, width, height, 0x0006);
+  const wifiselector::SelectorLayout layout =
+      wifiselector::selectorLayout(width, height, round, 2, 0);
+  const wifiselector::Rect title = {
+      layout.back.x, layout.back.y,
+      (int16_t)(layout.title.x + layout.title.width - layout.back.x),
+      layout.back.height};
+  centeredInRect(pixels, width, height, title, "WIFI PRESETS", true, 0xFFFF);
+  for (size_t row = 0; row < layout.visibleCount; ++row) {
+    const wifiselector::Rect rowRect = layout.rowRect(row);
+    fill(pixels, width, rowRect.x, rowRect.y, rowRect.x + rowRect.width,
+         rowRect.y + rowRect.height, row == 0 ? 0x03EF : 0x1082);
+    centeredInRect(pixels, width, height, rowRect,
+                   row == 0 ? "*1 studio-wifi" : " 2 backup-link", false,
+                   0xFFFF);
+  }
+  fill(pixels, width, layout.connect.x, layout.connect.y,
+       layout.connect.x + layout.connect.width,
+       layout.connect.y + layout.connect.height, 0x03EF);
+  centeredInRect(pixels, width, height, layout.connect, "CONNECT", true,
+                 0xFFFF);
+}
+
+static void idle(std::vector<uint8_t> &pixels, int width, int height,
+                 bool) {
   for (int y = 0; y < height; ++y) {
     const uint16_t blue = (uint16_t)(0x0004 + (y * 3 / (height ? height : 1)));
     fill(pixels, width, 0, y, width, y + 1, blue);
@@ -115,28 +157,54 @@ static void idle(std::vector<uint8_t> &pixels, int width, int height) {
            true);
 }
 
-static void info(std::vector<uint8_t> &pixels, int width, int height) {
+static void info(std::vector<uint8_t> &pixels, int width, int height,
+                 bool round) {
   fill(pixels, width, 0, 0, width, height, 0x2128);
-  const TextStyle small = smallTextStyle(width, height);
-  fill(pixels, width, 0, 0, width, textLineHeight(small) + 3, 0x0000);
-  centered(pixels, width, height, 1, "Battery 82% charging", small, 0xFFFF, true);
+  const int top = wifiselector::safeMargin(width, height, round);
+  const TextStyle small = fittingStyle(width, height, width - 2 * top,
+                                       textLineHeight(smallTextStyle(width, height)),
+                                       "Battery 82% charging", false);
+  const int lineH = textLineHeight(small);
+  int x = 0, span = 0;
+  wifistatus::rowSpan(width, height, round, top, top + lineH, x, span);
+  fill(pixels, width, x, top, x + span, top + lineH, 0x0000);
+  text(pixels, width, height, x + (span - textWidth("Battery 82% charging", small)) / 2,
+       top + (lineH - textHeight(small)) / 2, "Battery 82% charging", small,
+       0xFFFF, true);
   const TextStyle large = largeTextStyle(width, height);
   centered(pixels, width, height, height / 2 - textHeight(large) / 2,
            "STREAMING", large, 0x07E0);
 }
 
-static void menu(std::vector<uint8_t> &pixels, int width, int height) {
+static void menu(std::vector<uint8_t> &pixels, int width, int height,
+                 bool round) {
   fill(pixels, width, 0, 0, width, height, 0x0006);
-  const TextStyle large = largeTextStyle(width, height);
-  const TextStyle small = smallTextStyle(width, height);
-  centered(pixels, width, height, 4, "CHOOSE A MODE", large, 0xFFFF);
-  const int rowH = textLineHeight(large) + 8;
-  const int first = height / 3;
-  fill(pixels, width, 5, first, width - 5, first + rowH, 0x03EF);
-  centered(pixels, width, height, first + 3, "STREAMING", large, 0xFFFF);
-  centered(pixels, width, height, first + rowH + 5, "DOOM", large, 0xFFFF);
-  centered(pixels, width, height, height - textLineHeight(small) - 3,
-           "BOOT: NEXT  HOLD: START", small, 0x8410);
+  const wifiselector::SelectorLayout layout =
+      wifiselector::selectorLayout(width, height, round, 2, 0);
+  const wifiselector::Rect title = {
+      layout.back.x, layout.back.y,
+      (int16_t)(layout.title.x + layout.title.width - layout.back.x),
+      layout.back.height};
+  centeredInRect(pixels, width, height, title, "CHOOSE A MODE", true, 0xFFFF);
+  for (size_t row = 0; row < layout.visibleCount; ++row) {
+    const wifiselector::Rect rowRect = layout.rowRect(row);
+    fill(pixels, width, rowRect.x, rowRect.y, rowRect.x + rowRect.width,
+         rowRect.y + rowRect.height, row == 0 ? 0x03EF : 0x1082);
+    centeredInRect(pixels, width, height, rowRect,
+                   row == 0 ? "STREAMING" : "DOOM", true, 0xFFFF);
+  }
+  const wifiselector::Rect hint = {
+      layout.previous.x, layout.previous.y,
+      (int16_t)(layout.next.x + layout.next.width - layout.previous.x),
+      layout.previous.height};
+  fill(pixels, width, hint.x, hint.y, hint.x + hint.width,
+       hint.y + hint.height, 0x2104);
+  centeredInRect(pixels, width, height, hint, "BOOT NEXT", true, 0x8410);
+  fill(pixels, width, layout.connect.x, layout.connect.y,
+       layout.connect.x + layout.connect.width,
+       layout.connect.y + layout.connect.height, 0x03EF);
+  centeredInRect(pixels, width, height, layout.connect, "HOLD START", true,
+                 0xFFFF);
 }
 
 static void writePpm(const std::string &path, const std::vector<uint8_t> &pixels,
@@ -161,7 +229,7 @@ static void writePpm(const std::string &path, const std::vector<uint8_t> &pixels
 
 static void preview(const char *directory, const char *name, int width,
                     int height, bool round) {
-  typedef void (*Screen)(std::vector<uint8_t> &, int, int);
+  typedef void (*Screen)(std::vector<uint8_t> &, int, int, bool);
   const Screen screens[] = {survey, picker, idle, info, menu};
   const int sheetW = width * 3;
   const int sheetH = height * 2;
@@ -171,7 +239,7 @@ static void preview(const char *directory, const char *name, int width,
     if (tile == 0) {
       boot(panel, width, height, round);
     } else {
-      screens[tile - 1](panel, width, height);
+      screens[tile - 1](panel, width, height, round);
     }
     if (round) maskRound(panel, width, height);
     const int ox = tile % 3 * width;

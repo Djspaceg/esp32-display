@@ -204,7 +204,7 @@ inline void infoBarRowRange(int frameWidth, int frameHeight, bool roundDisplay,
   int marginTop = 4;
   if (roundDisplay) {
     int d = frameWidth < frameHeight ? frameWidth : frameHeight;
-    marginTop += (int)(0.1465f * (float)d);
+    marginTop += d * 18 / 100;
   }
   y0 = marginTop;
   y1 = marginTop + lineHeight;

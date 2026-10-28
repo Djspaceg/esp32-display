@@ -29,23 +29,48 @@ inline bool useClassicText(int width, int height) {
 
 inline TextStyle smallTextStyle(int width, int height) {
   if (useClassicText(width, height)) return {TextFamily::Classic, 1};
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+  return {TextFamily::Small, 9};
+#else
   const int side = width < height ? width : height;
   return {TextFamily::Small, (uint8_t)(side < 170 ? 9 : side < 400 ? 13 : 18)};
+#endif
 }
 
 inline TextStyle monoTextStyle(int width, int height) {
   if (useClassicText(width, height)) return {TextFamily::Classic, 1};
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+  return {TextFamily::Mono, 12};
+#else
   const int side = width < height ? width : height;
   return {TextFamily::Mono, (uint8_t)(side < 170 ? 12 : side < 400 ? 24 : 40)};
+#endif
 }
 
 inline TextStyle largeTextStyle(int width, int height) {
   if (useClassicText(width, height)) return {TextFamily::Classic, 1};
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+  return {TextFamily::Large, 16};
+#else
   const int side = width < height ? width : height;
   return {TextFamily::Large, (uint8_t)(side < 170 ? 16 : side < 400 ? 24 : 40)};
+#endif
 }
 
 inline const panelfonts::Face &faceFor(TextStyle style) {
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+  switch (style.family) {
+    case TextFamily::Small:
+      return panelfonts::SMALL_9;
+    case TextFamily::Mono:
+      return panelfonts::MONO_12;
+    case TextFamily::Large:
+      return panelfonts::LARGE_16;
+    case TextFamily::Classic:
+      return panelfonts::SMALL_9;  // unused; keeps this switch total
+  }
+  return panelfonts::SMALL_9;
+#else
   switch (style.family) {
     case TextFamily::Small:
       if (style.pixels <= 9) return panelfonts::SMALL_9;
@@ -63,6 +88,25 @@ inline const panelfonts::Face &faceFor(TextStyle style) {
       return panelfonts::SMALL_9;  // unused; keeps this switch total
   }
   return panelfonts::SMALL_9;
+#endif
+}
+
+inline uint8_t alphaFor(const panelfonts::Face &face, size_t pixel) {
+  if (face.alphaBits == 1) {
+    return (face.alpha[pixel / 8] & (uint8_t)(0x80 >> (pixel % 8))) ? 255 : 0;
+  }
+  const uint8_t packed = face.alpha[pixel / 4];
+  const int shift = 6 - (int)(pixel % 4) * 2;
+  return (uint8_t)(((packed >> shift) & 0x03) * 85);
+}
+
+inline size_t glyphOffset(const panelfonts::Face &face, size_t index) {
+  size_t offset = 0;
+  for (size_t i = 0; i < index; ++i) {
+    const panelfonts::Glyph &glyph = face.glyphs[i];
+    offset += (size_t)glyph.width * glyph.height;
+  }
+  return offset;
 }
 
 inline int textHeight(TextStyle style) {
@@ -158,12 +202,14 @@ inline void drawText(uint8_t *buf, int bufW, int bufH, int x, int y,
   for (; *s; ++s) {
     uint8_t c = (uint8_t)*s;
     if (c < panelfonts::FIRST || c > panelfonts::LAST) c = '?';
-    const panelfonts::Glyph &glyph = face.glyphs[c - panelfonts::FIRST];
+    const size_t glyphIndex = c - panelfonts::FIRST;
+    const panelfonts::Glyph &glyph = face.glyphs[glyphIndex];
+    const size_t offset = glyphOffset(face, glyphIndex);
     for (int gy = 0; gy < glyph.height; ++gy) {
       for (int gx = 0; gx < glyph.width; ++gx) {
         putBlended565(buf, bufW, bufH, x + glyph.xOffset + gx,
                       y + glyph.yOffset + gy, color,
-                      face.alpha[glyph.offset + (size_t)gy * glyph.width + gx]);
+                      alphaFor(face, offset + (size_t)gy * glyph.width + gx));
       }
     }
     x += glyph.advance;
@@ -204,14 +250,16 @@ inline void drawTextClipped(uint8_t *buf, int bufW, int bufH, int x, int y,
   for (; *s; ++s) {
     uint8_t c = (uint8_t)*s;
     if (c < panelfonts::FIRST || c > panelfonts::LAST) c = '?';
-    const panelfonts::Glyph &glyph = face.glyphs[c - panelfonts::FIRST];
+    const size_t glyphIndex = c - panelfonts::FIRST;
+    const panelfonts::Glyph &glyph = face.glyphs[glyphIndex];
+    const size_t offset = glyphOffset(face, glyphIndex);
     for (int gy = 0; gy < glyph.height; ++gy) {
       for (int gx = 0; gx < glyph.width; ++gx) {
         const int px = x + glyph.xOffset + gx;
         const int py = y + glyph.yOffset + gy;
         if (px >= clipX && px < clipX1 && py >= clipY && py < clipY1) {
           putBlended565(buf, bufW, bufH, px, py, color,
-                        face.alpha[glyph.offset + (size_t)gy * glyph.width + gx]);
+                        alphaFor(face, offset + (size_t)gy * glyph.width + gx));
         }
       }
     }

@@ -181,6 +181,23 @@ inline Layout layout(int width, int height, bool round) {
     return l;
   }
 
+  const TextStyle statusStyle = smallTextStyle(width, height);
+  const int statusHeight = textHeight(statusStyle);
+  // A 128px panel cannot hold the 120px illustration, a status row and a
+  // progress bar without overlap. Put the status on clean background first;
+  // the artwork may finish below the framebuffer, but the state remains
+  // readable rather than being drawn over the image.
+  if (height < imageH + statusHeight + 8) {
+    l.textScale = 1;
+    l.textOverImage = false;
+    l.textY = 1;
+    l.image.y = (int16_t)(statusHeight + 4);
+    const int barH = 4;
+    l.bar = {(int16_t)((width - barW) / 2), (int16_t)(height - barH - 1),
+             (int16_t)barW, (int16_t)barH};
+    return l;
+  }
+
   // Compact: the margins the centred image leaves.
   const int top = l.image.y;
   const int bottom = height - (l.image.y + imageH);

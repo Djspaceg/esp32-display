@@ -975,28 +975,28 @@ int main() {
           std::string::npos);
 
     const Rect surveyButton = surveyPresetButton(360, 360, true);
-    CHECK(surveyButton.x == 56);
-    CHECK(surveyButton.y == 264);
-    CHECK(surveyButton.width == 248);
+    CHECK(surveyButton.x == 68);
+    CHECK(surveyButton.y == 252);
+    CHECK(surveyButton.width == 224);
     CHECK(surveyButton.height == 40);
-    CHECK(surveyButton.contains(180, 284));
-    CHECK(!surveyButton.contains(180, 263));
+    CHECK(surveyButton.contains(180, 272));
+    CHECK(!surveyButton.contains(180, 251));
 
     const SelectorLayout roundLayout =
         selectorLayout(360, 360, true, 10, 5);
     CHECK(roundLayout.visibleCount == 3);
     CHECK(roundLayout.firstVisible == 4);
     CHECK(roundLayout.back.contains(80, 70));
-    CHECK(roundLayout.previous.contains(80, 284));
-    CHECK(roundLayout.next.contains(145, 284));
-    CHECK(roundLayout.connect.contains(245, 284));
+    CHECK(roundLayout.previous.contains(80, 272));
+    CHECK(roundLayout.next.contains(145, 272));
+    CHECK(roundLayout.connect.contains(245, 272));
     CHECK(selectorHitTest(roundLayout, 10, 80, 70).target ==
           HitTarget::Back);
-    CHECK(selectorHitTest(roundLayout, 10, 80, 284).target ==
+    CHECK(selectorHitTest(roundLayout, 10, 80, 272).target ==
           HitTarget::Previous);
-    CHECK(selectorHitTest(roundLayout, 10, 145, 284).target ==
+    CHECK(selectorHitTest(roundLayout, 10, 145, 272).target ==
           HitTarget::Next);
-    CHECK(selectorHitTest(roundLayout, 10, 245, 284).target ==
+    CHECK(selectorHitTest(roundLayout, 10, 245, 272).target ==
           HitTarget::Connect);
     const Rect firstRow = roundLayout.rowRect(0);
     const Hit firstRowHit = selectorHitTest(
@@ -1186,10 +1186,15 @@ int main() {
           if (row == ROW_BATTERY && panel.width < 170) continue;
           if (l.scale[row] > 0) CHECK(l.maxChars((Row)row) >= lengths[row]);
         }
-        // A network or name is shown to at least 16 characters, ellipsis
-        // included.
-        CHECK(l.maxChars(ROW_NETWORK) >= 16);
-        CHECK(l.maxChars(ROW_NAME) >= 16);
+        // The identity rows are either fully measured to their span or
+        // marquee; no label is shortened to make it fit a circle.
+        CHECK(l.scale[ROW_NETWORK] > 0);
+        CHECK(l.marquee[ROW_NETWORK] ||
+              l.maxChars(ROW_NETWORK) >= lengths[ROW_NETWORK]);
+        if (l.scale[ROW_NAME] > 0) {
+          CHECK(l.marquee[ROW_NAME] ||
+                l.maxChars(ROW_NAME) >= lengths[ROW_NAME]);
+        }
         // Rows run top to bottom with clear space between them (at least a
         // third of the smaller glyph's height, and 4 px), above the control.
         // On the 1.75" round they once sat 4 px apart at 21 px glyphs, and
@@ -2310,10 +2315,10 @@ int main() {
     panelstate::infoBarRowRange(172, 320, false, 9, y0, y1);
     CHECK(y0 == 4 && y1 == 13);
 
-    // Round panel (466x466): the same 14.65%-of-diameter inset the idle card
-    // uses, so the bar's ends are not clipped by the bezel.
+    // Round panel (466x466): the 18%-of-diameter inset shared by every
+    // round-glass control, so an outlined bar stays visibly off the bezel.
     panelstate::infoBarRowRange(466, 466, true, 9, y0, y1);
-    CHECK(y0 == 4 + (int)(0.1465f * 466.0f));
+    CHECK(y0 == 4 + 466 * 18 / 100);
     CHECK(y1 == y0 + 9);
 
     // A bar taller than the frame clamps its bottom edge rather than running
