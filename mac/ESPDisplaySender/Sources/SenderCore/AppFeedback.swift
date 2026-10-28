@@ -52,28 +52,33 @@ enum AppIssue: String, CaseIterable, Sendable {
     case persistence
     case wifiPresetSync
     case accessibility
+    case systemAudioRecording
 
     var title: String {
         switch self {
-        case .screenRecording: return "Screen Recording permission needed"
+        case .screenRecording: return MacPermission.screenRecording.title
         case .deviceConfig: return "Per-device source file ignored"
         case .persistence: return "Device settings could not be saved"
         case .wifiPresetSync: return "WiFi presets could not be copied"
-        case .accessibility: return "Accessibility permission needed"
+        case .accessibility: return MacPermission.accessibility.title
+        case .systemAudioRecording: return MacPermission.systemAudioRecording.title
         }
     }
 
-    /// The System Settings pane that fixes this, for issues the user resolves
-    /// there. macOS does not ask again for a permission once it is declined,
-    /// so the notice has to offer the way back itself.
-    var settingsURL: URL? {
+    /// The permission associated with this issue, when macOS Settings can fix
+    /// it. The shared banner uses this to offer the same actions and recovery
+    /// walkthrough for every privacy grant.
+    var permission: MacPermission? {
         switch self {
-        case .accessibility:
-            return URL(string: "x-apple.systempreferences:"
-                + "com.apple.preference.security?Privacy_Accessibility")
-        case .screenRecording, .deviceConfig, .persistence, .wifiPresetSync:
-            return nil
+        case .screenRecording: return .screenRecording
+        case .accessibility: return .accessibility
+        case .systemAudioRecording: return .systemAudioRecording
+        case .deviceConfig, .persistence, .wifiPresetSync: return nil
         }
+    }
+
+    var settingsURL: URL? {
+        permission?.settingsURL
     }
 }
 
@@ -81,6 +86,10 @@ enum AppIssue: String, CaseIterable, Sendable {
 struct ReportedIssue: Identifiable, Equatable {
     let issue: AppIssue
     let detail: String
+    /// Framework diagnostics stay out of the main explanation. They remain
+    /// copyable under Technical details for a support report.
+    let technicalDetail: String?
+    let permissionState: PermissionIssueState?
 
     var id: String { issue.rawValue }
     var title: String { issue.title }

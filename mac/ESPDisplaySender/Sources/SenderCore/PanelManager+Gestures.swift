@@ -163,11 +163,10 @@ extension PanelManager {
     private func reportMissingMediaKeyGrant() {
         guard !accessibilityNoticeDismissed else { return }
         let firstReport = !issues.contains { $0.issue == .accessibility }
-        report(.accessibility, detail:
-            "Volume, mute, playback and key presses from a device - its knob, "
-            + "its gestures or its buttons - need Accessibility permission. Turn "
-            + "on ESPDisplaySender under System Settings > Privacy & Security > "
-            + "Accessibility, then try again.")
+        report(
+            .accessibility,
+            detail: MacPermission.accessibility.message(for: .needsAccess),
+            permissionState: .needsAccess)
         if firstReport { onAttentionNeeded?() }
     }
 

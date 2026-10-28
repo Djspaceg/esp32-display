@@ -60,9 +60,13 @@ struct ManagerView: View {
             if !manager.issues.isEmpty {
                 VStack(spacing: 8) {
                     ForEach(manager.issues) { issue in
-                        IssueBanner(issue: issue) {
-                            manager.dismissIssue(issue.issue)
-                        }
+                        IssueBanner(
+                            issue: issue,
+                            onDismiss: { manager.dismissIssue(issue.issue) },
+                            onRequestAccess: {
+                                manager.requestPermissionAccess(for: issue.issue)
+                            },
+                            onRelaunch: { AppRelauncher.relaunch() })
                     }
                 }
                 .padding(.horizontal, 14)
@@ -311,6 +315,8 @@ extension DeviceListSortOrder {
 private struct IssueBanner: View {
     let issue: ReportedIssue
     let onDismiss: () -> Void
+    let onRequestAccess: () -> Void
+    let onRelaunch: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -326,28 +332,83 @@ private struct IssueBanner: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                // A permission macOS will not prompt for again is fixed in
-                // System Settings, so the notice opens the pane itself.
-                if let settingsURL = issue.issue.settingsURL {
+                if let permission = issue.issue.permission {
+                    if issue.permissionState != .grantedNeedsRelaunch {
+                        HStack(spacing: 8) {
+                            Button(permission.settingsButtonTitle) {
+                                NSWorkspace.shared.open(permission.settingsURL)
+                            }
+                            Button("Request Access", action: onRequestAccess)
+                        }
+                        .controlSize(.small)
+                        .padding(.top, 4)
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(Array(permission.steps.enumerated()), id: \.offset) {
+                                index, step in
+                                Text("\(index + 1). \(step)")
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .padding(.top, 2)
+                    }
+                    if issue.permissionState == .grantedNeedsRelaunch
+                        || permission == .screenRecording
+                    {
+                        Button("Relaunch ESPDisplaySender", action: onRelaunch)
+                            .controlSize(.small)
+                            .padding(.top, 4)
+                    }
+                } else if let settingsURL = issue.issue.settingsURL {
                     Button("Open System Settings") {
                         NSWorkspace.shared.open(settingsURL)
                     }
                     .controlSize(.small)
                     .padding(.top, 4)
                 }
+                if let technicalDetail = issue.technicalDetail {
+                    DisclosureGroup("Technical details") {
+                        Text(technicalDetail)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(.caption)
+                    .padding(.top, 2)
+                }
             }
             Spacer(minLength: 8)
-            Button(action: onDismiss) {
-                Image(systemName: "xmark")
+            if issue.issue.permission == nil {
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Dismiss this message")
+                .accessibilityLabel("Dismiss: \(issue.title)")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Dismiss this message")
-            .accessibilityLabel("Dismiss: \(issue.title)")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .glassCard(tint: .orange)
+    }
+}
+
+/// Starts the installed app again before ending this process. This is only
+/// called from the banner button, so a status update never launches or brings
+/// the app to the foreground on its own.
+private enum AppRelauncher {
+    static func relaunch() {
+        guard let appURL = Bundle.main.bundleURL as URL? else { return }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) {
+            _, error in
+            if error == nil { NSApp.terminate(nil) }
+        }
     }
 }
 
@@ -2194,11 +2255,12 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
         // forward - without activating the app or making the window key, so
         // whatever the user is typing into keeps focus.
         manager.onAttentionNeeded = { [weak self] in self?.presentWithoutFocus() }
-        // Back from System Settings with the grant: clear the notice.
+        // Back from System Settings: re-check every privacy grant and clear
+        // the banner as soon as the current process can use it.
         activationObserver = NotificationCenter.default
             .publisher(for: NSApplication.didBecomeActiveNotification)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.manager.refreshMediaKeyAuthorization() }
+            .sink { [weak self] _ in self?.manager.refreshMacPermissionGuidance() }
         settingsWindow.onClose = { [weak self] in
             self?.enterAccessoryModeWhenNoWindowsAreVisible()
         }

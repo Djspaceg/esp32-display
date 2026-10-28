@@ -163,10 +163,12 @@ final class KnobAccessibilityTests: XCTestCase {
         XCTAssertFalse(TouchAction.showFullDisplay.sendsMediaKey)
     }
 
-    func testOnlyAccessibilityOffersASettingsButton() {
-        for issue in AppIssue.allCases where issue != .accessibility {
+    func testEveryPrivacyIssueOffersItsSettingsButton() {
+        for issue in AppIssue.allCases where issue.permission == nil {
             XCTAssertNil(issue.settingsURL, "\(issue)")
         }
-        XCTAssertFalse(AppIssue.accessibility.title.isEmpty)
+        for issue in AppIssue.allCases where issue.permission != nil {
+            XCTAssertNotNil(issue.settingsURL, "\(issue)")
+        }
     }
 }

@@ -383,7 +383,9 @@ public enum ESPDisplaySenderApp {
             do {
                 _ = try await SCShareableContent.excludingDesktopWindows(
                     false, onScreenWindowsOnly: false)
-                await MainActor.run { panelManager.resolve(.screenRecording) }
+                await MainActor.run {
+                    panelManager.recordScreenCaptureAttempt(succeeded: true)
+                }
             } catch {
                 let message = "screen capture is unavailable - allow ESPDisplaySender in "
                     + "System Settings > Privacy & Security > Screen & System Audio Recording "
@@ -392,11 +394,8 @@ public enum ESPDisplaySenderApp {
                 // Without this the window shows panels that are online and
                 // idle with no indication that macOS is blocking capture.
                 await MainActor.run {
-                    panelManager.report(.screenRecording, detail:
-                        "Allow ESPDisplaySender under System Settings > Privacy & Security > "
-                        + "Screen & System Audio Recording, then relaunch. Devices stay "
-                        + "connected and controllable, but no picture can be sent "
-                        + "(\(error.localizedDescription)).")
+                    panelManager.recordScreenCaptureAttempt(
+                        succeeded: false, technicalDetail: error.localizedDescription)
                 }
             }
 

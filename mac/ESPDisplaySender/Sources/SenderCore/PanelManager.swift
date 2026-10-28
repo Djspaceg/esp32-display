@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Foundation
 import Network
 import ScreenCaptureKit
@@ -55,11 +56,18 @@ final class PanelManager: ObservableObject {
     /// The Accessibility notice was dismissed; it stays down until the grant
     /// is next seen rather than coming back on the next detent of the turn.
     var accessibilityNoticeDismissed = false
+    /// The status of screen capture after its most recent real attempt.
+    private var screenRecordingPermissionState = ScreenRecordingPermissionState.ready
     /// Standing problems, at most one per kind, in the order first reported.
     @Published private(set) var issues: [ReportedIssue] = []
     /// What each source currently reports under an issue kind, in report order.
     /// `issues` is derived from this.
-    private var issueSources: [AppIssue: [(source: String, detail: String)]] = [:]
+    private var issueSources: [AppIssue: [(
+        source: String,
+        detail: String,
+        technicalDetail: String?,
+        permissionState: PermissionIssueState?
+    )]] = [:]
     /// The two files behind `.persistence`. Each one's save withdraws only its
     /// own failure: saving the app settings says nothing about the display
     /// records, and the reverse.
@@ -333,10 +341,12 @@ final class PanelManager: ObservableObject {
             Task { @MainActor in
                 self?.refreshUSBPorts()
                 self?.refreshAudioDevices()
+                self?.refreshMacPermissionGuidance()
                 self?.sortPanels()
                 self?.objectWillChange.send()
             }
         }
+        refreshMacPermissionGuidance()
         // Dragging the marquee streams straight through to whichever panel it
         // was opened for.
         regionSelector.onChange = { [weak self] region in
@@ -578,20 +588,33 @@ final class PanelManager: ObservableObject {
 
     /// Record a standing problem, replacing any earlier report of the same kind
     /// so a repeating failure does not stack up.
-    func report(_ issue: AppIssue, detail: String) {
-        report(issue, source: "", detail: detail)
+    func report(
+        _ issue: AppIssue,
+        detail: String,
+        technicalDetail: String? = nil,
+        permissionState: PermissionIssueState? = nil
+    ) {
+        report(
+            issue, source: "", detail: detail, technicalDetail: technicalDetail,
+            permissionState: permissionState)
     }
 
     /// Record a problem that one of several independent sources has - one
     /// board, one file - so that source recovering withdraws only its own part.
     /// The banner stays up, showing every remaining source, until the last one
     /// recovers.
-    func report(_ issue: AppIssue, source: String, detail: String) {
+    func report(
+        _ issue: AppIssue,
+        source: String,
+        detail: String,
+        technicalDetail: String? = nil,
+        permissionState: PermissionIssueState? = nil
+    ) {
         var sources = issueSources[issue, default: []]
         if let index = sources.firstIndex(where: { $0.source == source }) {
-            sources[index].detail = detail
+            sources[index] = (source, detail, technicalDetail, permissionState)
         } else {
-            sources.append((source, detail))
+            sources.append((source, detail, technicalDetail, permissionState))
         }
         issueSources[issue] = sources
         publishIssue(issue)
@@ -616,9 +639,12 @@ final class PanelManager: ObservableObject {
             issues.removeAll { $0.issue == issue }
             return
         }
+        let technicalDetail = sources.compactMap(\.technicalDetail).joined(separator: "\n")
         let reported = ReportedIssue(
             issue: issue,
-            detail: sources.map(\.detail).joined(separator: "\n"))
+            detail: sources.map(\.detail).joined(separator: "\n"),
+            technicalDetail: technicalDetail.isEmpty ? nil : technicalDetail,
+            permissionState: sources.compactMap(\.permissionState).first)
         if let index = issues.firstIndex(where: { $0.issue == issue }) {
             guard issues[index] != reported else { return }
             issues[index] = reported
@@ -632,6 +658,87 @@ final class PanelManager: ObservableObject {
     func dismissIssue(_ issue: AppIssue) {
         if issue == .accessibility { accessibilityNoticeDismissed = true }
         resolve(issue)
+    }
+
+    /// Record the only reliable proof that the current process can capture:
+    /// ScreenCaptureKit successfully enumerated content. Permission can be
+    /// granted while the existing process still needs a relaunch.
+    func recordScreenCaptureAttempt(succeeded: Bool, technicalDetail: String? = nil) {
+        screenRecordingPermissionState.observeCaptureResult(
+            works: succeeded, authorized: CGPreflightScreenCaptureAccess())
+        publishScreenRecordingPermission(technicalDetail: technicalDetail)
+    }
+
+    /// Re-check grants when the app returns from System Settings and on the
+    /// existing two-second housekeeping timer. The screen-capture probe runs
+    /// only while there is an unresolved capture issue.
+    func refreshMacPermissionGuidance() {
+        refreshMediaKeyAuthorization()
+        refreshSystemAudioRecordingAuthorization()
+
+        let authorized = CGPreflightScreenCaptureAccess()
+        screenRecordingPermissionState.observeAuthorization(authorized)
+        guard screenRecordingPermissionState != .ready else {
+            resolve(.screenRecording)
+            return
+        }
+        publishScreenRecordingPermission()
+        guard authorized else { return }
+        Task { [weak self] in
+            do {
+                _ = try await SCShareableContent.excludingDesktopWindows(
+                    false, onScreenWindowsOnly: false)
+                await MainActor.run {
+                    self?.recordScreenCaptureAttempt(succeeded: true)
+                }
+            } catch {
+                await MainActor.run {
+                    self?.recordScreenCaptureAttempt(
+                        succeeded: false, technicalDetail: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    /// Ask macOS itself for a grant when it still has a prompt to show.
+    func requestPermissionAccess(for issue: AppIssue) {
+        switch issue.permission {
+        case .screenRecording:
+            _ = CGRequestScreenCaptureAccess()
+            refreshMacPermissionGuidance()
+        case .accessibility:
+            requestMediaKeyAuthorization()
+        case .systemAudioRecording:
+            SystemAudioAccess.system.request? { [weak self] _ in
+                Task { @MainActor in self?.refreshMacPermissionGuidance() }
+            }
+        case nil:
+            break
+        }
+    }
+
+    private func publishScreenRecordingPermission(technicalDetail: String? = nil) {
+        guard let state = screenRecordingPermissionState.issueState else {
+            resolve(.screenRecording)
+            return
+        }
+        report(
+            .screenRecording,
+            detail: MacPermission.screenRecording.message(for: state),
+            technicalDetail: technicalDetail,
+            permissionState: state)
+    }
+
+    private func refreshSystemAudioRecordingAuthorization() {
+        switch SystemAudioAccess.system.status() {
+        case .denied:
+            report(
+                .systemAudioRecording,
+                detail: MacPermission.systemAudioRecording.message(for: .needsAccess),
+                permissionState: .needsAccess)
+        case .authorized, .notDetermined, .unknown:
+            resolve(.systemAudioRecording)
+        }
     }
 
 
