@@ -461,6 +461,41 @@ bool armed() {
   return rx.armed();
 }
 
+bool verifyCameraAuth(const char *nonce, const char *cnonce,
+                      const char *response) {
+  if (!armed() || nonce == nullptr || cnonce == nullptr || response == nullptr) {
+    return false;
+  }
+  char salt[2 * streamupdate::HEX_DIGEST_CHARS + 2];
+  if (streamupdate::authSalt(salt, sizeof(salt), nonce, cnonce) == 0) {
+    return false;
+  }
+  char passwordHash[streamupdate::HEX_DIGEST_CHARS + 1] = {};
+  {
+    Lock held;
+    memcpy(passwordHash, rx.passwordHash(), sizeof(passwordHash));
+  }
+  SHA256Builder sha256;
+  PBKDF2_HMACBuilder pbkdf2(&sha256, String(passwordHash), String(salt),
+                            streamupdate::PBKDF2_ITERATIONS);
+  pbkdf2.begin();
+  pbkdf2.calculate();
+  const String derived = pbkdf2.toString();
+  char challenge[3 * streamupdate::HEX_DIGEST_CHARS + 3];
+  if (derived.length() != streamupdate::HEX_DIGEST_CHARS ||
+      streamupdate::authChallenge(challenge, sizeof(challenge), derived.c_str(),
+                                  nonce, cnonce) == 0) {
+    return false;
+  }
+  SHA256Builder expected;
+  expected.begin();
+  expected.add(challenge);
+  expected.calculate();
+  const String expectedHex = expected.toString();
+  return expectedHex.length() == streamupdate::HEX_DIGEST_CHARS &&
+         streamupdate::sameDigestHex(expectedHex.c_str(), response);
+}
+
 bool handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
                    uint16_t remotePort) {
   if (!streamupdate::hasMagic(data, len)) return false;

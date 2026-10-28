@@ -9,10 +9,17 @@
 namespace cameraproto {
 
 static const uint8_t VERSION = 1;
-static const uint8_t COMMAND_START = 1;
-static const uint8_t COMMAND_STOP = 2;
+static const uint8_t COMMAND_CHALLENGE = 1;
+static const uint8_t COMMAND_START = COMMAND_CHALLENGE;
+static const uint8_t COMMAND_AUTH_START = 2;
+static const uint8_t COMMAND_STOP = 3;
 static const uint8_t FRAME_FRAGMENT = 0x80;
+static const uint8_t CHALLENGE = 0x81;
+static const uint8_t AUTH_REFUSED = 0x82;
+static const uint8_t AUTH_UNAVAILABLE = 0x83;
 static const size_t COMMAND_BYTES = 8;
+static const size_t AUTH_BYTES = 136;
+static const size_t CHALLENGE_BYTES = 72;
 static const size_t FRAME_HEADER_BYTES = 14;
 static const size_t MAX_FRAGMENT_PAYLOAD = 1200;
 static const size_t MAX_FRAGMENTS = 256;
@@ -25,6 +32,12 @@ enum class Resolution : uint8_t {
 struct Command {
   uint8_t kind;
   Resolution resolution;
+};
+
+struct Authentication {
+  Resolution resolution;
+  char cnonce[65];
+  char response[65];
 };
 
 inline uint16_t readU16LE(const uint8_t *p) {
@@ -44,13 +57,61 @@ inline bool validResolution(uint8_t value) {
 inline bool parseCommand(const uint8_t *data, size_t len, Command &out) {
   if (len != COMMAND_BYTES || memcmp(data, "ECAM", 4) != 0 ||
       data[4] != VERSION ||
-      (data[5] != COMMAND_START && data[5] != COMMAND_STOP) ||
+      (data[5] != COMMAND_CHALLENGE && data[5] != COMMAND_STOP) ||
       !validResolution(data[6]) || data[7] != 0) {
     return false;
   }
   out.kind = data[5];
   out.resolution = (Resolution)data[6];
   return true;
+}
+
+inline bool lowerHex(const uint8_t *value) {
+  for (size_t i = 0; i < 64; ++i) {
+    if (!((value[i] >= '0' && value[i] <= '9') ||
+          (value[i] >= 'a' && value[i] <= 'f'))) return false;
+  }
+  return true;
+}
+
+inline bool parseAuthentication(const uint8_t *data, size_t len,
+                                Authentication &out) {
+  if (len != AUTH_BYTES || memcmp(data, "ECAM", 4) != 0 ||
+      data[4] != VERSION || data[5] != COMMAND_AUTH_START ||
+      !validResolution(data[6]) || data[7] != 0 ||
+      !lowerHex(data + 8) || !lowerHex(data + 72)) {
+    return false;
+  }
+  out.resolution = (Resolution)data[6];
+  memcpy(out.cnonce, data + 8, 64);
+  out.cnonce[64] = '\0';
+  memcpy(out.response, data + 72, 64);
+  out.response[64] = '\0';
+  return true;
+}
+
+inline size_t writeChallenge(uint8_t *out, size_t capacity,
+                             Resolution resolution, const char *nonce) {
+  if (capacity < CHALLENGE_BYTES || nonce == nullptr) return 0;
+  memcpy(out, "ECAM", 4);
+  out[4] = VERSION;
+  out[5] = CHALLENGE;
+  out[6] = (uint8_t)resolution;
+  out[7] = 0;
+  memcpy(out + 8, nonce, 64);
+  return CHALLENGE_BYTES;
+}
+
+inline size_t writeStatus(uint8_t *out, size_t capacity, uint8_t status,
+                          Resolution resolution) {
+  if (capacity < COMMAND_BYTES ||
+      (status != AUTH_REFUSED && status != AUTH_UNAVAILABLE)) return 0;
+  memcpy(out, "ECAM", 4);
+  out[4] = VERSION;
+  out[5] = status;
+  out[6] = (uint8_t)resolution;
+  out[7] = 0;
+  return COMMAND_BYTES;
 }
 
 inline size_t writeFrameHeader(uint8_t *out, size_t capacity,

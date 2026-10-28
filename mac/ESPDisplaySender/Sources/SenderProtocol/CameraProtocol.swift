@@ -6,6 +6,8 @@ import Foundation
 public enum CameraProtocol {
     public static let version: UInt8 = 1
     public static let commandBytes = 8
+    public static let authBytes = 136
+    public static let challengeBytes = 72
     public static let frameHeaderBytes = 14
     public static let maximumFragmentPayload = 1_200
     public static let maximumFragments = 256
@@ -23,8 +25,19 @@ public enum CameraProtocol {
     }
 
     public enum Command: UInt8 {
-        case start = 1
-        case stop = 2
+        case challenge = 1
+        case authenticateStart = 2
+        case stop = 3
+    }
+
+    public enum Status: UInt8, Sendable {
+        case authenticationRefused = 0x82
+        case authenticationUnavailable = 0x83
+    }
+
+    public struct Challenge: Equatable, Sendable {
+        public let resolution: Resolution
+        public let nonce: String
     }
 
     public struct Fragment: Equatable, Sendable {
@@ -35,13 +48,46 @@ public enum CameraProtocol {
         public let payload: Data
     }
 
-    public static func commandPacket(
-        _ command: Command, resolution: Resolution
-    ) -> Data {
+    public static func commandPacket(_ command: Command, resolution: Resolution) -> Data {
         Data([
             0x45, 0x43, 0x41, 0x4d, version, command.rawValue,
             resolution.rawValue, 0,
         ])
+    }
+
+    public static func authenticationPacket(
+        resolution: Resolution, cnonce: String, response: String
+    ) -> Data? {
+        guard cnonce.utf8.count == 64, response.utf8.count == 64,
+              cnonce.allSatisfy({ $0.isNumber || ("a"..."f").contains($0) }),
+              response.allSatisfy({ $0.isNumber || ("a"..."f").contains($0) })
+        else { return nil }
+        var packet = commandPacket(.authenticateStart, resolution: resolution)
+        packet.append(Data(cnonce.utf8))
+        packet.append(Data(response.utf8))
+        return packet
+    }
+
+    public static func parseChallenge(_ data: Data) -> Challenge? {
+        let bytes = [UInt8](data)
+        guard bytes.count == challengeBytes,
+              Array(bytes[0..<4]) == Array("ECAM".utf8),
+              bytes[4] == version, bytes[5] == 0x81,
+              let resolution = Resolution(rawValue: bytes[6]), bytes[7] == 0,
+              let nonce = String(bytes: bytes[8...], encoding: .utf8),
+              nonce.count == 64, nonce.allSatisfy({ $0.isNumber || ("a"..."f").contains($0) })
+        else { return nil }
+        return Challenge(resolution: resolution, nonce: nonce)
+    }
+
+    public static func parseStatus(_ data: Data) -> (Status, Resolution)? {
+        let bytes = [UInt8](data)
+        guard bytes.count == commandBytes,
+              Array(bytes[0..<4]) == Array("ECAM".utf8),
+              bytes[4] == version, let status = Status(rawValue: bytes[5]),
+              let resolution = Resolution(rawValue: bytes[6]), bytes[7] == 0
+        else { return nil }
+        return (status, resolution)
     }
 
     public static func parseFragment(_ data: Data) -> Fragment? {

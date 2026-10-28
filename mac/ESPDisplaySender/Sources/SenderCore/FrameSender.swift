@@ -37,6 +37,7 @@ final class FrameSender {
         case battery(DeviceProtocol.BatteryStatus)
         case inputReport(DeviceProtocol.InputReport)
         case camera(CameraProtocol.Fragment)
+        case cameraStatus(CameraProtocol.Status)
     }
 
     private let host: String
@@ -253,6 +254,8 @@ final class FrameSender {
     private var _lastHeartbeatAt: Date?
     private var _stats = DeviceStats()
     private var _deviceInfo: DeviceProtocol.DeviceInfo?
+    private var cameraPassword: String?
+    private var cameraResolution: CameraProtocol.Resolution = .qvga
     private var _lastControlAck: DeviceProtocol.ControlAck?
     private var _resolvedAddress: String?
     let peerAddressState = PanelPeerAddress()
@@ -988,6 +991,25 @@ final class FrameSender {
             onDeviceEvent?(.camera(fragment))
             return
         }
+        if let challenge = CameraProtocol.parseChallenge(data) {
+            let password = lock.withLock { cameraPassword }
+            let cnonce = EspotaProtocol.sha256Hex(UUID().uuidString)
+            guard let password,
+                  let response = EspotaProtocol.authResponse(
+                    password: password, nonce: challenge.nonce,
+                    cnonce: cnonce),
+                  let packet = CameraProtocol.authenticationPacket(
+                    resolution: challenge.resolution,
+                    cnonce: cnonce,
+                    response: response)
+            else { return }
+            transmit(packet, repeats: 3)
+            return
+        }
+        if let (status, _) = CameraProtocol.parseStatus(data) {
+            onDeviceEvent?(.cameraStatus(status))
+            return
+        }
         if let acknowledgement = DeviceProtocol.parseAck(data) {
             lock.withLock {
                 _lastControlAck = acknowledgement
@@ -1300,10 +1322,15 @@ final class FrameSender {
 
     /// Start or stop JPEG capture. ECAM is offered only when EINF advertised a
     /// working camera, so an older or camera-less board receives no new packet.
-    func setCameraStreaming(_ enabled: Bool, resolution: CameraProtocol.Resolution) {
-        transmit(
-            CameraProtocol.commandPacket(enabled ? .start : .stop, resolution: resolution),
-            repeats: 3)
+    func setCameraStreaming(
+        _ enabled: Bool, resolution: CameraProtocol.Resolution, password: String? = nil
+    ) {
+        lock.withLock {
+            cameraPassword = enabled ? password : nil
+            cameraResolution = resolution
+        }
+        transmit(CameraProtocol.commandPacket(
+            enabled ? .challenge : .stop, resolution: resolution), repeats: 3)
     }
 
     private func sendManagementControl(

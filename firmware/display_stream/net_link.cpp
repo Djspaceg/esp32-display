@@ -40,6 +40,10 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
     statBadLen = statBadLen + 1;
     return;
   }
+  if (len >= 4 && memcmp(data, "ECAM", 4) == 0) {
+    if (!handleCameraCommand(data, len, remoteIp, remotePort)) statBadLen = statBadLen + 1;
+    return;
+  }
 
   // Any packet from the sender refreshes the heartbeat reply endpoint and
   // proves the sender is alive - keepalives arrive even when the screen is
@@ -47,12 +51,9 @@ static void handleInbound(const uint8_t *data, size_t len, uint32_t remoteIp,
   hbIp = remoteIp;
   hbPort = remotePort;
   lastSenderPacketAt = millis();
+  noteCameraPeerPacket(remoteIp, remotePort);
   if (len == 4 && memcmp(data, "EPNG", 4) == 0) {
     return;  // keepalive ping: endpoint refresh only
-  }
-  if (len >= 4 && memcmp(data, "ECAM", 4) == 0) {
-    if (!handleCameraCommand(data, len)) statBadLen = statBadLen + 1;
-    return;
   }
   // Firmware update packets ride this socket (stream_update.h). Never
   // counted as frame packets, so the link-heal starvation check below in

@@ -12,6 +12,8 @@ namespace streamupdatesvc {
 /// password's SHA-256 hex is kept, as ArduinoOTA keeps it; NVS is untouched.
 void arm(const char *password);
 bool armed();
+bool verifyCameraAuth(const char *nonce, const char *cnonce,
+                      const char *response);
 
 /// The receive path. True when the datagram was an update packet (and has
 /// been handled); false for anything else.

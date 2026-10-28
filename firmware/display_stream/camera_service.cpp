@@ -5,6 +5,7 @@
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 
 #include <esp_camera.h>
+#include <esp_system.h>
 
 #include <board_config.h>
 
@@ -12,6 +13,8 @@
 #include "camera_protocol.h"
 #include "display_power.h"
 #include "net_link.h"
+#include "stream_update.h"
+#include "stream_update_service.h"
 
 namespace {
 
@@ -21,6 +24,10 @@ bool requested = false;
 cameraproto::Resolution cameraResolution = cameraproto::Resolution::Qvga;
 uint16_t nextFrameId = 0;
 uint32_t lastFrameAt = 0;
+uint32_t peerIp = 0;
+uint16_t peerPort = 0;
+uint32_t lastPeerPacketAt = 0;
+char nonce[65] = {};
 
 framesize_t frameSize(cameraproto::Resolution value) {
   return value == cameraproto::Resolution::Vga ? FRAMESIZE_VGA : FRAMESIZE_QVGA;
@@ -78,27 +85,71 @@ bool cameraAvailable() {
   return available;
 }
 
-bool handleCameraCommand(const uint8_t *data, size_t len) {
+bool handleCameraCommand(const uint8_t *data, size_t len, uint32_t remoteIp,
+                         uint16_t remotePort) {
   if (!available) return false;
+  cameraproto::Authentication auth;
+  if (cameraproto::parseAuthentication(data, len, auth)) {
+    if (peerPort != remotePort || peerIp != remoteIp ||
+        !streamupdatesvc::verifyCameraAuth(nonce, auth.cnonce, auth.response)) {
+      uint8_t reply[cameraproto::COMMAND_BYTES];
+      const size_t replyBytes = cameraproto::writeStatus(
+          reply, sizeof(reply), cameraproto::AUTH_REFUSED, auth.resolution);
+      if (replyBytes != 0) sendToEndpoint(remoteIp, remotePort, reply, replyBytes);
+      return false;
+    }
+    cameraResolution = auth.resolution;
+    if (!applyResolution()) return false;
+    requested = true;
+    lastPeerPacketAt = millis();
+    return true;
+  }
   cameraproto::Command command;
   if (!cameraproto::parseCommand(data, len, command)) return false;
+  if (command.kind == cameraproto::COMMAND_CHALLENGE) {
+    if (requested && (peerIp != remoteIp || peerPort != remotePort)) return false;
+    if (!streamupdatesvc::armed()) {
+      uint8_t reply[cameraproto::COMMAND_BYTES];
+      const size_t replyBytes = cameraproto::writeStatus(
+          reply, sizeof(reply), cameraproto::AUTH_UNAVAILABLE, command.resolution);
+      if (replyBytes != 0) sendToEndpoint(remoteIp, remotePort, reply, replyBytes);
+      return false;
+    }
+    uint8_t random[32];
+    esp_fill_random(random, sizeof(random));
+    streamupdate::toHex(random, sizeof(random), nonce);
+    peerIp = remoteIp;
+    peerPort = remotePort;
+    requested = false;
+    uint8_t reply[cameraproto::CHALLENGE_BYTES];
+    const size_t replyBytes = cameraproto::writeChallenge(
+        reply, sizeof(reply), command.resolution, nonce);
+    if (replyBytes != 0) sendToEndpoint(remoteIp, remotePort, reply, replyBytes);
+    return replyBytes != 0;
+  }
+  if (peerPort != remotePort || peerIp != remoteIp || !requested) return false;
   cameraResolution = command.resolution;
   if (!applyResolution()) return false;
-  requested = command.kind == cameraproto::COMMAND_START;
+  requested = false;
   if (!requested) Serial.println("camera: stopped by sender");
   return true;
+}
+
+void noteCameraPeerPacket(uint32_t remoteIp, uint16_t remotePort) {
+  if (requested && peerIp == remoteIp && peerPort == remotePort) {
+    lastPeerPacketAt = millis();
+  }
 }
 
 void serviceCamera() {
   // Camera frames are opt-in. The sender's normal two-second keepalive is the
   // lease: when the app exits or loses the device, stop WiFi JPEG work without
   // waiting for a fresh command packet.
-  if (requested && (lastSenderPacketAt == 0 ||
-                    (uint32_t)(millis() - lastSenderPacketAt) > 5000)) {
+  if (requested && (uint32_t)(millis() - lastPeerPacketAt) > 5000) {
     requested = false;
     Serial.println("camera: sender lease expired");
   }
-  if (!available || !requested || hbPort == 0) return;
+  if (!available || !requested || peerPort == 0) return;
   const uint32_t now = millis();
   if (now - lastFrameAt < 66) return;  // cap WiFi JPEG work at 15 fps.
   lastFrameAt = now;
@@ -126,7 +177,7 @@ void serviceCamera() {
         (uint16_t)fragments);
     if (header == 0) break;
     memcpy(packet + header, frame->buf + offset, payload);
-    sendToSender(packet, header + payload);
+    sendToEndpoint(peerIp, peerPort, packet, header + payload);
     offset += payload;
   }
   esp_camera_fb_return(frame);
@@ -142,9 +193,11 @@ bool cameraAvailable() {
   return false;
 }
 
-bool handleCameraCommand(const uint8_t *, size_t) {
+bool handleCameraCommand(const uint8_t *, size_t, uint32_t, uint16_t) {
   return false;
 }
+
+void noteCameraPeerPacket(uint32_t, uint16_t) {}
 
 void serviceCamera() {}
 

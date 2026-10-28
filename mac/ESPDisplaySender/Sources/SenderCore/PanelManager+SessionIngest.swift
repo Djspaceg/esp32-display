@@ -278,6 +278,16 @@ extension PanelManager {
                     jpeg: jpeg, resolution: resolution, from: serviceName,
                     sessionID: sessionID)
             }
+        case .cameraStatus(let status):
+            let message: String
+            switch status {
+            case .authenticationRefused:
+                message = "Camera authorization was refused. Update the saved OTA password for this device."
+            case .authenticationUnavailable:
+                message = "Set and save an OTA password for this device before starting its camera."
+            }
+            operationOutcome = .failure("Camera authorization failed", message)
+            updatePanel(serviceName) { $0.cameraStreaming = false }
         }
         persistIfNeeded(force: reconciledIdentity)
     }

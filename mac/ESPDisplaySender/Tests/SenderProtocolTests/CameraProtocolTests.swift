@@ -9,7 +9,7 @@ final class CameraProtocolTests: XCTestCase {
 
     func testStartCommandLayout() {
         XCTAssertEqual(
-            CameraProtocol.commandPacket(.start, resolution: .vga),
+            CameraProtocol.commandPacket(.challenge, resolution: .vga),
             Data([0x45, 0x43, 0x41, 0x4d, 1, 1, 2, 0]))
     }
 
@@ -25,7 +25,7 @@ final class CameraProtocolTests: XCTestCase {
     }
 
     func testMalformedFragmentIsRefused() {
-        var packet = CameraProtocol.commandPacket(.start, resolution: .qvga)
+        var packet = CameraProtocol.commandPacket(.challenge, resolution: .qvga)
         packet.append(Data(repeating: 0, count: CameraProtocol.frameHeaderBytes))
         XCTAssertNil(CameraProtocol.parseFragment(packet))
         XCTAssertTrue(CameraProtocol.fragments(
@@ -33,5 +33,17 @@ final class CameraProtocolTests: XCTestCase {
                 * (CameraProtocol.maximumFragments + 1)),
             resolution: .vga,
             frameID: 1).isEmpty)
+    }
+
+    func testCameraAuthorizationPacketsRequireHexAndRoundTripChallenge() {
+        let nonce = String(repeating: "a", count: 64)
+        let challenge = Data(
+            Array("ECAM".utf8) + [CameraProtocol.version, 0x81,
+                CameraProtocol.Resolution.vga.rawValue, 0] + Array(nonce.utf8))
+        XCTAssertEqual(CameraProtocol.parseChallenge(challenge)?.nonce, nonce)
+        XCTAssertNil(CameraProtocol.authenticationPacket(
+            resolution: .qvga, cnonce: "bad", response: nonce))
+        XCTAssertNotNil(CameraProtocol.authenticationPacket(
+            resolution: .qvga, cnonce: nonce, response: nonce))
     }
 }

@@ -356,7 +356,21 @@ extension PanelManager {
                 "This device has not reported a working camera connection yet.")
             return
         }
-        session.setCameraStreaming(enabled, resolution: resolution)
+        let password: String?
+        if enabled {
+            guard let hardwareID = stableHardwareID(of: panel),
+                  let saved = rememberedOTAPassword(for: hardwareID)
+            else {
+                operationOutcome = .failure(
+                    "Camera authorization unavailable",
+                    "Set and save an OTA password for this device before starting its camera.")
+                return
+            }
+            password = saved
+        } else {
+            password = nil
+        }
+        session.setCameraStreaming(enabled, resolution: resolution, password: password)
         updatePanel(serviceName) {
             $0.cameraStreaming = enabled
             $0.cameraResolution = resolution

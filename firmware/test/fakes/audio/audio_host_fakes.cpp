@@ -105,7 +105,10 @@ void delay(uint32_t milliseconds) { nowMs += milliseconds; }
 // provide the unavailable branch rather than making that seam pull esp_camera.
 bool startCameraService() { return false; }
 bool cameraAvailable() { return false; }
-bool handleCameraCommand(const uint8_t *, size_t) { return false; }
+bool handleCameraCommand(const uint8_t *, size_t, uint32_t, uint16_t) {
+  return false;
+}
+void noteCameraPeerPacket(uint32_t, uint16_t) {}
 void serviceCamera() {}
 
 int FakeWiFi::RSSI() const {
