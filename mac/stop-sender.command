@@ -10,16 +10,21 @@
 # exited immediately. Stop the agent first, then Run.
 set -euo pipefail
 
-LABEL="com.resourcefork.espdisplay"
+APP="/Applications/ESPDisplay.app"
+LABEL="$(plutil -extract CFBundleIdentifier raw -o - "$APP/Contents/Info.plist" 2>/dev/null || true)"
+[[ -n "$LABEL" ]] || {
+  echo "error: $APP is missing; cannot determine its LaunchAgent label" >&2
+  exit 1
+}
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 echo "==> Stopping the sender LaunchAgent"
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || echo "    (was not loaded)"
 
 sleep 2
-if pgrep -fl "ESPDisplaySender --background" > /dev/null 2>&1; then
+if pgrep -fl "ESPDisplay --background" > /dev/null 2>&1; then
   echo "    still running:"
-  pgrep -fl "ESPDisplaySender --background"
+  pgrep -fl "ESPDisplay --background"
 else
   echo "    stopped. The lock is free, so Xcode can run its own build now."
 fi

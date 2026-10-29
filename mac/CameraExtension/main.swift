@@ -8,9 +8,22 @@ private let cameraWidth = 640
 private let cameraHeight = 480
 private let frameRate: Int32 = 15
 
+private enum CameraExtensionIdentity {
+    static let bundleIdentifier: String = {
+        guard let identifier = Bundle.main.bundleIdentifier, !identifier.isEmpty else {
+            fatalError("Camera extension is missing its bundle identifier.")
+        }
+        return identifier
+    }()
+
+    static let appBundleIdentifier = String(
+        bundleIdentifier.dropLast(".camera-extension".count))
+    static let legacyDeviceIdentifier = appBundleIdentifier + ".xiaoml-camera"
+}
+
 @main
 final class CameraExtensionMain: NSObject, CMIOExtensionProviderSource {
-    private let queue = DispatchQueue(label: "com.resourcefork.espdisplay.camera-extension")
+    private let queue = DispatchQueue(label: CameraExtensionIdentity.bundleIdentifier)
     private let deviceSource = CameraDeviceSource()
     private lazy var provider = CMIOExtensionProvider(source: self, clientQueue: queue)
 
@@ -75,7 +88,7 @@ private final class CameraDeviceSource: NSObject, CMIOExtensionDeviceSource {
         device = CMIOExtensionDevice(
             localizedName: "ESPDisplay XIAOML Camera",
             deviceID: UUID(uuidString: "66D0C1A2-8D38-4CEA-8B4C-0EE7ABF3330B")!,
-            legacyDeviceID: "com.resourcefork.espdisplay.xiaoml-camera",
+            legacyDeviceID: CameraExtensionIdentity.legacyDeviceIdentifier,
             source: self)
         output = CameraOutputStream(
             localizedName: "Camera",
@@ -107,7 +120,7 @@ private final class CameraDeviceSource: NSObject, CMIOExtensionDeviceSource {
             result.transportType = kIOAudioDeviceTransportTypeVirtual
         }
         if properties.contains(.deviceModel) {
-            result.model = "com.resourcefork.espdisplay.camera-extension"
+            result.model = CameraExtensionIdentity.bundleIdentifier
         }
         return result
     }

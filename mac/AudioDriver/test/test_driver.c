@@ -351,7 +351,8 @@ static void TestRegistrationIsValidated(void) {
 
 static void TestDevicesAppearWithTheirProperties(void) {
     int listChanges = Counter(&gDeviceListChanges);
-    const char* uids[] = {"com.resourcefork.espdisplay.display.aabbcc", "com.resourcefork.espdisplay.display.ddeeff"};
+    const char* uids[] = {ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc",
+                          ESPDISP_AUDIO_BUNDLE_ID ".display.ddeeff"};
     const char* names[] = {"Desk Panel", "Shelf Panel"};
     CHECK(RegisterDevices("app", 2, uids, names, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
     CHECK(Counter(&gDeviceListChanges) > listChanges);
@@ -431,7 +432,7 @@ static void TestDevicesAppearWithTheirProperties(void) {
 // driver has nothing to hand over and the app sends the ESP device only
 // silence. Once IO stops (another output chosen), nothing more comes either.
 static void TestADeviceThatIsNotTheOutputGivesNothing(void) {
-    AudioObjectID shelf = Translate("com.resourcefork.espdisplay.display.ddeeff");
+    AudioObjectID shelf = Translate(ESPDISP_AUDIO_BUNDLE_ID ".display.ddeeff");
     CHECK(shelf != kAudioObjectUnknown);
     Float32* samples = NULL;
     for (int read = 0; read < 3; ++read) {
@@ -496,7 +497,7 @@ static void TestADeviceThatIsNotTheOutputGivesNothing(void) {
 }
 
 static void TestMixedAudioIsReadBackOnce(void) {
-    AudioObjectID desk = Translate("com.resourcefork.espdisplay.display.aabbcc");
+    AudioObjectID desk = Translate(ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc");
     AudioObjectID stream = Owned(desk, 0);
     CHECK((*gDriver)->StartIO(gDriver, desk, 1) == 0);
     CHECK(GetU32(desk, kAudioDevicePropertyDeviceIsRunning, kAudioObjectPropertyScopeGlobal)
@@ -539,7 +540,7 @@ static void TestMixedAudioIsReadBackOnce(void) {
 }
 
 static void TestVolumeAndMuteScaleWhatIsRead(void) {
-    AudioObjectID desk = Translate("com.resourcefork.espdisplay.display.aabbcc");
+    AudioObjectID desk = Translate(ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc");
     AudioObjectID stream = Owned(desk, 0);
     AudioObjectID volume = Owned(desk, 1);
     AudioObjectID mute = Owned(desk, 2);
@@ -627,7 +628,7 @@ static void* Reader(void* context) {
 // The IO thread writes while another thread reads, as in coreaudiod. Under
 // TSan this is the check that the ring needs no lock.
 static void TestConcurrentWriteAndRead(void) {
-    AudioObjectID shelf = Translate("com.resourcefork.espdisplay.display.ddeeff");
+    AudioObjectID shelf = Translate(ESPDISP_AUDIO_BUNDLE_ID ".display.ddeeff");
     CHECK((*gDriver)->StartIO(gDriver, shelf, 1) == 0);
     RaceState state = {shelf, Owned(shelf, 0), false, 0, true};
     Float32* drained = NULL;
@@ -647,7 +648,7 @@ static void TestConcurrentWriteAndRead(void) {
 // not a caller without the token, not one with a wrong one, and not another
 // client that lists the same UID. Nor can anyone else withdraw it.
 static void TestOtherClientsCannotReadOrWithdraw(void) {
-    AudioObjectID desk = Translate("com.resourcefork.espdisplay.display.aabbcc");
+    AudioObjectID desk = Translate(ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc");
     CHECK(desk != kAudioObjectUnknown);
     CFPropertyListRef data = NULL;
     CHECK(ReadAs(desk, NULL, &data) == kAudioHardwareIllegalOperationError);
@@ -657,7 +658,7 @@ static void TestOtherClientsCannotReadOrWithdraw(void) {
 
     const char* app = gToken;
     gToken = "intruder-token-0123456789abcdef01234";
-    const char* uids[] = {"com.resourcefork.espdisplay.display.aabbcc"};
+    const char* uids[] = {ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc"};
     const char* names[] = {"Mine now"};
     CHECK(RegisterDevices("app", 1, uids, names, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
     CHECK(ReadAs(desk, gToken, &data) == kAudioHardwareIllegalOperationError);
@@ -668,7 +669,7 @@ static void TestOtherClientsCannotReadOrWithdraw(void) {
     CHECK(RegisterDevices("app", 1, uids, names, ESPDISP_AUDIO_PROTOCOL_VERSION)
           == kAudioHardwareIllegalOperationError);
     gToken = app;
-    CHECK(Translate("com.resourcefork.espdisplay.display.aabbcc") == desk);
+    CHECK(Translate(ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc") == desk);
     Float32* samples = NULL;
     (void)ReadFrames(desk, &samples);
     free(samples);
@@ -695,7 +696,8 @@ static bool Owns(AudioObjectID device, const char* token) {
 static void TestCrowdingCannotTakeADevice(void) {
     const char* app = gToken;
     const char* crowder = "crowder-token-0123456789abcdef012345";
-    const char* appUIDs[] = {"com.resourcefork.espdisplay.display.aabbcc", "com.resourcefork.espdisplay.display.ddeeff"};
+    const char* appUIDs[] = {ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc",
+                             ESPDISP_AUDIO_BUNDLE_ID ".display.ddeeff"};
     const char* appNames[] = {"Desk", "Shelf Panel"};
     const char* fakes[] = {"f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8"};
     const char* fakeNames[] = {"x", "x", "x", "x", "x", "x", "x", "x"};
@@ -712,7 +714,7 @@ static void TestCrowdingCannotTakeADevice(void) {
 
     gToken = crowder;
     CHECK(RegisterDevices("crowd", 8, fakes, fakeNames, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
-    const char* steal[] = {"com.resourcefork.espdisplay.display.aabbcc"};
+    const char* steal[] = {ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc"};
     const char* spy[] = {"spy"};
     CHECK(RegisterDevices("crowd", 1, steal, spy, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
     gToken = app;
@@ -733,7 +735,7 @@ static void TestCrowdingCannotTakeADevice(void) {
 static void TestANewOwnerGetsANewDevice(void) {
     const char* app = gToken;
     const char* other = "second-lister-token-0123456789abcdef";
-    const char* uids[] = {"com.resourcefork.espdisplay.display.ddeeff"};
+    const char* uids[] = {ESPDISP_AUDIO_BUNDLE_ID ".display.ddeeff"};
     const char* names[] = {"Second"};
     AudioObjectID shelf = Translate(uids[0]);
     CHECK(shelf != kAudioObjectUnknown);
@@ -741,7 +743,7 @@ static void TestANewOwnerGetsANewDevice(void) {
     CHECK(RegisterDevices("other", 1, uids, names, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
     CHECK(TranslateAs(uids[0], app) == shelf);
     gToken = app;
-    const char* keep[] = {"com.resourcefork.espdisplay.display.aabbcc"};
+    const char* keep[] = {ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc"};
     const char* keepNames[] = {"Desk"};
     int listChanges = Counter(&gDeviceListChanges);
     CHECK(RegisterDevices("app", 1, keep, keepNames, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
@@ -757,14 +759,16 @@ static void TestANewOwnerGetsANewDevice(void) {
     gToken = other;
     CHECK(RegisterDevices("other", 0, NULL, NULL, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
     gToken = app;
-    const char* both[] = {"com.resourcefork.espdisplay.display.aabbcc", "com.resourcefork.espdisplay.display.ddeeff"};
+    const char* both[] = {ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc",
+                          ESPDISP_AUDIO_BUNDLE_ID ".display.ddeeff"};
     const char* bothNames[] = {"Desk", "Shelf Panel"};
     CHECK(RegisterDevices("app", 2, both, bothNames, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
 }
 
 static void TestClientsUnionAndExpire(void) {
-    AudioObjectID desk = Translate("com.resourcefork.espdisplay.display.aabbcc");
-    const char* other[] = {"com.resourcefork.espdisplay.display.aabbcc", "com.resourcefork.espdisplay.test.tone"};
+    AudioObjectID desk = Translate(ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc");
+    const char* other[] = {ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc",
+                           ESPDISP_AUDIO_BUNDLE_ID ".test.tone"};
     const char* otherNames[] = {"Desk again", "Test Tone"};
     const char* app = gToken;
     gToken = "check-tool-token-0123456789abcdef0123";
@@ -783,13 +787,14 @@ static void TestClientsUnionAndExpire(void) {
 
     // The app keeps sending its heartbeat; the check tool stops.
     AdvanceSeconds(6);
-    const char* uids[] = {"com.resourcefork.espdisplay.display.aabbcc", "com.resourcefork.espdisplay.display.ddeeff"};
+    const char* uids[] = {ESPDISP_AUDIO_BUNDLE_ID ".display.aabbcc",
+                          ESPDISP_AUDIO_BUNDLE_ID ".display.ddeeff"};
     const char* names[] = {"Desk", "Shelf Panel"};
     CHECK(RegisterDevices("app", 2, uids, names, ESPDISP_AUDIO_PROTOCOL_VERSION) == 0);
     AdvanceSeconds(6);
     ESPDisplayAudio_TestReconcileNow();
     CHECK(DeviceList(devices, 8) == 2);
-    CHECK(TranslateAs("com.resourcefork.espdisplay.test.tone", "check-tool-token-0123456789abcdef0123")
+    CHECK(TranslateAs(ESPDISP_AUDIO_BUNDLE_ID ".test.tone", "check-tool-token-0123456789abcdef0123")
           == kAudioObjectUnknown);
 
     // Then the app goes quiet too: every device goes.

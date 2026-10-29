@@ -3,16 +3,16 @@ import SenderProtocol
 import SwiftUI
 
 extension Notification.Name {
-    static let espDisplayShowManager = Notification.Name("com.resourcefork.espdisplay.showManager")
+    static let espDisplayShowManager = Notification.Name(AppIdentity.notification("showManager"))
     /// Opens the Settings window, at the pane named by the `pane` user-info
     /// key when there is one; see `SettingsPane.open`.
-    static let espDisplayShowSettings = Notification.Name("com.resourcefork.espdisplay.showSettings")
+    static let espDisplayShowSettings = Notification.Name(AppIdentity.notification("showSettings"))
     /// Posted by the File menu, handled by whichever manager window is showing -
     /// the same indirection `espDisplayShowSettings` uses, and for the same reason:
     /// the menu holds no reference to a view.
-    static let espDisplayAddDevice = Notification.Name("com.resourcefork.espdisplay.addDevice")
+    static let espDisplayAddDevice = Notification.Name(AppIdentity.notification("addDevice"))
     /// Posted by File > Recover Board, handled the same way.
-    static let espDisplayRecoverBoard = Notification.Name("com.resourcefork.espdisplay.recoverBoard")
+    static let espDisplayRecoverBoard = Notification.Name(AppIdentity.notification("recoverBoard"))
 }
 
 // MARK: - Window
@@ -395,7 +395,7 @@ private struct IssueBanner: View {
                         .disabled(requestIsPending)
                 }
                 if shouldShowRelaunch(for: permission) {
-                    Button("Relaunch ESPDisplaySender", action: onRelaunch)
+                    Button("Relaunch \(AppIdentity.displayName)", action: onRelaunch)
                 }
             } else if let settingsURL = issue.issue.settingsURL {
                 Button("Open System Settings") {
@@ -420,7 +420,7 @@ private struct IssueBanner: View {
                     .disabled(requestIsPending)
             }
             if shouldShowRelaunch(for: permission) {
-                Button("Relaunch ESPDisplaySender", action: onRelaunch)
+                Button("Relaunch \(AppIdentity.displayName)", action: onRelaunch)
             }
         } else if let settingsURL = issue.issue.settingsURL {
             Button("Open System Settings") {
@@ -2444,7 +2444,7 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
         let title = manager.selectedPanel?.displayName
             ?? ScreenDeviceEntry.key(fromTag: manager.selectedServiceName)
                 .flatMap { manager.screenDevices.entry($0)?.name }
-            ?? "ESPDisplaySender"
+            ?? AppIdentity.displayName
         if window.title != title { window.title = title }
     }
 
@@ -2452,7 +2452,7 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
         if let window { return window }
         let controller = NSHostingController(rootView: ManagerView(manager: manager))
         let window = NSWindow(contentViewController: controller)
-        window.title = "ESPDisplaySender"
+        window.title = AppIdentity.displayName
         let visibleSize = NSScreen.main?.visibleFrame.size
             ?? NSSize(width: 1000, height: 700)
         window.setContentSize(NSSize(
@@ -2480,7 +2480,7 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
         // The toolbar itself is left alone. It used to be cleared on every
         // show(), which threw away the SwiftUI toolbar and its glass controls.
         window.center()
-        window.setFrameAutosaveName("ESPDisplaySender.Manager")
+        window.setFrameAutosaveName(AppIdentity.bundleIdentifier + ".Manager")
         window.delegate = self
         self.window = window
         observeTitle()
@@ -2528,8 +2528,12 @@ final class ESPDisplayApplicationDelegate: NSObject, NSApplicationDelegate {
             name: .espDisplayShowManager, object: nil)
         let pendingRecovery = offersResumeAtLaunch && UsbRepairModel.offered(
             manager.recoveryStore?.load(), fromRecoverBoard: true) != nil
-        if pendingRecovery {
+        if Self.showsManager(
+            pendingRecovery: pendingRecovery, showAtLaunch: showAtLaunch
+        ) {
             managerWindow.show()
+        }
+        if pendingRecovery {
             return
         }
         guard showAtLaunch else { return }
@@ -2554,10 +2558,10 @@ final class ESPDisplayApplicationDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
-    /// An interrupted recovery is the sole background-launch case that opens
-    /// a window. A fully permitted foreground launch opens nothing.
-    static func showsManager(pendingRecovery: Bool) -> Bool {
-        pendingRecovery
+    /// A foreground launch always shows the manager. A background launch only
+    /// shows it when an interrupted recovery needs the user's attention.
+    static func showsManager(pendingRecovery: Bool, showAtLaunch: Bool = true) -> Bool {
+        showAtLaunch || pendingRecovery
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -100,36 +100,36 @@ enum MacPermission: String, CaseIterable, Equatable, Sendable {
             return [
                 "Open Screen Recording Settings.",
                 "Remove an old ESPDisplaySender entry if one is listed.",
-                "Turn on this copy of ESPDisplaySender.",
-                "Relaunch ESPDisplaySender.",
+                "Turn on this copy of \(AppIdentity.displayName).",
+                "Relaunch \(AppIdentity.displayName).",
             ]
         case .accessibility:
             return [
                 "Open Accessibility Settings.",
                 "Remove an old ESPDisplaySender entry if one is listed.",
-                "Turn on this copy of ESPDisplaySender.",
+                "Turn on this copy of \(AppIdentity.displayName).",
                 "Try the device control again.",
             ]
         case .systemAudioRecording:
             return [
                 "Open System Audio Recording Settings.",
                 "Remove an old ESPDisplaySender entry if one is listed.",
-                "Turn on this copy of ESPDisplaySender.",
+                "Turn on this copy of \(AppIdentity.displayName).",
                 "Resume sending Mac sound to the device.",
             ]
         case .localNetwork:
             return [
                 "Open System Settings > Privacy & Security > Local Network.",
-                "Turn on ESPDisplaySender.",
-                "If ESPDisplaySender is not listed, macOS has no switch for this copy. Restart your Mac, then check this page again.",
-                "Relaunch ESPDisplaySender.",
+                "Turn on \(AppIdentity.displayName).",
+                "If \(AppIdentity.displayName) is not listed, macOS has no switch for this copy. Restart your Mac, then check this page again.",
+                "Relaunch \(AppIdentity.displayName).",
             ]
         case .cameraExtension:
             return [
                 "Open System Settings, then General > Login Items & Extensions.",
                 "Under Extensions, click the info button next to Camera Extensions.",
                 "Turn on ESPDisplay Camera Extension, then click Done.",
-                "Return to ESPDisplaySender and relaunch it if macOS asks.",
+                "Return to \(AppIdentity.displayName) and relaunch it if macOS asks.",
             ]
         }
     }
@@ -137,7 +137,7 @@ enum MacPermission: String, CaseIterable, Equatable, Sendable {
     func message(for state: PermissionIssueState) -> String {
         switch (self, state) {
         case (.screenRecording, .needsAccess):
-            return "This copy of ESPDisplaySender is not allowed to record the screen "
+            return "This copy of \(AppIdentity.displayName) is not allowed to record the screen "
                 + "yet. Devices stay connected and controllable, but no picture can "
                 + "be sent. A rebuilt or re-signed app needs permission again. If an "
                 + "old ESPDisplaySender entry is listed, remove it before turning this "
@@ -145,26 +145,26 @@ enum MacPermission: String, CaseIterable, Equatable, Sendable {
         case (.screenRecording, .grantedNeedsRelaunch):
             return "Permission granted - relaunch to start sending pictures."
         case (.accessibility, .needsAccess):
-            return "This copy of ESPDisplaySender is not allowed to control volume, "
+            return "This copy of \(AppIdentity.displayName) is not allowed to control volume, "
                 + "playback, or key presses from a device yet. A rebuilt or re-signed "
                 + "app needs Accessibility permission again."
         case (.accessibility, .grantedNeedsRelaunch):
             return "Permission granted - try the device control again."
         case (.systemAudioRecording, .needsAccess):
-            return "This copy of ESPDisplaySender is not allowed to record this Mac's "
+            return "This copy of \(AppIdentity.displayName) is not allowed to record this Mac's "
                 + "sound yet. Devices stay connected and their speakers receive "
                 + "silence. A rebuilt or re-signed app needs permission again."
         case (.systemAudioRecording, .grantedNeedsRelaunch):
             return "Permission granted - resume sending Mac sound to the device."
         case (.localNetwork, .needsAccess):
-            return "ESPDisplaySender is blocked from reaching devices on your local network. "
+            return "\(AppIdentity.displayName) is blocked from reaching devices on your local network. "
                 + "Open System Settings > Privacy & Security > Local Network and turn on "
-                + "ESPDisplaySender. If it is not listed, macOS has no switch for this copy; "
+                + "\(AppIdentity.displayName). If it is not listed, macOS has no switch for this copy; "
                 + "the app cannot make a request that will appear."
         case (.localNetwork, .grantedNeedsRelaunch):
             return "Permission granted - relaunch to reach devices on your local network."
         case (.cameraExtension, .needsAccess):
-            return "ESPDisplaySender cannot make the device camera available to other "
+            return "\(AppIdentity.displayName) cannot make the device camera available to other "
                 + "video apps until its camera extension is approved."
         case (.cameraExtension, .grantedNeedsRelaunch):
             return "Camera extension approved - relaunch if it does not appear in video apps."

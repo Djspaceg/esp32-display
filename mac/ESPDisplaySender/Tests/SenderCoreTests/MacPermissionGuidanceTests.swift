@@ -17,7 +17,7 @@ final class MacPermissionGuidanceTests: XCTestCase {
 
         XCTAssertEqual(
             message,
-            "This copy of ESPDisplaySender is not allowed to record the screen "
+            "This copy of ESPDisplay is not allowed to record the screen "
                 + "yet. Devices stay connected and controllable, but no picture can "
                 + "be sent. A rebuilt or re-signed app needs permission again. If an "
                 + "old ESPDisplaySender entry is listed, remove it before turning this "
@@ -32,8 +32,8 @@ final class MacPermissionGuidanceTests: XCTestCase {
             [
                 "Open Screen Recording Settings.",
                 "Remove an old ESPDisplaySender entry if one is listed.",
-                "Turn on this copy of ESPDisplaySender.",
-                "Relaunch ESPDisplaySender.",
+                "Turn on this copy of ESPDisplay.",
+                "Relaunch ESPDisplay.",
             ])
     }
 
@@ -136,10 +136,10 @@ final class MacPermissionGuidanceTests: XCTestCase {
 
     func testLocalNetworkLaunchHistoryDoesNotCarryAcrossSigningTeams() {
         let oldIdentity = LocalNetworkLiveAccessHistory.identity(
-            bundleIdentifier: "com.resourcefork.espdisplay",
+            bundleIdentifier: AppIdentity.bundleIdentifier,
             teamIdentifier: "OLDTEAM123")
         let newIdentity = LocalNetworkLiveAccessHistory.identity(
-            bundleIdentifier: "com.resourcefork.espdisplay",
+            bundleIdentifier: AppIdentity.bundleIdentifier,
             teamIdentifier: "4D22XL743H")
         let suite = "LocalNetworkLaunchHistoryTests." + UUID().uuidString
         let defaults = try! XCTUnwrap(UserDefaults(suiteName: suite))
@@ -290,7 +290,7 @@ final class MacPermissionGuidanceTests: XCTestCase {
             "Open System Settings, then General > Login Items & Extensions.",
             "Under Extensions, click the info button next to Camera Extensions.",
             "Turn on ESPDisplay Camera Extension, then click Done.",
-            "Return to ESPDisplaySender and relaunch it if macOS asks.",
+            "Return to ESPDisplay and relaunch it if macOS asks.",
         ])
         XCTAssertFalse(permission.steps.joined(separator: " ")
             .localizedCaseInsensitiveContains("Camera pane"))
@@ -299,7 +299,7 @@ final class MacPermissionGuidanceTests: XCTestCase {
     func testEmbeddedCameraExtensionUsesItsIdentifierAsItsBundleName() {
         XCTAssertEqual(
             CameraExtensionInstaller.extensionBundleName,
-            "com.resourcefork.espdisplay.camera-extension.systemextension")
+            AppIdentity.cameraExtensionBundleIdentifier + ".systemextension")
     }
 
     func testLocalNetworkBlockUsesSettingsInsteadOfAnUnrepeatableRequest() {
@@ -375,6 +375,23 @@ final class MacPermissionGuidanceTests: XCTestCase {
         XCTFail("An activated enabled extension must stay Allowed while older copies uninstall.")
     }
 
+    func testPendingCameraReplacementKeepsTheEnabledExtensionAllowed() {
+        let result = CameraExtensionInstaller.activationAfterRebootResult(
+            for: [
+                CameraExtensionPropertiesSnapshot(
+                    enabled: false, awaitingUserApproval: false, uninstalling: true,
+                    bundleVersion: "634.9"),
+                CameraExtensionPropertiesSnapshot(
+                    enabled: true, awaitingUserApproval: false, uninstalling: false,
+                    bundleVersion: "634.10"),
+            ])
+
+        if case .installed = result {
+            return
+        }
+        XCTFail("An enabled camera extension must stay Allowed while a replacement waits.")
+    }
+
     func testCameraActivationOnlyReplacesAnActiveVersionWhenTheEmbeddedVersionDiffers() {
         let properties = [
             CameraExtensionPropertiesSnapshot(
@@ -431,9 +448,9 @@ final class MacPermissionGuidanceTests: XCTestCase {
             .policyDenied(technicalDetail: "PolicyDenied(-65570)"))
         XCTAssertEqual(
             manager.issues.first?.detail,
-            "ESPDisplaySender is blocked from reaching devices on your local network. "
+            "ESPDisplay is blocked from reaching devices on your local network. "
                 + "Open System Settings > Privacy & Security > Local Network and turn on "
-                + "ESPDisplaySender. If it is not listed, macOS has no switch for this copy; "
+                + "ESPDisplay. If it is not listed, macOS has no switch for this copy; "
                 + "the app cannot make a request that will appear.")
         XCTAssertEqual(manager.issues.first?.permissionState, .needsAccess)
         manager.observeLocalNetworkPermission(.browserReady)

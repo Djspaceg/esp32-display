@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.resourcefork.espdisplay</string>
+	<string>__APP_BUNDLE_IDENTIFIER__</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/usr/bin/open</string>

@@ -17,7 +17,7 @@ final class FollowMacSoundTests: XCTestCase {
     private let speakers = MacOutputDevice(
         uid: "BuiltInSpeakerDevice", name: "MacBook Pro Speakers")
     private let desk = DisplayAudioDeviceSpec(
-        uid: "com.resourcefork.espdisplay.display.AAAA", name: "Desk", latencyFrames: 7_200)
+        uid: AppIdentity.audioDeviceUIDPrefix + "AAAA", name: "Desk", latencyFrames: 7_200)
 
     private func stored(_ json: String) throws -> MacAudioRoute {
         try JSONDecoder().decode(SenderSettings.self, from: Data(json.utf8)).macAudioRoute

@@ -16,8 +16,8 @@ TARGET="$HAL/ESPDisplayAudio.driver"
 # the user can touch the copy between its check and the move.
 STAGING="$HAL/.ESPDisplayAudio.installing"
 STAGED="$STAGING/ESPDisplayAudio.driver"
-BUNDLE_ID="com.resourcefork.espdisplay.audio-driver"
 PROJECT_FILE="$HERE/../ESPDisplaySender/ESPDisplaySender.xcodeproj/project.pbxproj"
+IDENTITY_CONFIG="$HERE/../ESPDisplaySender/ESPDisplay.xcconfig"
 
 if [[ "$(id -u)" != 0 ]]; then
   echo "error: installing a CoreAudio driver needs admin rights; run:" >&2
@@ -78,6 +78,13 @@ if [[ -z "$TEAM" || "$TEAM" == *$'\n'* ]]; then
   echo "error: expected one DEVELOPMENT_TEAM in $PROJECT_FILE, found: ${TEAM:-none}" >&2
   exit 1
 fi
+APP_BUNDLE_IDENTIFIER="$(sed -n \
+  's/^APP_BUNDLE_IDENTIFIER[[:space:]]*=[[:space:]]*//p' "$IDENTITY_CONFIG")"
+[[ -n "$APP_BUNDLE_IDENTIFIER" && "$APP_BUNDLE_IDENTIFIER" != *$'\n'* ]] || {
+  echo "error: expected one app bundle identifier in $IDENTITY_CONFIG" >&2
+  exit 1
+}
+BUNDLE_ID="$APP_BUNDLE_IDENTIFIER.audio-driver"
 
 # Everything is checked on the root-owned staged copy, not on build/, which
 # any process running as the user could swap between a check and the copy.

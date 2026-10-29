@@ -174,7 +174,7 @@ final class FirmwareUpdateTests: XCTestCase {
     func testKeychainCredentialRecordUsesTheNewAppIdentity() {
         XCTAssertEqual(
             KeychainOTAPasswordStore.service,
-            "com.resourcefork.espdisplay.credentials")
+            AppIdentity.credentialsService)
         XCTAssertEqual(KeychainOTAPasswordStore.account, "credentials-v1")
     }
 

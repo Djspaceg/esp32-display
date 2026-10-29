@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Build the native ESPDisplaySender app into /Applications.
+# Build the native ESPDisplay app into /Applications.
 #
 # Xcode signs with the Apple Development team configured in the project,
 # preserving the app's designated requirement across rebuilds so macOS privacy
@@ -54,9 +54,10 @@ PROJECT="$HERE/ESPDisplaySender/ESPDisplaySender.xcodeproj"
 SCHEME="ESPDisplaySender App"
 APP_PARENT="/Applications"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-APP_NAME="ESPDisplaySender"
+APP_NAME="ESPDisplay"
 APP="$APP_PARENT/$APP_NAME.app"
-STAGED_APP="$APP_PARENT/.ESPDisplaySender.app.staged"
+LEGACY_APP="$APP_PARENT/ESPDisplaySender.app"
+STAGED_APP="$APP_PARENT/.ESPDisplay.app.staged"
 SCRATCH_PARENT="$WORKSPACE"
 DERIVED_DATA="$(mktemp -d "$SCRATCH_PARENT/.espdisplaysender.XXXXXX")"
 
@@ -155,14 +156,14 @@ codesign --verify --deep --strict --verbose=1 "$STAGED_APP"
 "$LSREGISTER" -u "$BUILT_APP"
 echo "unregistered the transient Xcode build product from LaunchServices"
 
-# Keep only the known installed path registered. Deleting an app bundle while
-# its old process runs is safe: the existing process continues from its mapped
-# files, while the next launch sees the replacement at the same path.
+# Retire the former path and replace the known installed path. Deleting an app
+# bundle while its old process runs is safe: the existing process continues
+# from its mapped files, while the next launch sees the replacement.
 remove_previous_install() {
   local target="$1"
   [[ -e "$target" ]] || return 0
   require_under "$target" "$APP_PARENT" "previous install"
-  [[ "$target" == "$APP_PARENT/ESPDisplaySender.app" ]] || {
+  [[ "$target" == "$APP" || "$target" == "$LEGACY_APP" ]] || {
     echo "error: unexpected installed app path $target" >&2
     exit 1
   }
@@ -171,14 +172,18 @@ remove_previous_install() {
   echo "unregistered and deleted the previous install"
 }
 
+remove_previous_install "$LEGACY_APP"
 remove_previous_install "$APP"
 mv -- "$STAGED_APP" "$APP"
 "$LSREGISTER" -u "$STAGED_APP" || true
 "$LSREGISTER" -f -R -trusted "$APP"
 
 codesign --display --verbose=2 "$APP"
+APP_BUNDLE_IDENTIFIER="$(plutil -extract CFBundleIdentifier raw -o - \
+  "$APP/Contents/Info.plist")"
+EXPECTED_KEYCHAIN_ACCESS_GROUP="4D22XL743H.$APP_BUNDLE_IDENTIFIER"
 if ! codesign -d --entitlements :- "$APP" 2>&1 \
-  | grep -Fq "<string>4D22XL743H.com.resourcefork.espdisplay</string>"; then
+  | grep -Fq "<string>$EXPECTED_KEYCHAIN_ACCESS_GROUP</string>"; then
   echo "error: installed app lacks its Data Protection Keychain access group" >&2
   exit 1
 fi
@@ -186,24 +191,24 @@ echo "verified Data Protection Keychain access group"
 
 registered_paths="$("$LSREGISTER" -dump | awk '
   /^path:[[:space:]]+/ {
-    if (path != "" && name == "ESPDisplaySender") print path
+    if (path != "" && identifier == "com.resourcefork.espdisplay") print path
     path = $0
     sub(/^path:[[:space:]]+/, "", path)
     sub(/[[:space:]]+\(0x[[:xdigit:]]+\)$/, "", path)
-    name = ""
+    identifier = ""
     next
   }
-  /^name:[[:space:]]+/ { name = $2 }
+  /^identifier:[[:space:]]+/ { identifier = $2 }
   END {
-    if (path != "" && name == "ESPDisplaySender") print path
+    if (path != "" && identifier == "com.resourcefork.espdisplay") print path
   }
 ')"
 if [[ "$registered_paths" != "$APP" ]]; then
-  echo "error: expected exactly one registered ESPDisplaySender path: $APP" >&2
+  echo "error: expected exactly one registered ESPDisplay path: $APP" >&2
   printf '%s\n' "$registered_paths" >&2
   exit 1
 fi
-echo "verified exactly one registered ESPDisplaySender path"
+echo "verified exactly one registered ESPDisplay path"
 
 echo "built and Apple Development signed $APP"
 echo "open manager:      open $APP"

@@ -3,14 +3,14 @@ import Foundation
 import ScreenCaptureKit
 import SenderProtocol
 
-// ESPDisplaySender: captures a macOS display (BetterDisplay virtual screen)
+// ESPDisplay: captures a macOS display (BetterDisplay virtual screen)
 // with ScreenCaptureKit, converts to RGB565BE, and streams it over UDP to
 // the ESP32-C6 panel. See docs/esp32-wireless-display-plan.md.
 //
 // Usage:
-//   ESPDisplaySender --list-displays
-//   ESPDisplaySender --mode test [--host espdisplay.local] [--fps 40]
-//   ESPDisplaySender --mode capture --display "Tiny Monitor" [--fps 40]
+//   ESPDisplay --list-displays
+//   ESPDisplay --mode test [--host espdisplay.local] [--fps 40]
+//   ESPDisplay --mode capture --display "Tiny Monitor" [--fps 40]
 //
 // The bootstrap lives here rather than in the executable's main.swift so the
 // whole application layer sits in a library target a test target can import.
@@ -87,7 +87,7 @@ func parseOptions() -> Options {
         case "--background": opts.background = true
         case "--help", "-h":
             print("""
-                ESPDisplaySender
+                  ESPDisplay
                   --list-displays          show capturable displays and exit
                   --mode test|capture|window  test pattern, automatic capture (default),
                                            or a named single window.
@@ -192,7 +192,7 @@ public enum ESPDisplaySenderApp {
                     }
                 } else {
                     FileHandle.standardError.write(
-                        Data("another ESPDisplaySender instance is already running - exiting\n".utf8))
+                        Data("another ESPDisplay instance is already running - exiting\n".utf8))
                 }
                 // Lock contention means the requested service already exists,
                 // not that this process crashed. A successful exit prevents

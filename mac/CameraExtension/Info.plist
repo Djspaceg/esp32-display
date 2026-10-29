@@ -7,7 +7,7 @@
 	<key>CFBundleExecutable</key>
 	<string>ESPDisplayCamera</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.resourcefork.espdisplay.camera-extension</string>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -21,10 +21,10 @@
 	<key>CMIOExtension</key>
 	<dict>
 		<key>CMIOExtensionMachServiceName</key>
-		<string>$(TeamIdentifierPrefix)group.com.resourcefork.espdisplay.camera.extension</string>
+		<string>$(TeamIdentifierPrefix)group.$(APP_BUNDLE_IDENTIFIER).camera.extension</string>
 	</dict>
 	<key>NSSystemExtensionUsageDescription</key>
-	<string>Provides the XIAOML Kit camera to video apps while ESPDisplaySender is running.</string>
+	<string>Provides the XIAOML Kit camera to video apps while ESPDisplay is running.</string>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionPointIdentifier</key>

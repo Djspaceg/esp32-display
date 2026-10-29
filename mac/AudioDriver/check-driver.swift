@@ -8,8 +8,24 @@ import CoreAudio
 import CryptoKit
 import Foundation
 
-let bundleID = "com.resourcefork.espdisplay.audio-driver"
-let testUID = "com.resourcefork.espdisplay.check-driver.\(getpid())"
+let identityConfig = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .appendingPathComponent("ESPDisplaySender/ESPDisplay.xcconfig")
+let identityContents = try String(contentsOf: identityConfig, encoding: .utf8)
+let appBundleID = identityContents
+    .split(whereSeparator: \.isNewline)
+    .compactMap { line -> String? in
+        let prefix = "APP_BUNDLE_IDENTIFIER = "
+        guard line.hasPrefix(prefix) else { return nil }
+        return String(line.dropFirst(prefix.count))
+    }
+    .first
+guard let appBundleID, !appBundleID.isEmpty else {
+    fatalError("ESPDisplay.xcconfig has no app bundle identifier.")
+}
+let bundleID = appBundleID + ".audio-driver"
+let testUID = appBundleID + ".check-driver.\(getpid())"
 func code(_ s: String) -> AudioObjectPropertySelector {
     s.utf8.reduce(0) { $0 << 8 | AudioObjectPropertySelector($1) }
 }

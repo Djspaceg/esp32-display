@@ -337,7 +337,7 @@ struct PermissionChecklistRows: View {
                             NSWorkspace.shared.open(item.permission.settingsURL)
                         }
                     } else if item.requiresRelaunch {
-                        Button("Relaunch ESPDisplaySender") {
+                        Button("Relaunch \(AppIdentity.displayName)") {
                             AppRelauncher.relaunch()
                         }
                     } else if item.status == .blocked {
@@ -694,7 +694,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
         window.center()
-        window.setFrameAutosaveName("ESPDisplaySender.Settings")
+        window.setFrameAutosaveName(AppIdentity.bundleIdentifier + ".Settings")
         window.delegate = self
         self.window = window
         // `navigationTitle` does not reach NSWindow.title in a hand-built

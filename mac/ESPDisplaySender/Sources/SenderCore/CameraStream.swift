@@ -76,7 +76,7 @@ final class CameraPreview: ObservableObject {
 final class CameraExtensionBridge {
     static let shared = CameraExtensionBridge()
     static let deviceName = "ESPDisplay XIAOML Camera"
-    static let deviceModelID = "com.resourcefork.espdisplay.camera-extension"
+    static let deviceModelID = AppIdentity.cameraExtensionBundleIdentifier
 
     static func isOurCamera(localizedName: String, modelID: String) -> Bool {
         localizedName == deviceName && modelID == deviceModelID

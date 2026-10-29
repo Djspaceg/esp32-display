@@ -109,8 +109,8 @@ protocol GenericPasswordKeychain: AnyObject {
 /// The Security.framework implementation behind the credential vault.
 final class SecurityGenericPasswordKeychain: GenericPasswordKeychain {
     private static let logger = Logger(
-        subsystem: "com.resourcefork.espdisplay", category: "keychain")
-    private static let accessGroup = "4D22XL743H.com.resourcefork.espdisplay"
+        subsystem: AppIdentity.bundleIdentifier, category: "keychain")
+    private static let accessGroup = AppIdentity.keychainAccessGroup
 
     func data(
         service: String, account: String, in store: CredentialKeychainStore
@@ -217,12 +217,12 @@ struct CredentialVaultPayload: Codable, Equatable {
 /// short login-keychain transition only moves the single combined item written
 /// by the preceding release. It never searches for old per-password records.
 final class KeychainCredentialVault: @unchecked Sendable {
-    static let service = "com.resourcefork.espdisplay.credentials"
+    static let service = AppIdentity.credentialsService
     static let account = "credentials-v1"
     static let credentialStore = CredentialKeychainStore.dataProtection
     static let shared = KeychainCredentialVault(keychain: SecurityGenericPasswordKeychain())
     private static let logger = Logger(
-        subsystem: "com.resourcefork.espdisplay", category: "keychain")
+        subsystem: AppIdentity.bundleIdentifier, category: "keychain")
 
     enum Failure: Error, LocalizedError, Equatable {
         case keychain(status: OSStatus)

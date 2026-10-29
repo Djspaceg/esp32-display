@@ -29,12 +29,13 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		A00000000000000000000003 /* ESPDisplaySender.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ESPDisplaySender.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00000000000000000000003 /* ESPDisplay.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ESPDisplay.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = ../Info.plist; sourceTree = "<group>"; };
+		C00000000000000000000001 /* ESPDisplay.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = ESPDisplay.xcconfig; sourceTree = "<group>"; };
 		A00000000000000000000110 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		A00000000000000000000111 /* app-icon-square.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = ../app-icon-square.png; sourceTree = "<group>"; };
 		A00000000000000000000112 /* ESPDisplaySender.sdef */ = {isa = PBXFileReference; lastKnownFileType = text.sdef; path = Resources/ESPDisplaySender.sdef; sourceTree = "<group>"; };
-		B00000000000000000000003 /* com.resourcefork.espdisplay.camera-extension.systemextension */ = {isa = PBXFileReference; explicitFileType = wrapper.system-extension; includeInIndex = 0; path = com.resourcefork.espdisplay.camera-extension.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
+		B00000000000000000000003 /* $(CAMERA_EXTENSION_BUNDLE_ID).systemextension */ = {isa = PBXFileReference; explicitFileType = wrapper.system-extension; includeInIndex = 0; path = "$(CAMERA_EXTENSION_BUNDLE_ID).systemextension"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = ../CameraExtension/Info.plist; sourceTree = "<group>"; };
 		B00000000000000000000109 /* CameraExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ../CameraExtension/CameraExtension.entitlements; sourceTree = "<group>"; };
 		B00000000000000000000110 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../CameraExtension/main.swift; sourceTree = "<group>"; };
@@ -71,6 +72,7 @@
 			isa = PBXGroup;
 			children = (
 				A00000000000000000000009 /* Info.plist */,
+				C00000000000000000000001 /* ESPDisplay.xcconfig */,
 				A00000000000000000000111 /* app-icon-square.png */,
 				A00000000000000000000112 /* ESPDisplaySender.sdef */,
 				A00000000000000000000006 /* Sources */,
@@ -82,8 +84,8 @@
 		A00000000000000000000005 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				A00000000000000000000003 /* ESPDisplaySender.app */,
-				B00000000000000000000003 /* com.resourcefork.espdisplay.camera-extension.systemextension */,
+				A00000000000000000000003 /* ESPDisplay.app */,
+				B00000000000000000000003 /* $(CAMERA_EXTENSION_BUNDLE_ID).systemextension */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -141,8 +143,8 @@
 			packageProductDependencies = (
 				A00000000000000000000303 /* SenderCore */,
 			);
-			productName = ESPDisplaySender;
-			productReference = A00000000000000000000003 /* ESPDisplaySender.app */;
+			productName = ESPDisplay;
+			productReference = A00000000000000000000003 /* ESPDisplay.app */;
 			productType = "com.apple.product-type.application";
 		};
 		B00000000000000000000002 /* ESPDisplayCamera */ = {
@@ -160,7 +162,7 @@
 			packageProductDependencies = (
 			);
 			productName = ESPDisplayCamera;
-			productReference = B00000000000000000000003 /* com.resourcefork.espdisplay.camera-extension.systemextension */;
+			productReference = B00000000000000000000003 /* $(CAMERA_EXTENSION_BUNDLE_ID).systemextension */;
 			productType = "com.apple.product-type.system-extension";
 		};
 /* End PBXNativeTarget section */
@@ -293,6 +295,7 @@
 /* Begin XCBuildConfiguration section */
 		A00000000000000000000020 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = C00000000000000000000001 /* ESPDisplay.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ENABLE_MODULES = YES;
@@ -310,6 +313,7 @@
 		};
 		A00000000000000000000021 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = C00000000000000000000001 /* ESPDisplay.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ENABLE_MODULES = YES;
@@ -326,18 +330,15 @@
 		A00000000000000000000022 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				APP_BUNDLE_IDENTIFIER = com.resourcefork.espdisplay;
 				APP_INFOPLIST_FILE = ../Info.plist;
-				APP_PRODUCT_NAME = ESPDisplaySender;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_ENTITLEMENTS = ESPDisplaySender.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CAMERA_EXTENSION_BUNDLE_ID = com.resourcefork.espdisplay.camera-extension;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = 4D22XL743H;
 				ENABLE_HARDENED_RUNTIME = YES;
-				EXECUTABLE_NAME = ESPDisplaySender;
+				EXECUTABLE_NAME = "$(APP_EXECUTABLE_NAME)";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "$(APP_INFOPLIST_FILE)";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -348,7 +349,7 @@
 				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(APP_PRODUCT_NAME)";
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(ESPDISP_LAN_TEST) $(ESPDISP_SCREEN_RECORDING_PROBE)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -357,18 +358,15 @@
 		A00000000000000000000023 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				APP_BUNDLE_IDENTIFIER = com.resourcefork.espdisplay;
 				APP_INFOPLIST_FILE = ../Info.plist;
-				APP_PRODUCT_NAME = ESPDisplaySender;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_ENTITLEMENTS = ESPDisplaySender.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CAMERA_EXTENSION_BUNDLE_ID = com.resourcefork.espdisplay.camera-extension;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = 4D22XL743H;
 				ENABLE_HARDENED_RUNTIME = YES;
-				EXECUTABLE_NAME = ESPDisplaySender;
+				EXECUTABLE_NAME = "$(APP_EXECUTABLE_NAME)";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "$(APP_INFOPLIST_FILE)";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -379,7 +377,7 @@
 				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(APP_PRODUCT_NAME)";
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(ESPDISP_LAN_TEST) $(ESPDISP_SCREEN_RECORDING_PROBE)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -399,7 +397,7 @@
 				INFOPLIST_FILE = ../CameraExtension/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				OTHER_SWIFT_FLAGS = "-parse-as-library";
-				PRODUCT_BUNDLE_IDENTIFIER = com.resourcefork.espdisplay.camera-extension;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(CAMERA_EXTENSION_BUNDLE_ID)";
 				PRODUCT_NAME = ESPDisplayCamera;
 				PROVISIONING_PROFILE_REQUIRED = YES;
 				SKIP_INSTALL = YES;
@@ -423,7 +421,7 @@
 				INFOPLIST_FILE = ../CameraExtension/Info.plist;
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				OTHER_SWIFT_FLAGS = "-parse-as-library";
-				PRODUCT_BUNDLE_IDENTIFIER = com.resourcefork.espdisplay.camera-extension;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(CAMERA_EXTENSION_BUNDLE_ID)";
 				PRODUCT_NAME = ESPDisplayCamera;
 				PROVISIONING_PROFILE_REQUIRED = YES;
 				SKIP_INSTALL = YES;

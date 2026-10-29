@@ -159,7 +159,7 @@ final class DisplayAudioDriverTests: XCTestCase {
     }
 
     func testADeviceUIDIsTheRegisteredUIDAndAnOwnersSuffix() {
-        let uid = "com.resourcefork.espdisplay.display.AAAA"
+        let uid = AppIdentity.audioDeviceUIDPrefix + "AAAA"
         XCTAssertTrue(DisplayAudioDriverProtocol.isDeviceUID(uid + ".0123456789abcdef", of: uid))
         XCTAssertFalse(DisplayAudioDriverProtocol.isDeviceUID(uid, of: uid))
         XCTAssertFalse(DisplayAudioDriverProtocol.isDeviceUID(uid + ".0123", of: uid))
@@ -174,10 +174,10 @@ final class DisplayAudioDriverTests: XCTestCase {
     func testDeviceUIDIsTheBoardIdentityWhenKnown() {
         XCTAssertEqual(
             DisplayAudioDeviceSpec.uid(hardwareID: "AABBCCDDEEFF", serviceName: "espdisp-1"),
-            "com.resourcefork.espdisplay.display.AABBCCDDEEFF")
+            AppIdentity.audioDeviceUIDPrefix + "AABBCCDDEEFF")
         XCTAssertEqual(
             DisplayAudioDeviceSpec.uid(hardwareID: nil, serviceName: "espdisp-1"),
-            "com.resourcefork.espdisplay.display.service.espdisp-1")
+            AppIdentity.audioDeviceUIDPrefix + "service.espdisp-1")
         XCTAssertEqual(
             DisplayAudioDeviceSpec.latencyFrames(
                 tuning: AudioRuntimeTuning(downlinkTargetMilliseconds: 150)),

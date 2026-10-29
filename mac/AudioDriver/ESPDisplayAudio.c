@@ -728,7 +728,7 @@ static OSStatus Initialize(AudioServerPlugInDriverRef driver, AudioServerPlugInH
         SetVolumeScalar(&gSlots[index], 1.0f);
     }
     if (gQueue == NULL) {
-        gQueue = dispatch_queue_create("com.resourcefork.espdisplay.audio-driver", DISPATCH_QUEUE_SERIAL);
+        gQueue = dispatch_queue_create(ESPDISP_AUDIO_BUNDLE_ID, DISPATCH_QUEUE_SERIAL);
         gExpiryTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gQueue);
         dispatch_source_set_timer(gExpiryTimer, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
                                   2 * NSEC_PER_SEC, NSEC_PER_SEC / 4);

@@ -31,9 +31,9 @@ final class MacAudioRouteTests: XCTestCase {
     private let headphones = MacOutputDevice(
         uid: "USBHeadphones", name: "Headphones")
     private let desk = DisplayAudioDeviceSpec(
-        uid: "com.resourcefork.espdisplay.display.AAAA", name: "Desk", latencyFrames: 7_200)
+        uid: AppIdentity.audioDeviceUIDPrefix + "AAAA", name: "Desk", latencyFrames: 7_200)
     private let shelf = DisplayAudioDeviceSpec(
-        uid: "com.resourcefork.espdisplay.display.BBBB", name: "Shelf", latencyFrames: 7_200)
+        uid: AppIdentity.audioDeviceUIDPrefix + "BBBB", name: "Shelf", latencyFrames: 7_200)
 
     // MARK: - The plan
 
@@ -227,7 +227,7 @@ final class MacAudioRouteTests: XCTestCase {
         // Nine displays: this app holds all eight devices itself.
         let many = (0..<9).map {
             DisplayAudioDeviceSpec(
-                uid: "com.resourcefork.espdisplay.display.\($0)", name: "D\($0)", latencyFrames: 0)
+                uid: AppIdentity.audioDeviceUIDPrefix + "\($0)", name: "D\($0)", latencyFrames: 0)
         }
         let busy = FakeDisplayAudioDriver()
         busy.devicesAppearOnRegister = false

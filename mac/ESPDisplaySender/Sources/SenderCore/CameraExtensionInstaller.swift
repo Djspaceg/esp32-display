@@ -33,7 +33,7 @@ struct CameraExtensionPropertiesSnapshot: Equatable {
 /// request object retains neither its delegate nor completion, so this object
 /// retains one operation until System Extensions has a terminal answer.
 final class CameraExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate {
-    static let extensionIdentifier = "com.resourcefork.espdisplay.camera-extension"
+    static let extensionIdentifier = AppIdentity.cameraExtensionBundleIdentifier
     static let extensionBundleName = extensionIdentifier + ".systemextension"
     private static var active: CameraExtensionInstaller?
     private static var waitingForUserApproval = false
@@ -42,7 +42,7 @@ final class CameraExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
             && !waitingForUserApproval
     }
     static var isInspectionPending: Bool {
-        active?.operation == .properties
+        active?.operation == .properties || active?.operation == .postActivationInspection
     }
     static var isWaitingForUserApproval: Bool { waitingForUserApproval }
 
@@ -50,6 +50,7 @@ final class CameraExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
         case activationAssessment
         case activation
         case properties
+        case postActivationInspection
     }
 
     private let operation: Operation
@@ -141,6 +142,18 @@ final class CameraExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
             ? nil : .installed
     }
 
+    /// A replacement may require a restart while an earlier enabled extension
+    /// keeps supplying the camera. That live extension remains Allowed; only
+    /// the absence of every enabled copy needs a restart status.
+    static func activationAfterRebootResult(
+        for properties: [CameraExtensionPropertiesSnapshot]
+    ) -> CameraExtensionActivation {
+        if case .installed = activation(for: properties) {
+            return .installed
+        }
+        return .needsRestart
+    }
+
     func request(
         _ request: OSSystemExtensionRequest,
         actionForReplacingExtension existing: OSSystemExtensionProperties,
@@ -164,7 +177,7 @@ final class CameraExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
         case .completed:
             finish(.installed)
         case .willCompleteAfterReboot:
-            finish(.needsRestart)
+            inspectAfterRestartResult()
         @unknown default:
             finish(.failed(NSError(
                 domain: "CameraExtensionInstaller",
@@ -202,6 +215,8 @@ final class CameraExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
             } else {
                 handoffToActivationRequest()
             }
+        case .postActivationInspection:
+            finish(Self.activationAfterRebootResult(for: snapshots))
         case .activation:
             break
         }
@@ -221,6 +236,20 @@ final class CameraExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
         Self.active = nil
         Self.waitingForUserApproval = false
         Self.submitActivation(completion: completion)
+    }
+
+    private func inspectAfterRestartResult() {
+        guard !didFinish else { return }
+        didFinish = true
+        Self.active = nil
+        Self.waitingForUserApproval = false
+        let inspector = CameraExtensionInstaller(
+            operation: .postActivationInspection, completion: completion)
+        Self.active = inspector
+        let request = OSSystemExtensionRequest.propertiesRequest(
+            forExtensionWithIdentifier: Self.extensionIdentifier, queue: .main)
+        request.delegate = inspector
+        OSSystemExtensionManager.shared.submitRequest(request)
     }
 
     private func finish(_ result: CameraExtensionActivation) {

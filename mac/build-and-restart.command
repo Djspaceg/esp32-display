@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Double-clickable: build ESPDisplaySender from this checkout, install the
+# Double-clickable: build ESPDisplay from this checkout, install the
 # LaunchAgent, and start it.
 #
 # Finder launches a .command with the working directory set to the user's home,
@@ -8,12 +8,17 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-LABEL="com.resourcefork.espdisplay"
+APP="/Applications/ESPDisplay.app"
+LABEL="$(plutil -extract CFBundleIdentifier raw -o - "$APP/Contents/Info.plist" 2>/dev/null || true)"
+[[ -n "$LABEL" ]] || {
+  echo "error: $APP is missing; run $HERE/make-app.sh first" >&2
+  exit 1
+}
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 echo "==> Stopping any running sender"
-# make-app.sh deletes and replaces the app bundle, so move the running copy out
-# of the way first. Not being loaded is the normal case, not a failure.
+# make-app.sh deletes and replaces the app bundle, so stop the launch agent
+# before rebuilding. Not being loaded is the normal case, not a failure.
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || echo "    (was not running)"
 
 echo "==> Building (Release, via Xcode - this takes a minute)"
@@ -25,14 +30,14 @@ echo "==> Installing and starting the LaunchAgent"
 echo
 echo "==> Status"
 sleep 4
-if pgrep -f "ESPDisplaySender --background" > /dev/null 2>&1; then
-  echo "    running as PID $(pgrep -f 'ESPDisplaySender --background' | tr '\n' ' ')"
+if pgrep -f "ESPDisplay --background" > /dev/null 2>&1; then
+  echo "    running as PID $(pgrep -f 'ESPDisplay --background' | tr '\n' ' ')"
 else
   echo "    NOT running - check the log below"
 fi
 echo
 echo "    log:     /tmp/espdisplaysender.log"
-echo "    manager: open /Applications/ESPDisplaySender.app"
+echo "    manager: open /Applications/ESPDisplay.app"
 
 # Finder leaves the Terminal window open, but a prompt makes it obvious the
 # script finished rather than stalled. Skipped when run non-interactively.

@@ -14,7 +14,7 @@
       },
       "icon": "rocket",
       "iconColor": "terminal.ansiGreen",
-      "markdownTooltip": "The usual after changing sender code. Stops the running sender, rebuilds `ESPDisplaySender.app` in Release via Xcode, reinstalls the LaunchAgent, then reports whether it came back up.\n\nTakes about a minute. The outgoing install is moved to the Trash rather than deleted, so repeated runs accumulate bundles there. Ends by waiting for a return keypress.",
+      "markdownTooltip": "The usual after changing sender code. Stops the running sender, rebuilds `ESPDisplay.app` in Release via Xcode, reinstalls the LaunchAgent, then reports whether it came back up.\n\nTakes about a minute. The previous install is unregistered and replaced in place. Ends by waiting for a return keypress.",
       "statusBar": {
         "text": "Build and restart sender",
         "hidden": true
@@ -30,9 +30,9 @@
       },
       "icon": "debug-stop",
       "iconColor": "terminal.ansiYellow",
-      "markdownTooltip": "Unloads the `com.espdisplay.sender` LaunchAgent, which frees `/tmp/espdisplaysender.lock` and stops streaming.\n\nRun this before pressing Run in Xcode. Otherwise the freshly built binary cannot take the lock, asks the installed copy to show its window, and exits — which looks like a successful launch but is not. Idempotent. Ends by waiting for a return keypress."
+      "markdownTooltip": "Unloads the current app's LaunchAgent, which frees `/tmp/espdisplaysender.lock` and stops streaming.\n\nRun this before pressing Run in Xcode. Otherwise the freshly built binary cannot take the lock, asks the installed copy to show its window, and exits — which looks like a successful launch but is not. Idempotent. Ends by waiting for a return keypress."
     },
-    "Build app to ~/Applications": {
+    "Build app to /Applications": {
       "command": "commands.runInTerminal",
       "args": {
         "text": "\"${workspaceFolder}/mac/make-app.sh\"",
@@ -42,7 +42,7 @@
       },
       "icon": "package",
       "iconColor": "terminal.ansiYellow",
-      "markdownTooltip": "Xcode Release build of the `ESPDisplaySender App` scheme, installed to `~/Applications/ESPDisplaySender.app`. Signed with the project's Apple Development team so its designated requirement survives rebuilds and macOS keeps existing Screen Recording and Local Network grants.\n\nAny previous install is moved to the Trash. Builds and installs only — it does not start anything, and it does not touch a running agent, so prefer **Build and restart sender** for the normal loop."
+      "markdownTooltip": "Xcode Release build of the `ESPDisplaySender App` scheme, installed to `/Applications/ESPDisplay.app`. Signed with the project's Apple Development team so its designated requirement survives rebuilds and macOS keeps existing Screen Recording and Local Network grants.\n\nThe previous install is unregistered and replaced in place. Builds and installs only — it does not start anything, and it does not touch a running agent, so prefer **Build and restart sender** for the normal loop."
     },
     "Install login agent": {
       "command": "commands.runInTerminal",
@@ -54,7 +54,7 @@
       },
       "icon": "plug",
       "iconColor": "terminal.ansiYellow",
-      "markdownTooltip": "Writes `~/Library/LaunchAgents/com.espdisplay.sender.plist` and bootstraps it, so the sender starts hidden at login and is restarted after abnormal exits. Replaces any existing registration.\n\nRequires the app bundle to exist already — run **Build app to ~/Applications** first, or just use **Build and restart sender**, which does both. Logs land in `/tmp/espdisplaysender.log`."
+      "markdownTooltip": "Writes the current app's LaunchAgent and bootstraps it, so the sender starts hidden at login and is restarted after abnormal exits. Replaces any existing registration.\n\nRequires the app bundle to exist already — run **Build app to ~/Applications** first, or just use **Build and restart sender**, which does both. Logs land in `/tmp/espdisplaysender.log`."
     }
   }
 }

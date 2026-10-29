@@ -74,7 +74,7 @@ final class MacAudioRouteRenderTests: XCTestCase {
             route: .followMac,
             plan: MacAudioRoutePlan.make(
                 chosen: .followMac, driver: .ready,
-                presentDisplayUIDs: ["com.resourcefork.espdisplay.display.AAAA"]),
+                presentDisplayUIDs: [AppIdentity.audioDeviceUIDPrefix + "AAAA"]),
             source: "Mac output \"Desk\"",
             message: "Plays what this Mac sends to the \"Desk\" output while it is "
                 + "chosen in Sound settings; quiet otherwise.",

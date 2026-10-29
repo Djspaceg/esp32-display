@@ -377,10 +377,15 @@ final class UsbRecoveryTests: XCTestCase {
         wait(for: [posted], timeout: 1)
     }
 
+    func testANormalForegroundLaunchShowsTheManagerWindow() {
+        XCTAssertTrue(ESPDisplayApplicationDelegate.showsManager(
+            pendingRecovery: false, showAtLaunch: true))
+    }
+
     func testAnInterruptedRecoveryShowsTheWindowEvenOnABackgroundLaunch() {
         XCTAssertTrue(ESPDisplayApplicationDelegate.showsManager(
-            pendingRecovery: true))
+            pendingRecovery: true, showAtLaunch: false))
         XCTAssertFalse(ESPDisplayApplicationDelegate.showsManager(
-            pendingRecovery: false))
+            pendingRecovery: false, showAtLaunch: false))
     }
 }
