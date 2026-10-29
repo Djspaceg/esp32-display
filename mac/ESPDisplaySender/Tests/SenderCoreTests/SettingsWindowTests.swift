@@ -781,6 +781,19 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertNil(received[1])
     }
 
+    func testPermissionsNavigationSignalsItsPaneWheneverItBecomesVisible() {
+        let navigation = SettingsNavigation()
+        var shown: [SettingsPane] = []
+        navigation.onPaneShown = { shown.append($0) }
+
+        navigation.show(.permissions)
+        navigation.show(.general)
+        navigation.goBack()
+        navigation.announceCurrentPane()
+
+        XCTAssertEqual(shown, [.permissions, .general, .permissions, .permissions])
+    }
+
     // MARK: support
 
     private func makeManager(saved: [String]) -> (PanelManager, PanelSnapshot) {

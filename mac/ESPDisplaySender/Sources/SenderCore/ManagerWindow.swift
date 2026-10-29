@@ -66,6 +66,8 @@ struct ManagerView: View {
                             onRequestAccess: {
                                 manager.requestPermissionAccess(for: issue.issue)
                             },
+                            requestIsPending: issue.issue.permission == .cameraExtension
+                                && manager.cameraExtensionActivationPending,
                             onRelaunch: { AppRelauncher.relaunch() })
                     }
                 }
@@ -323,6 +325,7 @@ private struct IssueBanner: View {
     let issue: ReportedIssue
     let onDismiss: () -> Void
     let onRequestAccess: () -> Void
+    let requestIsPending: Bool
     let onRelaunch: () -> Void
 
     var body: some View {
@@ -340,12 +343,17 @@ private struct IssueBanner: View {
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                 if let permission = issue.issue.permission {
-                    if issue.permissionState != .grantedNeedsRelaunch {
+                    if issue.permissionState != .grantedNeedsRelaunch
+                        && issue.permissionState != .grantedNeedsRestart
+                    {
                         HStack(spacing: 8) {
                             Button(permission.settingsButtonTitle) {
                                 NSWorkspace.shared.open(permission.settingsURL)
                             }
-                            Button("Request Access", action: onRequestAccess)
+                            if permission.offersInAppRequestWhenBlocked {
+                                Button("Request Access", action: onRequestAccess)
+                                    .disabled(requestIsPending)
+                            }
                         }
                         .controlSize(.small)
                         .padding(.top, 4)
@@ -871,6 +879,7 @@ struct PanelDetailView: View {
                 Button("Install Camera Extension") {
                     manager.requestPermissionAccess(for: MacPermission.cameraExtension)
                 }
+                .disabled(manager.cameraExtensionActivationPending)
             }
         } header: {
             Text("Camera")

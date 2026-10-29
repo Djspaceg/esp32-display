@@ -88,6 +88,7 @@ final class PanelManager: ObservableObject {
     private var systemAudioChecklistStatus: PermissionChecklistStatus?
     private var cameraExtensionNeedsApproval = false
     private var cameraExtensionActivated = false
+    private var cameraExtensionNeedsRestart = false
     private var cameraExtensionTechnicalDetail: String?
     private var automaticPermissionSequence = false
     private var permissionChecklistDismissedThisLaunch = false
@@ -757,6 +758,13 @@ final class PanelManager: ObservableObject {
     /// signed app identity, so a new signature correctly starts at "Not yet
     /// asked" instead of inheriting a stale denial label.
     func requestPermissionAccess(for permission: MacPermission) {
+        guard permission != .cameraExtension || !CameraExtensionInstaller.isActivationPending
+        else {
+            operationOutcome = .success(
+                "Camera extension request is pending",
+                "Approve ESPDisplay Camera Extension in System Settings, then return here.")
+            return
+        }
         activePermissionRequest = permission
         switch permission {
         case .screenRecording:
@@ -800,28 +808,48 @@ final class PanelManager: ObservableObject {
             unblockForegroundStartup()
             refreshPermissionChecklist()
         case .cameraExtension:
+            // The request may wait for approval across the point where the
+            // app is closed. Record the real activation attempt immediately,
+            // rather than forgetting it until macOS later sends a callback.
+            permissionPromptHistory.markRequested(permission)
             cameraExtensionNeedsApproval = false
+            cameraExtensionNeedsRestart = false
             cameraExtensionTechnicalDetail = nil
             CameraExtensionInstaller.activate { [weak self] result in
                 Task { @MainActor in
                     guard let self else { return }
-                    self.permissionPromptHistory.markRequested(permission)
                     switch result {
                     case .installed:
                         self.cameraExtensionNeedsApproval = false
                         self.cameraExtensionActivated = true
+                        self.cameraExtensionNeedsRestart = false
                         self.cameraExtensionTechnicalDetail = nil
                         self.operationOutcome = .success(
                             "Camera extension installed",
                             "ESPDisplay XIAOML Camera is ready in video apps.")
                     case .needsUserApproval:
                         self.cameraExtensionNeedsApproval = true
+                        self.cameraExtensionNeedsRestart = false
                         self.operationOutcome = .success(
                             "Camera extension needs approval",
                             "Approve ESPDisplay Camera Extension in System Settings, "
                                 + "then return here.")
+                    case .needsRestart:
+                        self.cameraExtensionNeedsApproval = false
+                        self.cameraExtensionActivated = false
+                        self.cameraExtensionNeedsRestart = true
+                        self.cameraExtensionTechnicalDetail = nil
+                        self.operationOutcome = .success(
+                            "Camera extension approved",
+                            "Restart your Mac before ESPDisplay XIAOML Camera appears in video apps.")
+                    case .requestInProgress:
+                        self.operationOutcome = .success(
+                            "Camera extension request is pending",
+                            "Approve ESPDisplay Camera Extension in System Settings, "
+                                + "then return here.")
                     case .failed(let error):
                         self.cameraExtensionNeedsApproval = true
+                        self.cameraExtensionNeedsRestart = false
                         self.cameraExtensionTechnicalDetail = error.localizedDescription
                         self.operationOutcome = .failure(
                             "Camera extension could not install",
@@ -923,32 +951,39 @@ final class PanelManager: ObservableObject {
     ) -> PermissionChecklistItem {
         let status: PermissionChecklistStatus
         let requiresRelaunch: Bool
+        let requiresRestart: Bool
         switch permission {
         case .screenRecording:
             switch screenRecordingPermissionState {
             case .ready:
                 status = .allowed
                 requiresRelaunch = false
+                requiresRestart = false
             case .needsAccess:
                 status = permissionPromptHistory.wasRequested(permission)
                     ? .blocked : .notYetAsked
                 requiresRelaunch = false
+                requiresRestart = false
             case .grantedNeedsRelaunch:
                 status = .allowed
                 requiresRelaunch = true
+                requiresRestart = false
             }
         case .localNetwork:
             status = localNetworkChecklistStatus ?? .checking
             requiresRelaunch = false
+            requiresRestart = false
         case .systemAudioRecording:
             status = systemAudioChecklistStatus ?? .checking
             requiresRelaunch = false
+            requiresRestart = false
         case .accessibility:
             status = mediaKeysAuthorized()
                 ? .allowed
                 : (permissionPromptHistory.wasRequested(permission)
                     ? .blocked : .notYetAsked)
             requiresRelaunch = false
+            requiresRestart = false
         case .cameraExtension:
             status = (cameraExtensionActivated || CameraExtensionInstaller.isInstalled)
                 ? .allowed
@@ -956,19 +991,27 @@ final class PanelManager: ObservableObject {
                     || permissionPromptHistory.wasRequested(permission)
                     ? .blocked : .notYetAsked)
             requiresRelaunch = false
+            requiresRestart = cameraExtensionNeedsRestart
         }
         return PermissionChecklistItem(
-            permission: permission, status: status, requiresRelaunch: requiresRelaunch)
+            permission: permission, status: status, requiresRelaunch: requiresRelaunch,
+            requiresRestart: requiresRestart)
     }
 
     private func publishPermissionIssue(for item: PermissionChecklistItem) {
         let issue = item.permission.appIssue
-        guard item.status == .blocked || item.requiresRelaunch else {
+        guard item.status == .blocked || item.requiresRelaunch || item.requiresRestart else {
             resolve(issue, source: "permission checklist")
             return
         }
-        let state: PermissionIssueState = item.requiresRelaunch
-            ? .grantedNeedsRelaunch : .needsAccess
+        let state: PermissionIssueState
+        if item.requiresRestart {
+            state = .grantedNeedsRestart
+        } else if item.requiresRelaunch {
+            state = .grantedNeedsRelaunch
+        } else {
+            state = .needsAccess
+        }
         let technicalDetail: String?
         switch item.permission {
         case .screenRecording:
@@ -1024,6 +1067,17 @@ final class PanelManager: ObservableObject {
         unblockForegroundStartup()
     }
 
+    /// Settings > Permissions is the permanent version of the same checklist.
+    /// Opening it closes the modal and leaves the user in one place to finish
+    /// setup, instead of displaying two copies at once.
+    func openPermissionsSettings() {
+        dismissPermissionChecklist()
+    }
+
+    var cameraExtensionActivationPending: Bool {
+        CameraExtensionInstaller.isActivationPending
+    }
+
     /// Foreground capture and discovery wait until the visible checklist has
     /// reached the Local Network row. That keeps their own first-use prompts
     /// from racing ahead of the explained Screen Recording request. A
@@ -1050,22 +1104,24 @@ final class PanelManager: ObservableObject {
                $0.permission == activePermissionRequest
            })
         {
-            guard active.isReady else { return }
-            self.activePermissionRequest = nil
+            if activePermissionRequest == .localNetwork, active.status == .blocked {
+                // DNS-SD has delivered a terminal policy denial. Keep the
+                // Local Network row and its Settings-only recovery visible,
+                // but continue to the independent Camera Extension request.
+                self.activePermissionRequest = nil
+            } else {
+                guard active.isReady else { return }
+                self.activePermissionRequest = nil
+            }
         }
         let requiredItems = permissionChecklist.filter {
             $0.permission.isRequiredAtLaunch
         }
-        guard let permission = PermissionRequestSequence.next(in: requiredItems),
-              let item = requiredItems.first(where: { $0.permission == permission })
+        guard let permission = PermissionRequestSequence.nextAutomaticRequest(in: requiredItems)
         else { return }
         activePermissionRequest = permission
         if permission == .localNetwork {
             unblockForegroundStartup()
-        }
-        guard PermissionRequestSequence.shouldRequestAutomatically(item) else {
-            automaticPermissionSequence = false
-            return
         }
         requestPermissionAccess(for: permission)
     }

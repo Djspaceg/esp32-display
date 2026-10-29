@@ -5,6 +5,8 @@ import SystemExtensions
 enum CameraExtensionActivation {
     case installed
     case needsUserApproval
+    case needsRestart
+    case requestInProgress
     case failed(Error)
 }
 
@@ -14,6 +16,7 @@ enum CameraExtensionActivation {
 final class CameraExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate {
     static let extensionIdentifier = "com.espdisplay.camera-extension"
     private static var active: CameraExtensionInstaller?
+    static var isActivationPending: Bool { active != nil }
 
     private let completion: (CameraExtensionActivation) -> Void
 
@@ -22,6 +25,10 @@ final class CameraExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
     }
 
     static func activate(completion: @escaping (CameraExtensionActivation) -> Void) {
+        guard active == nil else {
+            completion(.requestInProgress)
+            return
+        }
         let installer = CameraExtensionInstaller(completion: completion)
         active = installer
         let request = OSSystemExtensionRequest.activationRequest(
@@ -57,7 +64,18 @@ final class CameraExtensionInstaller: NSObject, OSSystemExtensionRequestDelegate
         _ request: OSSystemExtensionRequest,
         didFinishWithResult result: OSSystemExtensionRequest.Result
     ) {
-        finish(.installed)
+        switch result {
+        case .completed:
+            finish(.installed)
+        case .willCompleteAfterReboot:
+            finish(.needsRestart)
+        @unknown default:
+            finish(.failed(NSError(
+                domain: "CameraExtensionInstaller",
+                code: Int(result.rawValue),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "macOS returned an unknown camera extension activation result."])))
+        }
     }
 
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {

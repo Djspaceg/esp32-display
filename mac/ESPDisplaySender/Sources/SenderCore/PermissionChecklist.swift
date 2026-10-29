@@ -28,20 +28,34 @@ struct PermissionChecklistItem: Identifiable, Equatable {
     let permission: MacPermission
     let status: PermissionChecklistStatus
     let requiresRelaunch: Bool
+    let requiresRestart: Bool
+
+    init(
+        permission: MacPermission,
+        status: PermissionChecklistStatus,
+        requiresRelaunch: Bool,
+        requiresRestart: Bool = false
+    ) {
+        self.permission = permission
+        self.status = status
+        self.requiresRelaunch = requiresRelaunch
+        self.requiresRestart = requiresRestart
+    }
 
     var id: MacPermission { permission }
     var title: String { permission.checklistTitle }
     var purpose: String { permission.purpose }
     var statusText: String {
-        requiresRelaunch ? "Allowed - relaunch required" : status.title
+        if requiresRestart { return "Approved - restart Mac required" }
+        return requiresRelaunch ? "Allowed - relaunch required" : status.title
     }
 
     var isReady: Bool {
-        status == .allowed && !requiresRelaunch
+        status == .allowed && !requiresRelaunch && !requiresRestart
     }
 
     var needsAttention: Bool {
-        requiresRelaunch || status == .notYetAsked || status == .blocked
+        requiresRelaunch || requiresRestart || status == .notYetAsked || status == .blocked
     }
 }
 
@@ -53,16 +67,57 @@ enum PermissionChecklistPresentation {
     }
 }
 
-/// The fixed first-launch order keeps system prompts from stacking. A blocked
-/// row holds the sequence there so the user sees its explanation before the
-/// next prompt can be requested.
+/// Shared action policy for the permanent Settings page and the launch sheet.
+/// A blocked row is not an in-flight macOS request, so it must not prevent a
+/// person from setting up another capability such as the camera extension.
+enum PermissionChecklistActions {
+    static func waitingForAnotherRequest(
+        active: MacPermission?,
+        items: [PermissionChecklistItem],
+        current: MacPermission
+    ) -> Bool {
+        guard let active, active != current,
+              let activeItem = items.first(where: { $0.permission == active })
+        else { return false }
+        return activeItem.status == .checking
+    }
+
+    static func offersInAppRequest(for item: PermissionChecklistItem) -> Bool {
+        item.status != .allowed
+            && (item.status != .blocked || item.permission.offersInAppRequestWhenBlocked)
+    }
+}
+
+/// The fixed first-launch order keeps system prompts from stacking. A terminal
+/// Local Network policy denial leaves its recovery steps visible, then lets
+/// the next independent capability ask so camera setup is not held hostage by
+/// a network decision.
 enum PermissionRequestSequence {
+    /// The first row still needing attention. This includes a blocked row so
+    /// callers can keep its recovery guidance as the visible next problem.
     static func next(in items: [PermissionChecklistItem]) -> MacPermission? {
-        items.first(where: { !$0.isReady && $0.status != .checking })?.permission
+        MacPermission.requestOrder.first { permission in
+            guard let item = items.first(where: { $0.permission == permission }) else {
+                return false
+            }
+            return !item.isReady && item.status != .checking
+        }
+    }
+
+    /// The first row whose macOS request has not yet been attempted. Unlike
+    /// `next(in:)`, this moves past a terminal block so independent features
+    /// such as the camera extension can still be requested.
+    static func nextAutomaticRequest(in items: [PermissionChecklistItem]) -> MacPermission? {
+        MacPermission.requestOrder.first { permission in
+            guard let item = items.first(where: { $0.permission == permission }) else {
+                return false
+            }
+            return shouldRequestAutomatically(item)
+        }
     }
 
     static func shouldRequestAutomatically(_ item: PermissionChecklistItem) -> Bool {
-        item.status == .notYetAsked && !item.requiresRelaunch
+        item.status == .notYetAsked && !item.requiresRelaunch && !item.requiresRestart
     }
 }
 

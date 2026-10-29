@@ -16,15 +16,15 @@ enum MacPermission: String, CaseIterable, Equatable, Sendable {
     static let requestOrder: [MacPermission] = [
         .screenRecording,
         .localNetwork,
+        .cameraExtension,
         .systemAudioRecording,
         .accessibility,
     ]
 
-    /// The camera extension remains visible in the checklist, but it is a
-    /// separate optional feature rather than permission needed to send a
-    /// picture or reach a device.
+    /// The first-launch checklist prepares every Mac capability this app
+    /// offers, including the virtual camera the XIAOML Kit needs.
     var isRequiredAtLaunch: Bool {
-        self != .cameraExtension
+        true
     }
 
     var title: String {
@@ -119,8 +119,9 @@ enum MacPermission: String, CaseIterable, Equatable, Sendable {
             ]
         case .localNetwork:
             return [
-                "Open Local Network Settings.",
-                "Turn on ESPDisplaySender, or turn it off and on again if it is already on.",
+                "Open System Settings > Privacy & Security > Local Network.",
+                "Turn on ESPDisplaySender.",
+                "If ESPDisplaySender is not listed, macOS has no switch for this copy. Restart your Mac, then check this page again.",
                 "Relaunch ESPDisplaySender.",
             ]
         case .cameraExtension:
@@ -155,7 +156,10 @@ enum MacPermission: String, CaseIterable, Equatable, Sendable {
         case (.systemAudioRecording, .grantedNeedsRelaunch):
             return "Permission granted - resume sending Mac sound to the device."
         case (.localNetwork, .needsAccess):
-            return "ESPDisplaySender isn't allowed to reach devices on your local network."
+            return "ESPDisplaySender is blocked from reaching devices on your local network. "
+                + "Open System Settings > Privacy & Security > Local Network and turn on "
+                + "ESPDisplaySender. If it is not listed, macOS has no switch for this copy; "
+                + "the app cannot make a request that will appear."
         case (.localNetwork, .grantedNeedsRelaunch):
             return "Permission granted - relaunch to reach devices on your local network."
         case (.cameraExtension, .needsAccess):
@@ -163,6 +167,10 @@ enum MacPermission: String, CaseIterable, Equatable, Sendable {
                 + "video apps until its camera extension is approved."
         case (.cameraExtension, .grantedNeedsRelaunch):
             return "Camera extension approved - relaunch if it does not appear in video apps."
+        case (.cameraExtension, .grantedNeedsRestart):
+            return "Camera extension approved - restart your Mac before it appears in video apps."
+        case (_, .grantedNeedsRestart):
+            return "Permission granted - restart your Mac before using this feature."
         }
     }
 
@@ -175,11 +183,19 @@ enum MacPermission: String, CaseIterable, Equatable, Sendable {
         case .cameraExtension: return .cameraExtension
         }
     }
+
+    /// Local Network has no supported repeat-request API after macOS has
+    /// already returned a policy denial. Retrying the browse only fails again;
+    /// the recovery is the Local Network privacy pane.
+    var offersInAppRequestWhenBlocked: Bool {
+        self != .localNetwork
+    }
 }
 
 enum PermissionIssueState: Equatable, Sendable {
     case needsAccess
     case grantedNeedsRelaunch
+    case grantedNeedsRestart
 }
 
 /// The status visible to the app after a screen-capture attempt. A positive

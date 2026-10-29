@@ -105,28 +105,37 @@ final class SettingsNavigation: ObservableObject {
     @Published var query = ""
     @Published private(set) var backStack: [SettingsPane] = []
     @Published private(set) var forwardStack: [SettingsPane] = []
+    var onPaneShown: (SettingsPane) -> Void = { _ in }
 
     var visiblePanes: [SettingsPane] {
         SettingsPane.allCases.filter { $0.matches(query) }
     }
 
     func show(_ next: SettingsPane) {
-        guard next != pane else { return }
-        backStack.append(pane)
-        forwardStack.removeAll()
-        pane = next
+        if next != pane {
+            backStack.append(pane)
+            forwardStack.removeAll()
+            pane = next
+        }
+        onPaneShown(next)
     }
 
     func goBack() {
         guard let previous = backStack.popLast() else { return }
         forwardStack.append(pane)
         pane = previous
+        onPaneShown(pane)
     }
 
     func goForward() {
         guard let next = forwardStack.popLast() else { return }
         backStack.append(pane)
         pane = next
+        onPaneShown(pane)
+    }
+
+    func announceCurrentPane() {
+        onPaneShown(pane)
     }
 }
 
@@ -298,7 +307,10 @@ struct PermissionChecklistRows: View {
     var body: some View {
         ForEach(manager.permissionChecklist) { item in
             let isActive = manager.activePermissionRequest == item.permission
-            let waitingForAnother = manager.activePermissionRequest != nil && !isActive
+            let waitingForAnother = PermissionChecklistActions.waitingForAnotherRequest(
+                active: manager.activePermissionRequest,
+                items: manager.permissionChecklist,
+                current: item.permission)
             VStack(alignment: .leading, spacing: 7) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -324,7 +336,11 @@ struct PermissionChecklistRows: View {
                         .foregroundStyle(.secondary)
                 }
                 HStack(spacing: 8) {
-                    if item.requiresRelaunch {
+                    if item.requiresRestart {
+                        Button(item.permission.settingsButtonTitle) {
+                            NSWorkspace.shared.open(item.permission.settingsURL)
+                        }
+                    } else if item.requiresRelaunch {
                         Button("Relaunch ESPDisplaySender") {
                             AppRelauncher.relaunch()
                         }
@@ -332,15 +348,17 @@ struct PermissionChecklistRows: View {
                         Button(item.permission.settingsButtonTitle) {
                             NSWorkspace.shared.open(item.permission.settingsURL)
                         }
-                        Button("Request Again") {
-                            manager.requestPermissionAccess(for: item.permission)
+                        if PermissionChecklistActions.offersInAppRequest(for: item) {
+                            Button("Request Again") {
+                                manager.requestPermissionAccess(for: item.permission)
+                            }
+                            .disabled(waitingForAnother || isActive)
                         }
-                        .disabled(waitingForAnother)
                     } else if item.status == .notYetAsked {
                         Button("Request Access") {
                             manager.requestPermissionAccess(for: item.permission)
                         }
-                        .disabled(waitingForAnother)
+                        .disabled(waitingForAnother || isActive)
                         Button(item.permission.settingsButtonTitle) {
                             NSWorkspace.shared.open(item.permission.settingsURL)
                         }
@@ -348,7 +366,7 @@ struct PermissionChecklistRows: View {
                         Button("Request Access") {
                             manager.requestPermissionAccess(for: item.permission)
                         }
-                        .disabled(waitingForAnother)
+                        .disabled(waitingForAnother || isActive)
                         Button(item.permission.settingsButtonTitle) {
                             NSWorkspace.shared.open(item.permission.settingsURL)
                         }
@@ -636,6 +654,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     init(manager: PanelManager) {
         self.manager = manager
+        navigation.onPaneShown = { [weak manager] pane in
+            guard pane == .permissions else { return }
+            manager?.openPermissionsSettings()
+        }
     }
 
     func show(_ pane: SettingsPane? = nil) {
@@ -643,6 +665,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             // A pane a search is hiding would open behind an empty sidebar.
             if !pane.matches(navigation.query) { navigation.query = "" }
             navigation.show(pane)
+        } else {
+            navigation.announceCurrentPane()
         }
         NSApp.setActivationPolicy(.regular)
         let window = makeWindowIfNeeded()

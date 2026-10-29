@@ -69,13 +69,15 @@ final class MacPermissionGuidanceTests: XCTestCase {
             PermissionChecklistItem(
                 permission: .screenRecording, status: .allowed, requiresRelaunch: false),
             PermissionChecklistItem(
-                permission: .localNetwork, status: .notYetAsked, requiresRelaunch: false),
+                permission: .localNetwork, status: .allowed, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .cameraExtension, status: .notYetAsked, requiresRelaunch: false),
             PermissionChecklistItem(
                 permission: .systemAudioRecording, status: .notYetAsked, requiresRelaunch: false),
         ]
 
-        XCTAssertEqual(PermissionRequestSequence.next(in: items), .localNetwork)
-        XCTAssertTrue(PermissionRequestSequence.shouldRequestAutomatically(items[1]))
+        XCTAssertEqual(PermissionRequestSequence.next(in: items), .cameraExtension)
+        XCTAssertTrue(PermissionRequestSequence.shouldRequestAutomatically(items[2]))
     }
 
     func testCheckingPermissionDoesNotFlashTheLaunchChecklist() {
@@ -137,26 +139,30 @@ final class MacPermissionGuidanceTests: XCTestCase {
         XCTAssertEqual(items[2].statusText, "Checking")
     }
 
-    func testCameraExtensionIsVisibleButNotInTheAutomaticSetupSequence() {
-        XCTAssertFalse(MacPermission.cameraExtension.isRequiredAtLaunch)
-        XCTAssertFalse(MacPermission.requestOrder.contains(.cameraExtension))
+    func testCameraExtensionIsIncludedInAutomaticSetupAfterLocalNetwork() {
+        XCTAssertTrue(MacPermission.cameraExtension.isRequiredAtLaunch)
+        XCTAssertTrue(MacPermission.requestOrder.contains(.cameraExtension))
         XCTAssertEqual(
             MacPermission.allCases,
             [.screenRecording, .localNetwork, .systemAudioRecording, .accessibility,
              .cameraExtension])
         XCTAssertEqual(
             MacPermission.requestOrder,
-            [.screenRecording, .localNetwork, .systemAudioRecording, .accessibility])
+            [.screenRecording, .localNetwork, .cameraExtension, .systemAudioRecording,
+             .accessibility])
     }
 
-    func testChecklistDoesNotAutoRequestPastABlockedPermission() {
+    func testChecklistRequestsCameraAfterABlockedLocalNetworkDecision() {
         let blocked = PermissionChecklistItem(
-            permission: .screenRecording, status: .blocked, requiresRelaunch: false)
+            permission: .localNetwork, status: .blocked, requiresRelaunch: false)
         let later = PermissionChecklistItem(
-            permission: .localNetwork, status: .notYetAsked, requiresRelaunch: false)
+            permission: .cameraExtension, status: .notYetAsked, requiresRelaunch: false)
 
-        XCTAssertEqual(PermissionRequestSequence.next(in: [blocked, later]), .screenRecording)
-        XCTAssertFalse(PermissionRequestSequence.shouldRequestAutomatically(blocked))
+        XCTAssertEqual(PermissionRequestSequence.next(in: [blocked, later]), .localNetwork)
+        XCTAssertEqual(
+            PermissionRequestSequence.nextAutomaticRequest(in: [blocked, later]),
+            .cameraExtension)
+        XCTAssertTrue(PermissionRequestSequence.shouldRequestAutomatically(later))
     }
 
     func testChecklistShowsAllowedButRelaunchRequiredSeparately() {
@@ -175,6 +181,69 @@ final class MacPermissionGuidanceTests: XCTestCase {
             "Makes device camera frames available to other video apps.")
         XCTAssertEqual(permission.settingsButtonTitle, "Open Extensions Settings")
         XCTAssertFalse(permission.message(for: .needsAccess).localizedCaseInsensitiveContains("declin"))
+    }
+
+    func testLocalNetworkBlockUsesSettingsInsteadOfAnUnrepeatableRequest() {
+        let item = PermissionChecklistItem(
+            permission: .localNetwork, status: .blocked, requiresRelaunch: false)
+
+        XCTAssertFalse(PermissionChecklistActions.offersInAppRequest(for: item))
+        XCTAssertFalse(MacPermission.localNetwork.message(for: .needsAccess)
+            .localizedCaseInsensitiveContains("request again"))
+        XCTAssertEqual(
+            MacPermission.localNetwork.steps.first,
+            "Open System Settings > Privacy & Security > Local Network.")
+    }
+
+    func testBlockedLocalNetworkDoesNotDisableCameraSetup() {
+        let items = [
+            PermissionChecklistItem(
+                permission: .localNetwork, status: .blocked, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .cameraExtension, status: .notYetAsked, requiresRelaunch: false),
+        ]
+
+        XCTAssertFalse(PermissionChecklistActions.waitingForAnotherRequest(
+            active: .localNetwork, items: items, current: .cameraExtension))
+        XCTAssertTrue(PermissionChecklistActions.offersInAppRequest(for: items[1]))
+    }
+
+    func testCheckingCameraRequestDisablesOnlyDuplicateCameraSetup() {
+        let items = [
+            PermissionChecklistItem(
+                permission: .localNetwork, status: .blocked, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .cameraExtension, status: .checking, requiresRelaunch: false),
+        ]
+
+        XCTAssertTrue(PermissionChecklistActions.waitingForAnotherRequest(
+            active: .cameraExtension, items: items, current: .localNetwork))
+        XCTAssertFalse(PermissionChecklistActions.waitingForAnotherRequest(
+            active: .cameraExtension, items: items, current: .cameraExtension))
+    }
+
+    func testCameraRestartResultStaysActionableUntilTheMacRestarts() {
+        let item = PermissionChecklistItem(
+            permission: .cameraExtension, status: .allowed, requiresRelaunch: false,
+            requiresRestart: true)
+
+        XCTAssertEqual(item.statusText, "Approved - restart Mac required")
+        XCTAssertFalse(item.isReady)
+        XCTAssertTrue(PermissionChecklistPresentation.shouldPresent(for: [item]))
+        XCTAssertEqual(
+            MacPermission.cameraExtension.message(for: .grantedNeedsRestart),
+            "Camera extension approved - restart your Mac before it appears in video apps.")
+    }
+
+    @MainActor
+    func testOpeningPermissionsSettingsClosesTheDuplicateChecklistSheet() {
+        let manager = PanelManager(
+            previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+        manager.permissionChecklistPresented = true
+
+        manager.openPermissionsSettings()
+
+        XCTAssertFalse(manager.permissionChecklistPresented)
     }
 
     func testLocalNetworkPolicyDeniedDNSCodeIsRecognized() {
@@ -200,7 +269,10 @@ final class MacPermissionGuidanceTests: XCTestCase {
             .policyDenied(technicalDetail: "PolicyDenied(-65570)"))
         XCTAssertEqual(
             manager.issues.first?.detail,
-            "ESPDisplaySender isn't allowed to reach devices on your local network.")
+            "ESPDisplaySender is blocked from reaching devices on your local network. "
+                + "Open System Settings > Privacy & Security > Local Network and turn on "
+                + "ESPDisplaySender. If it is not listed, macOS has no switch for this copy; "
+                + "the app cannot make a request that will appear.")
         XCTAssertEqual(manager.issues.first?.permissionState, .needsAccess)
         manager.observeLocalNetworkPermission(.browserReady)
         XCTAssertTrue(manager.issues.contains { $0.issue == .localNetwork })
