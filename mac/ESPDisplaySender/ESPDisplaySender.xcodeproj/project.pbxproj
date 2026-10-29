@@ -326,6 +326,8 @@
 		A00000000000000000000022 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				APP_BUNDLE_IDENTIFIER = com.espdisplay.sender;
+				APP_PRODUCT_NAME = ESPDisplaySender;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_ENTITLEMENTS = ESPDisplaySender.entitlements;
 				CODE_SIGN_STYLE = Automatic;
@@ -333,6 +335,7 @@
 				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = 4D22XL743H;
 				ENABLE_HARDENED_RUNTIME = YES;
+				EXECUTABLE_NAME = ESPDisplaySender;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ../Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -341,8 +344,9 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.espdisplay.sender;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				PRODUCT_NAME = "$(APP_PRODUCT_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(ESPDISP_LAN_TEST)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -351,6 +355,8 @@
 		A00000000000000000000023 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				APP_BUNDLE_IDENTIFIER = com.espdisplay.sender;
+				APP_PRODUCT_NAME = ESPDisplaySender;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_ENTITLEMENTS = ESPDisplaySender.entitlements;
 				CODE_SIGN_STYLE = Automatic;
@@ -358,6 +364,7 @@
 				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = 4D22XL743H;
 				ENABLE_HARDENED_RUNTIME = YES;
+				EXECUTABLE_NAME = ESPDisplaySender;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ../Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -366,8 +373,9 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.espdisplay.sender;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				PRODUCT_NAME = "$(APP_PRODUCT_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(ESPDISP_LAN_TEST)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};

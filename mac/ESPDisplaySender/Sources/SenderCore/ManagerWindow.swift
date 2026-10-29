@@ -54,9 +54,10 @@ struct ManagerView: View {
         } detail: {
             detailColumn
         }
-        // Standing problems float over the content on glass rather than pushing
-        // the whole window down, which is what the old full-width bar did.
-        .safeAreaInset(edge: .top, spacing: 0) {
+        // Keep status warnings above the content instead of taking vertical
+        // space from a device page. Each row is deliberately one line; its
+        // explanation and walkthrough live in a Details popover.
+        .overlay(alignment: .top) {
             if !manager.issues.isEmpty {
                 VStack(spacing: 8) {
                     ForEach(manager.issues) { issue in
@@ -72,7 +73,7 @@ struct ManagerView: View {
                     }
                 }
                 .padding(.horizontal, 14)
-                .padding(.bottom, 10)
+                .padding(.top, 8)
             }
         }
         // No minimum frame here. A SwiftUI minimum on the hosted root is
@@ -147,10 +148,10 @@ struct ManagerView: View {
             )
         ) {
             Button("OK") { manager.clearOperationOutcome() }
-            // An alert's text cannot be selected, so a failure offers its
+            // An alert's text cannot be selected, so every outcome offers its
             // text to copy instead.
-            if let outcome = manager.operationOutcome, outcome.kind == .failure {
-                Button("Copy Message") {
+            if let outcome = manager.operationOutcome {
+                Button(outcome.kind == .failure ? "Copy Message" : "Copy Result") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(
                         outcome.title + "\n\n" + outcome.alertText, forType: .string)
@@ -319,83 +320,34 @@ extension DeviceListSortOrder {
     }
 }
 
-/// A standing problem the app cannot fix by itself. Floats above the content
-/// because it usually explains why the rest of the window looks wrong.
+/// A standing problem the app cannot fix by itself. The compact row keeps a
+/// small window usable; its full explanation remains selectable in Details.
 private struct IssueBanner: View {
     let issue: ReportedIssue
     let onDismiss: () -> Void
     let onRequestAccess: () -> Void
     let requestIsPending: Bool
     let onRelaunch: () -> Void
+    @State private var showingDetails = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(issue.title)
-                    .fontWeight(.medium)
-                    .textSelection(.enabled)
-                Text(issue.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let permission = issue.issue.permission {
-                    if issue.permissionState != .grantedNeedsRelaunch
-                        && issue.permissionState != .grantedNeedsRestart
-                    {
-                        HStack(spacing: 8) {
-                            Button(permission.settingsButtonTitle) {
-                                NSWorkspace.shared.open(permission.settingsURL)
-                            }
-                            if permission.offersInAppRequestWhenBlocked {
-                                Button("Request Access", action: onRequestAccess)
-                                    .disabled(requestIsPending)
-                            }
-                        }
-                        .controlSize(.small)
-                        .padding(.top, 4)
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(Array(permission.steps.enumerated()), id: \.offset) {
-                                index, step in
-                                Text("\(index + 1). \(step)")
-                            }
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .padding(.top, 2)
-                    }
-                    if issue.permissionState == .grantedNeedsRelaunch
-                        || permission == .screenRecording
-                        || permission == .localNetwork
-                    {
-                        Button("Relaunch ESPDisplaySender", action: onRelaunch)
-                            .controlSize(.small)
-                            .padding(.top, 4)
-                    }
-                } else if let settingsURL = issue.issue.settingsURL {
-                    Button("Open System Settings") {
-                        NSWorkspace.shared.open(settingsURL)
-                    }
-                    .controlSize(.small)
-                    .padding(.top, 4)
-                }
-                if let technicalDetail = issue.technicalDetail {
-                    DisclosureGroup("Technical details") {
-                        Text(technicalDetail)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .font(.caption)
-                    .padding(.top, 2)
-                }
+            Text(issue.title)
+                .font(.callout.weight(.medium))
+                .lineLimit(1)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+            actions
+            Button("Details") {
+                showingDetails = true
             }
-            Spacer(minLength: 8)
+            .controlSize(.small)
+            .popover(isPresented: $showingDetails, arrowEdge: .bottom) {
+                details
+            }
             if issue.issue.permission == nil {
                 Button(action: onDismiss) {
                     Image(systemName: "xmark")
@@ -406,9 +358,114 @@ private struct IssueBanner: View {
                 .accessibilityLabel("Dismiss: \(issue.title)")
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
         .glassCard(tint: .orange)
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        ViewThatFits(in: .horizontal) {
+            directActions
+            Menu("Actions") {
+                menuActions
+            }
+            .controlSize(.small)
+        }
+    }
+
+    @ViewBuilder
+    private var directActions: some View {
+        HStack(spacing: 6) {
+            if let permission = issue.issue.permission {
+                if shouldShowSettings(for: permission) {
+                    Button(permission.settingsButtonTitle) {
+                        NSWorkspace.shared.open(permission.settingsURL)
+                    }
+                }
+                if shouldShowRequest(for: permission) {
+                    Button("Request Access", action: onRequestAccess)
+                        .disabled(requestIsPending)
+                }
+                if shouldShowRelaunch(for: permission) {
+                    Button("Relaunch ESPDisplaySender", action: onRelaunch)
+                }
+            } else if let settingsURL = issue.issue.settingsURL {
+                Button("Open System Settings") {
+                    NSWorkspace.shared.open(settingsURL)
+                }
+            }
+        }
+        .controlSize(.small)
+    }
+
+    @ViewBuilder
+    private var menuActions: some View {
+        if let permission = issue.issue.permission {
+            if shouldShowSettings(for: permission) {
+                Button(permission.settingsButtonTitle) {
+                    NSWorkspace.shared.open(permission.settingsURL)
+                }
+            }
+            if shouldShowRequest(for: permission) {
+                Button("Request Access", action: onRequestAccess)
+                    .disabled(requestIsPending)
+            }
+            if shouldShowRelaunch(for: permission) {
+                Button("Relaunch ESPDisplaySender", action: onRelaunch)
+            }
+        } else if let settingsURL = issue.issue.settingsURL {
+            Button("Open System Settings") {
+                NSWorkspace.shared.open(settingsURL)
+            }
+        }
+    }
+
+    private func shouldShowSettings(for permission: MacPermission) -> Bool {
+        issue.permissionState != .grantedNeedsRelaunch
+            && issue.permissionState != .grantedNeedsRestart
+    }
+
+    private func shouldShowRequest(for permission: MacPermission) -> Bool {
+        shouldShowSettings(for: permission) && permission.offersInAppRequestWhenBlocked
+    }
+
+    private func shouldShowRelaunch(for permission: MacPermission) -> Bool {
+        issue.permissionState == .grantedNeedsRelaunch
+            || permission == .screenRecording
+            || permission == .localNetwork
+    }
+
+    private var details: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(issue.title)
+                    .font(.headline)
+                Text(issue.detail)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let permission = issue.issue.permission {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(permission.steps.enumerated()), id: \.offset) {
+                            index, step in
+                            Text("\(index + 1). \(step)")
+                        }
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                }
+                if let technicalDetail = issue.technicalDetail {
+                    Text("Technical details")
+                        .font(.headline)
+                    Text(technicalDetail)
+                        .font(.callout.monospaced())
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .textSelection(.enabled)
+            .padding(18)
+        }
+        .frame(width: 500, height: 360)
     }
 }
 
@@ -578,7 +635,7 @@ struct PanelDetailView: View {
             {
                 audioSection
             }
-            if panel.capabilities.contains(.camera) {
+            if AppBuildFeatures.includesCameraExtension, panel.capabilities.contains(.camera) {
                 cameraSection
             }
             diagnosticsSection
@@ -2385,11 +2442,15 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
         let controller = NSHostingController(rootView: ManagerView(manager: manager))
         let window = NSWindow(contentViewController: controller)
         window.title = "ESPDisplaySender"
-        window.setContentSize(NSSize(width: 1000, height: 700))
+        let visibleSize = NSScreen.main?.visibleFrame.size
+            ?? NSSize(width: 1000, height: 700)
+        window.setContentSize(NSSize(
+            width: min(1000, max(540, visibleSize.width - 40)),
+            height: min(700, max(360, visibleSize.height - 40))))
         // contentMinSize rather than minSize: with fullSizeContentView the
         // content view is the whole window, so constraining the frame and
         // constraining the content are off by the titlebar height.
-        window.contentMinSize = NSSize(width: 760, height: 420)
+        window.contentMinSize = NSSize(width: 540, height: 360)
         // fullSizeContentView lets the sidebar's glass run the whole height of
         // the window and up behind the titlebar, which is what makes the
         // sidebar and the title area read as one surface rather than two.

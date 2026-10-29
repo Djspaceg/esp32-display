@@ -1,5 +1,30 @@
 import Foundation
 
+/// The Local Network test must make one privacy request only. Keeping this
+/// compile-time flag in the test artifact avoids competing first-use prompts
+/// and omits the embedded camera extension entirely.
+enum AppBuildFeatures {
+    #if LAN_TEST
+    static let isLocalNetworkTest = true
+    #else
+    static let isLocalNetworkTest = false
+    #endif
+
+    static var includesCameraExtension: Bool {
+        !isLocalNetworkTest
+    }
+
+    static func processLockPath(isLocalNetworkTest: Bool) -> String {
+        isLocalNetworkTest
+            ? "/tmp/espdisplaysender-lan-test.lock"
+            : "/tmp/espdisplaysender.lock"
+    }
+
+    static var processLockPath: String {
+        processLockPath(isLocalNetworkTest: isLocalNetworkTest)
+    }
+}
+
 /// The user-facing path back to a macOS privacy grant. Keeping the wording,
 /// Settings link, actions and walkthrough together prevents each feature from
 /// inventing a slightly different explanation when a rebuilt app loses a
@@ -24,7 +49,14 @@ enum MacPermission: String, CaseIterable, Equatable, Sendable {
     /// The first-launch checklist prepares every Mac capability this app
     /// offers, including the virtual camera the XIAOML Kit needs.
     var isRequiredAtLaunch: Bool {
-        true
+        isAvailableInThisBuild
+    }
+
+    var isAvailableInThisBuild: Bool {
+        if AppBuildFeatures.isLocalNetworkTest {
+            return self == .localNetwork
+        }
+        return true
     }
 
     var title: String {

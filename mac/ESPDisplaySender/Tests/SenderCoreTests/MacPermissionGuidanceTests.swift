@@ -109,6 +109,20 @@ final class MacPermissionGuidanceTests: XCTestCase {
         XCTAssertEqual(PermissionRequestSequence.next(in: items), .localNetwork)
     }
 
+    @MainActor
+    func testLocalNetworkTestChecklistStartsAtAnExplainedRequest() {
+        let manager = PanelManager(
+            previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
+
+        manager.prepareLocalNetworkTestPermissionRequest()
+
+        XCTAssertEqual(manager.permissionChecklist.map(\.permission), MacPermission.allCases)
+        XCTAssertEqual(
+            manager.permissionChecklist.first(where: { $0.permission == .localNetwork })?.status,
+            .notYetAsked)
+        XCTAssertTrue(manager.permissionChecklistPresented)
+    }
+
     func testACompletedSystemAudioCheckCanPresentItsRecoveryAction() {
         let items = [
             PermissionChecklistItem(
@@ -140,8 +154,11 @@ final class MacPermissionGuidanceTests: XCTestCase {
     }
 
     func testCameraExtensionIsIncludedInAutomaticSetupAfterLocalNetwork() {
+        XCTAssertFalse(AppBuildFeatures.isLocalNetworkTest)
+        XCTAssertTrue(AppBuildFeatures.includesCameraExtension)
         XCTAssertTrue(MacPermission.cameraExtension.isRequiredAtLaunch)
         XCTAssertTrue(MacPermission.requestOrder.contains(.cameraExtension))
+        XCTAssertTrue(MacPermission.allCases.allSatisfy(\.isAvailableInThisBuild))
         XCTAssertEqual(
             MacPermission.allCases,
             [.screenRecording, .localNetwork, .systemAudioRecording, .accessibility,
@@ -150,6 +167,15 @@ final class MacPermissionGuidanceTests: XCTestCase {
             MacPermission.requestOrder,
             [.screenRecording, .localNetwork, .cameraExtension, .systemAudioRecording,
              .accessibility])
+    }
+
+    func testLanTestUsesAnIndependentSingleInstanceLock() {
+        XCTAssertEqual(
+            AppBuildFeatures.processLockPath(isLocalNetworkTest: false),
+            "/tmp/espdisplaysender.lock")
+        XCTAssertEqual(
+            AppBuildFeatures.processLockPath(isLocalNetworkTest: true),
+            "/tmp/espdisplaysender-lan-test.lock")
     }
 
     func testChecklistRequestsCameraAfterABlockedLocalNetworkDecision() {

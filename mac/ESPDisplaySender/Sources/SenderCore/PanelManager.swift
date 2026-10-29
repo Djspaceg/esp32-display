@@ -910,7 +910,9 @@ final class PanelManager: ObservableObject {
     /// The same source powers the checklist and the in-context banners. A
     /// "not yet asked" row is proactive guidance, not an error banner.
     private func refreshPermissionChecklist() {
-        let next = MacPermission.allCases.map(permissionChecklistItem)
+        let next = MacPermission.allCases
+            .filter(\.isAvailableInThisBuild)
+            .map(permissionChecklistItem)
         if permissionChecklist != next {
             permissionChecklist = next
         }
@@ -1049,6 +1051,18 @@ final class PanelManager: ObservableObject {
             self.localNetworkChecklistStatus = .notYetAsked
             self.refreshPermissionChecklist()
         }
+    }
+
+    /// Prepares the separately signed LAN diagnostic to make its one intended
+    /// request from a visible, explained checklist. Its preview manager does
+    /// not run the production initializer, so it deliberately has no normal
+    /// launch grace task to promote this row from Checking.
+    func prepareLocalNetworkTestPermissionRequest() {
+        localNetworkInitialCheckTask?.cancel()
+        localNetworkInitialCheckTask = nil
+        localNetworkChecklistStatus = .notYetAsked
+        permissionChecklistDismissedThisLaunch = false
+        refreshPermissionChecklist()
     }
 
     /// Called once the first interactive window has a checklist on screen.

@@ -53,9 +53,25 @@ WORKSPACE="$(cd "$HERE/.." && pwd)"
 PROJECT="$HERE/ESPDisplaySender/ESPDisplaySender.xcodeproj"
 SCHEME="ESPDisplaySender App"
 APP_PARENT="/Applications"
-APP="$APP_PARENT/ESPDisplaySender.app"
-STAGED_APP="$APP_PARENT/.ESPDisplaySender.app.staged"
-LEGACY_APP="$HOME/Applications/ESPDisplaySender.app"
+if [[ "${ESPDISP_LAN_TEST_APP:-}" == "1" ]]; then
+  APP_NAME="ESPDisplaySender LAN Test"
+  APP_BUNDLE_IDENTIFIER="com.espdisplay.sender.lantest"
+  APP="$APP_PARENT/$APP_NAME.app"
+  STAGED_APP="$APP_PARENT/.ESPDisplaySenderLANTest.app.staged"
+  LEGACY_APP=""
+  BUILD_SETTINGS=(
+    "APP_BUNDLE_IDENTIFIER=$APP_BUNDLE_IDENTIFIER"
+    "APP_PRODUCT_NAME=$APP_NAME"
+    "ESPDISP_LAN_TEST=LAN_TEST"
+    "ESPDISP_SKIP_CAMERA_EXTENSION=1"
+  )
+else
+  APP_NAME="ESPDisplaySender"
+  APP="$APP_PARENT/$APP_NAME.app"
+  STAGED_APP="$APP_PARENT/.ESPDisplaySender.app.staged"
+  LEGACY_APP="$HOME/Applications/ESPDisplaySender.app"
+  BUILD_SETTINGS=()
+fi
 SCRATCH_PARENT="$WORKSPACE"
 DERIVED_DATA="$(mktemp -d "$SCRATCH_PARENT/.espdisplaysender.XXXXXX")"
 
@@ -109,9 +125,10 @@ xcodebuild \
   -derivedDataPath "$DERIVED_DATA" \
   -allowProvisioningUpdates \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+  "${BUILD_SETTINGS[@]}" \
   build
 
-BUILT_APP="$DERIVED_DATA/Build/Products/Release/ESPDisplaySender.app"
+BUILT_APP="$DERIVED_DATA/Build/Products/Release/$APP_NAME.app"
 if [[ ! -d "$BUILT_APP" ]]; then
   echo "error: Xcode did not produce $BUILT_APP" >&2
   exit 1
@@ -128,17 +145,18 @@ codesign --verify --deep --strict --verbose=1 "$STAGED_APP"
 # makes a retired copy identifiable, and a numeric suffix preserves both when
 # the same build is installed more than once.
 retire_app() {
-  local target="$1" parent="$2" label="$3" info build retired suffix
+  local target="$1" parent="$2" label="$3" info build retired suffix bundle_name
   [[ -e "$target" ]] || return 0
   require_under "$target" "$parent" "$label"
   info="$target/Contents/Info.plist"
   build="$(plutil -extract CFBundleVersion raw -o - "$info" 2>/dev/null || true)"
   build="${build//[^A-Za-z0-9._-]/_}"
   [[ -n "$build" ]] || build="unknown"
-  retired="$HOME/.Trash/ESPDisplaySender.app.build-$build"
+  bundle_name="${target##*/}"
+  retired="$HOME/.Trash/$bundle_name.build-$build"
   suffix=2
   while [[ -e "$retired" || -L "$retired" ]]; do
-    retired="$HOME/.Trash/ESPDisplaySender.app.build-$build-$suffix"
+    retired="$HOME/.Trash/$bundle_name.build-$build-$suffix"
     ((suffix += 1))
   done
   mkdir -p "$HOME/.Trash"
@@ -148,10 +166,16 @@ retire_app() {
 }
 
 retire_app "$APP" "$APP_PARENT" "previous install"
-retire_app "$LEGACY_APP" "$HOME/Applications" "legacy install"
+if [[ -n "$LEGACY_APP" ]]; then
+  retire_app "$LEGACY_APP" "$HOME/Applications" "legacy install"
+fi
 mv -- "$STAGED_APP" "$APP"
 
 codesign --display --verbose=2 "$APP"
 echo "built and Apple Development signed $APP"
-echo "open manager:      open $APP"
-echo "install at login:  $HERE/install-launch-agent.sh"
+if [[ -n "$LEGACY_APP" ]]; then
+  echo "open manager:      open $APP"
+  echo "install at login:  $HERE/install-launch-agent.sh"
+else
+  echo "Local Network test only: launch $APP manually to test its first-use prompt."
+fi

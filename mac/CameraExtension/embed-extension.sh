@@ -4,6 +4,11 @@
 # no socket is opened by the extension.
 set -euo pipefail
 
+if [[ "${ESPDISP_SKIP_CAMERA_EXTENSION:-}" == "1" ]]; then
+  echo "camera extension excluded for the Local Network test build"
+  exit 0
+fi
+
 APP="${CODESIGNING_FOLDER_PATH:?CODESIGNING_FOLDER_PATH is not set}"
 DESTINATION="$APP/Contents/Library/SystemExtensions/ESPDisplayCamera.systemextension"
 SOURCE_EXTENSION="${BUILT_PRODUCTS_DIR:?BUILT_PRODUCTS_DIR is not set}/ESPDisplayCamera.systemextension"
