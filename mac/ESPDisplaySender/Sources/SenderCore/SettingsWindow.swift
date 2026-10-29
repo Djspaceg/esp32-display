@@ -318,6 +318,11 @@ struct PermissionChecklistRows: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if item.status == .checking {
+                    Text("macOS has not returned a result. This is not a missing permission.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 HStack(spacing: 8) {
                     if item.requiresRelaunch {
                         Button("Relaunch ESPDisplaySender") {
@@ -339,6 +344,14 @@ struct PermissionChecklistRows: View {
                         Button(item.permission.settingsButtonTitle) {
                             NSWorkspace.shared.open(item.permission.settingsURL)
                         }
+                    } else if item.status == .checking {
+                        Button("Request Access") {
+                            manager.requestPermissionAccess(for: item.permission)
+                        }
+                        .disabled(waitingForAnother)
+                        Button(item.permission.settingsButtonTitle) {
+                            NSWorkspace.shared.open(item.permission.settingsURL)
+                        }
                     }
                 }
                 .controlSize(.small)
@@ -350,6 +363,7 @@ struct PermissionChecklistRows: View {
     private func statusColor(_ status: PermissionChecklistStatus) -> Color {
         switch status {
         case .allowed: return .green
+        case .checking: return .secondary
         case .notYetAsked: return .secondary
         case .blocked: return .orange
         }
@@ -380,7 +394,9 @@ private struct PermissionsSettingsPane: View {
             } footer: {
                 Text("The first available request runs one at a time after an "
                     + "install or re-sign. A row stays here until macOS reports "
-                    + "that this copy of the app can use the feature.")
+                + "that this copy of the app can use the feature. Checking "
+                + "means macOS has not reported a result yet, not that access "
+                + "is missing.")
             }
         }
         .onAppear {

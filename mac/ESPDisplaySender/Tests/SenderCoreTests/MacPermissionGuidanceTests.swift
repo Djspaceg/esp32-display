@@ -78,6 +78,65 @@ final class MacPermissionGuidanceTests: XCTestCase {
         XCTAssertTrue(PermissionRequestSequence.shouldRequestAutomatically(items[1]))
     }
 
+    func testCheckingPermissionDoesNotFlashTheLaunchChecklist() {
+        let items = [
+            PermissionChecklistItem(
+                permission: .screenRecording, status: .allowed, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .localNetwork, status: .checking, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .systemAudioRecording, status: .allowed, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .accessibility, status: .allowed, requiresRelaunch: false),
+        ]
+
+        XCTAssertFalse(PermissionChecklistPresentation.shouldPresent(for: items))
+        XCTAssertNil(PermissionRequestSequence.next(in: items))
+        XCTAssertEqual(items[1].statusText, "Checking")
+    }
+
+    func testKnownMissingPermissionStillPresentsAfterChecksFinish() {
+        let items = [
+            PermissionChecklistItem(
+                permission: .screenRecording, status: .allowed, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .localNetwork, status: .notYetAsked, requiresRelaunch: false),
+        ]
+
+        XCTAssertTrue(PermissionChecklistPresentation.shouldPresent(for: items))
+        XCTAssertEqual(PermissionRequestSequence.next(in: items), .localNetwork)
+    }
+
+    func testACompletedSystemAudioCheckCanPresentItsRecoveryAction() {
+        let items = [
+            PermissionChecklistItem(
+                permission: .screenRecording, status: .allowed, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .localNetwork, status: .allowed, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .systemAudioRecording, status: .blocked, requiresRelaunch: false),
+        ]
+
+        XCTAssertTrue(PermissionChecklistPresentation.shouldPresent(for: items))
+        XCTAssertEqual(PermissionRequestSequence.next(in: items), .systemAudioRecording)
+    }
+
+    func testIndeterminateSystemAudioDoesNotFlashTheLaunchChecklist() {
+        let items = [
+            PermissionChecklistItem(
+                permission: .screenRecording, status: .allowed, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .localNetwork, status: .allowed, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .systemAudioRecording, status: .checking,
+                requiresRelaunch: false),
+        ]
+
+        XCTAssertFalse(PermissionChecklistPresentation.shouldPresent(for: items))
+        XCTAssertNil(PermissionRequestSequence.next(in: items))
+        XCTAssertEqual(items[2].statusText, "Checking")
+    }
+
     func testCameraExtensionIsVisibleButNotInTheAutomaticSetupSequence() {
         XCTAssertFalse(MacPermission.cameraExtension.isRequiredAtLaunch)
         XCTAssertFalse(MacPermission.requestOrder.contains(.cameraExtension))

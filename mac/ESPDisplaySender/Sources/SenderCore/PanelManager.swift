@@ -52,6 +52,11 @@ final class PanelManager: ObservableObject {
     /// Rechecks the Local Network probe after its small interval, or
     /// immediately after the foreground app becomes active.
     var refreshLocalNetworkAuthorization: (_ immediately: Bool) -> Void = { _ in }
+    /// The bootstrap uses this to recheck an existing Local Network decision
+    /// without starting a first-use request before the launch sheet explains it.
+    var hasRequestedLocalNetworkPermission: Bool {
+        permissionPromptHistory.wasRequested(.localNetwork)
+    }
     var mediaKeySender: (MediaControl.Key) -> String? = { MediaControl.send($0) }
     /// Posts a recorded key combination; replaced by tests, like the media key.
     var keyPressSender: (KeyCombo) -> String? = { MediaControl.press($0) }
@@ -72,8 +77,15 @@ final class PanelManager: ObservableObject {
     @Published var permissionChecklistPresented = false
     @Published private(set) var activePermissionRequest: MacPermission?
     private let permissionPromptHistory = PermissionPromptHistory()
+    /// Local Network has no preflight API. Delay the initial first-run
+    /// "not yet asked" result briefly; a pending probe is never treated as
+    /// missing access.
+    private static let localNetworkInitialGracePeriod: TimeInterval = 1.5
+    private var localNetworkInitialCheckStartedAt = Date()
+    private var localNetworkInitialCheckTask: Task<Void, Never>?
     private var localNetworkChecklistStatus: PermissionChecklistStatus?
     private var localNetworkTechnicalDetail: String?
+    private var systemAudioChecklistStatus: PermissionChecklistStatus?
     private var cameraExtensionNeedsApproval = false
     private var cameraExtensionActivated = false
     private var cameraExtensionTechnicalDetail: String?
@@ -371,6 +383,7 @@ final class PanelManager: ObservableObject {
             }
         }
         refreshMacPermissionGuidance()
+        scheduleInitialLocalNetworkCheck()
         // Dragging the marquee streams straight through to whichever panel it
         // was opened for.
         regionSelector.onChange = { [weak self] region in
@@ -698,7 +711,11 @@ final class PanelManager: ObservableObject {
     /// existing two-second housekeeping timer. The screen-capture probe runs
     /// only while there is an unresolved capture issue.
     func refreshMacPermissionGuidance(forceLocalNetworkProbe: Bool = false) {
-        if forceLocalNetworkProbe || issues.contains(where: { $0.issue == .localNetwork }) {
+        if forceLocalNetworkProbe
+            || issues.contains(where: { $0.issue == .localNetwork })
+            || (localNetworkChecklistStatus == nil
+                && permissionPromptHistory.wasRequested(.localNetwork))
+        {
             refreshLocalNetworkAuthorization(forceLocalNetworkProbe)
         }
         refreshMediaKeyAuthorization()
@@ -750,17 +767,33 @@ final class PanelManager: ObservableObject {
             requestMediaKeyAuthorization()
             permissionPromptHistory.markRequested(permission)
         case .systemAudioRecording:
-            guard let request = SystemAudioAccess.system.request else {
-                refreshMacPermissionGuidance()
-                return
-            }
-            request { [weak self] _ in
+            systemAudioChecklistStatus = .checking
+            permissionPromptHistory.markRequested(permission)
+            let completeTCCRequest: @Sendable (Bool) -> Void = { [weak self] granted in
                 Task { @MainActor in
-                    self?.permissionPromptHistory.markRequested(permission)
-                    self?.refreshMacPermissionGuidance()
+                    guard let self else { return }
+                    self.systemAudioChecklistStatus = granted ? .allowed : .blocked
+                    self.refreshMacPermissionGuidance()
+                }
+            }
+            if let request = SystemAudioAccess.system.request {
+                request(completeTCCRequest)
+            } else {
+                SystemAudioAccess.requestWithProcessTap { [weak self] in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        // A tap can start and still deliver only silence when
+                        // denied. It cannot establish a permission result.
+                        self.systemAudioChecklistStatus = .checking
+                        self.activePermissionRequest = nil
+                        self.refreshMacPermissionGuidance()
+                    }
                 }
             }
         case .localNetwork:
+            permissionPromptHistory.markRequested(permission)
+            localNetworkInitialCheckTask?.cancel()
+            localNetworkInitialCheckTask = nil
             localNetworkChecklistStatus = nil
             localNetworkTechnicalDetail = nil
             requestLocalNetworkAuthorization()
@@ -806,6 +839,8 @@ final class PanelManager: ObservableObject {
     func observeLocalNetworkPermission(_ observation: LocalNetworkPermissionProbe.Observation) {
         switch observation {
         case .policyDenied(let technicalDetail):
+            localNetworkInitialCheckTask?.cancel()
+            localNetworkInitialCheckTask = nil
             permissionPromptHistory.markRequested(.localNetwork)
             localNetworkChecklistStatus = .blocked
             localNetworkTechnicalDetail = technicalDetail
@@ -813,10 +848,14 @@ final class PanelManager: ObservableObject {
         case .browserReady:
             break
         case .unicastPathReady:
+            localNetworkInitialCheckTask?.cancel()
+            localNetworkInitialCheckTask = nil
             localNetworkChecklistStatus = .allowed
             localNetworkTechnicalDetail = nil
             refreshPermissionChecklist()
         case .deviceAnswered:
+            localNetworkInitialCheckTask?.cancel()
+            localNetworkInitialCheckTask = nil
             localNetworkChecklistStatus = .allowed
             localNetworkTechnicalDetail = nil
             refreshPermissionChecklist()
@@ -824,6 +863,19 @@ final class PanelManager: ObservableObject {
     }
 
     private func refreshSystemAudioRecordingAuthorization() {
+        switch SystemAudioAccess.system.status() {
+        case .authorized:
+            systemAudioChecklistStatus = .allowed
+        case .denied:
+            systemAudioChecklistStatus = .blocked
+        case .notDetermined:
+            systemAudioChecklistStatus = .notYetAsked
+        case .unknown:
+            // An unavailable preflight API is not evidence that this app is
+            // denied. Leave it Checking so a configured Mac never sees a
+            // false missing-permission sheet.
+            break
+        }
         refreshPermissionChecklist()
     }
 
@@ -850,8 +902,18 @@ final class PanelManager: ObservableObject {
             automaticPermissionSequence = false
             activePermissionRequest = nil
             unblockForegroundStartup()
-        } else if !permissionChecklistDismissedThisLaunch {
+        } else if PermissionChecklistPresentation.shouldPresent(for: next),
+                  !permissionChecklistDismissedThisLaunch
+        {
             permissionChecklistPresented = true
+        } else if !PermissionChecklistPresentation.shouldPresent(for: next) {
+            permissionChecklistPresented = false
+            // A previously requested Local Network grant is rechecked in the
+            // background, so its unicast probe can prove or disprove it
+            // without holding startup or flashing a sheet.
+            if permissionPromptHistory.wasRequested(.localNetwork) {
+                unblockForegroundStartup()
+            }
         }
         advanceAutomaticPermissionSequence()
     }
@@ -876,22 +938,10 @@ final class PanelManager: ObservableObject {
                 requiresRelaunch = true
             }
         case .localNetwork:
-            status = localNetworkChecklistStatus
-                ?? (permissionPromptHistory.wasRequested(permission)
-                    ? .blocked : .notYetAsked)
+            status = localNetworkChecklistStatus ?? .checking
             requiresRelaunch = false
         case .systemAudioRecording:
-            switch SystemAudioAccess.system.status() {
-            case .authorized:
-                status = .allowed
-            case .denied:
-                status = .blocked
-            case .notDetermined:
-                status = .notYetAsked
-            case .unknown:
-                status = permissionPromptHistory.wasRequested(permission)
-                    ? .blocked : .notYetAsked
-            }
+            status = systemAudioChecklistStatus ?? .checking
             requiresRelaunch = false
         case .accessibility:
             status = mediaKeysAuthorized()
@@ -936,6 +986,26 @@ final class PanelManager: ObservableObject {
             detail: item.permission.message(for: state),
             technicalDetail: technicalDetail,
             permissionState: state)
+    }
+
+    /// A Local Network request is only known to be missing after this short
+    /// initial grace period. A device that reports a usable unicast path first
+    /// makes the row Allowed without ever showing the launch sheet.
+    private func scheduleInitialLocalNetworkCheck() {
+        guard !permissionPromptHistory.wasRequested(.localNetwork) else { return }
+        localNetworkInitialCheckTask?.cancel()
+        let startedAt = localNetworkInitialCheckStartedAt
+        localNetworkInitialCheckTask = Task { [weak self] in
+            let nanoseconds = UInt64(Self.localNetworkInitialGracePeriod * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled, let self,
+                  self.localNetworkChecklistStatus == nil,
+                  self.localNetworkInitialCheckStartedAt == startedAt,
+                  !self.permissionPromptHistory.wasRequested(.localNetwork)
+            else { return }
+            self.localNetworkChecklistStatus = .notYetAsked
+            self.refreshPermissionChecklist()
+        }
     }
 
     /// Called once the first interactive window has a checklist on screen.

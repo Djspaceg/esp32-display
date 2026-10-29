@@ -230,6 +230,23 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertEqual(pane.networkTables.count, 1, "the rows are not draggable")
     }
 
+    func testPermissionsSettingsUsesTheManagersLiveChecklistRows() {
+        let (manager, _) = makeManager(saved: [])
+        manager.refreshMacPermissionGuidance()
+        let navigation = SettingsNavigation()
+        navigation.show(.permissions)
+        let pane = ViewReading(SettingsView(manager: manager, navigation: navigation))
+
+        XCTAssertEqual(
+            manager.permissionChecklist.map(\.permission),
+            MacPermission.allCases)
+        for item in manager.permissionChecklist {
+            XCTAssertTrue(pane.strings.contains(item.title))
+            XCTAssertTrue(pane.strings.contains(item.purpose))
+            XCTAssertTrue(pane.strings.contains(item.statusText))
+        }
+    }
+
     // MARK: the saved-network list
 
     /// A plus and a minus under the list, and no per-row arrows or remove

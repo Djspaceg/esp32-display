@@ -234,6 +234,13 @@ public enum ESPDisplaySenderApp {
                     localNetworkPermissionProbe.refresh()
                 }
             }
+            // The manager's initial read runs before these closures are
+            // installed. Recheck an existing Local Network decision now, but
+            // never trigger a first-use prompt before the checklist explains
+            // why it is needed.
+            if manager.hasRequestedLocalNetworkPermission {
+                manager.refreshMacPermissionGuidance(forceLocalNetworkProbe: true)
+            }
             // Foreground launches make this request from the visible
             // checklist, after its explanation. A LaunchAgent launch has no
             // visible sheet, so it makes the same browse here: if macOS

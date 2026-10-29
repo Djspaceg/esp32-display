@@ -38,6 +38,26 @@ struct SystemAudioAccess: Sendable {
             status: { tcc.preflight() },
             request: { completion in tcc.request(completion) })
     }()
+
+    /// A compatibility request for a macOS release that cannot expose TCC's
+    /// preflight symbols. Opening a real process tap is the same protected
+    /// operation the sender performs, so macOS can show its own prompt. It
+    /// cannot prove the TCC decision because a refused tap may still yield
+    /// silence. The temporary tap is stopped and released immediately.
+    static func requestWithProcessTap(completion: @escaping @Sendable () -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let tap = try CoreAudioProcessTap()
+                try tap.start { _ in }
+                tap.stop()
+            } catch {
+                // The caller records that this compatibility path could not
+                // verify a decision either way and leaves its recovery action
+                // visible.
+            }
+            completion()
+        }
+    }
 }
 
 /// TCC's own entry points, as `dlsym` finds them. Internal, with raw-pointer

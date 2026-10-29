@@ -5,12 +5,17 @@ import Security
 /// framework error. A granted permission can separately ask for a relaunch.
 enum PermissionChecklistStatus: Equatable, Sendable {
     case allowed
+    /// macOS has not returned an answer yet. This is deliberately distinct
+    /// from "Not yet asked": an unknown result must not flash the launch
+    /// checklist for an otherwise configured app.
+    case checking
     case notYetAsked
     case blocked
 
     var title: String {
         switch self {
         case .allowed: return "Allowed"
+        case .checking: return "Checking"
         case .notYetAsked: return "Not yet asked"
         case .blocked: return "Blocked"
         }
@@ -34,6 +39,18 @@ struct PermissionChecklistItem: Identifiable, Equatable {
     var isReady: Bool {
         status == .allowed && !requiresRelaunch
     }
+
+    var needsAttention: Bool {
+        requiresRelaunch || status == .notYetAsked || status == .blocked
+    }
+}
+
+/// Decides when a known permission problem should open the launch sheet. A
+/// pending probe is not evidence that permission is missing.
+enum PermissionChecklistPresentation {
+    static func shouldPresent(for items: [PermissionChecklistItem]) -> Bool {
+        items.contains { $0.permission.isRequiredAtLaunch && $0.needsAttention }
+    }
 }
 
 /// The fixed first-launch order keeps system prompts from stacking. A blocked
@@ -41,7 +58,7 @@ struct PermissionChecklistItem: Identifiable, Equatable {
 /// next prompt can be requested.
 enum PermissionRequestSequence {
     static func next(in items: [PermissionChecklistItem]) -> MacPermission? {
-        items.first(where: { !$0.isReady })?.permission
+        items.first(where: { !$0.isReady && $0.status != .checking })?.permission
     }
 
     static func shouldRequestAutomatically(_ item: PermissionChecklistItem) -> Bool {
