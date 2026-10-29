@@ -892,8 +892,7 @@ final class PanelManager: ObservableObject {
     /// virtual camera device can be absent until a client opens it, so device
     /// discovery is not used as a permission status signal.
     private func refreshCameraExtensionStatus() {
-        guard AppBuildFeatures.includesCameraExtension,
-              !CameraExtensionInstaller.isActivationPending,
+        guard !CameraExtensionInstaller.isActivationPending,
               !CameraExtensionInstaller.isInspectionPending
         else { return }
         cameraExtensionStatusIsChecking = true

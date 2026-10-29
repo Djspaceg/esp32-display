@@ -11,12 +11,10 @@
 set -euo pipefail
 
 LABEL="com.resourcefork.espdisplay"
-LEGACY_LABEL="com.espdisplay.sender"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 echo "==> Stopping the sender LaunchAgent"
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || echo "    (was not loaded)"
-launchctl bootout "gui/$(id -u)/$LEGACY_LABEL" 2>/dev/null || true
 
 sleep 2
 if pgrep -fl "ESPDisplaySender --background" > /dev/null 2>&1; then

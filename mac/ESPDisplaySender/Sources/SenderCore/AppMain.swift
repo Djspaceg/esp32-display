@@ -147,12 +147,6 @@ public enum ESPDisplaySenderApp {
         // in a plain CLI process without one.
         _ = NSApplication.shared
 
-        if AppBuildFeatures.isScreenRecordingProbe {
-            ScreenRecordingProbeApp.run()
-            return
-        }
-        LegacyLaunchAgentCleanup.retireOnCurrentAppLaunch()
-
         // Xcode's Canvas injects the preview view into this process. Keep the
         // AppKit event loop alive, but skip the sender's lock, persistence,
         // discovery, capture, serial, and Keychain startup paths while previews
@@ -182,11 +176,11 @@ public enum ESPDisplaySenderApp {
         // receiver drops nearly everything (each stream invalidates the
         // other's reassembly).
         if !opts.listDisplays && !opts.listWindows {
-            let lockFd = open(AppBuildFeatures.processLockPath, O_CREAT | O_RDWR, 0o644)
+            let lockFd = open("/tmp/espdisplaysender.lock", O_CREAT | O_RDWR, 0o644)
             if lockFd < 0 || flock(lockFd, LOCK_EX | LOCK_NB) != 0 {
                 // The primary process owns the manager. Ask it to show its
                 // window, then leave without creating a second frame stream.
-                if !launchedInBackground && !AppBuildFeatures.isLocalNetworkTest {
+                if !launchedInBackground {
                     // The primary may still be installing its observer
                     // immediately after acquiring the lock. Repeat the
                     // idempotent request across that short startup window
@@ -196,12 +190,9 @@ public enum ESPDisplaySenderApp {
                             name: .espDisplayShowManager, object: nil)
                         usleep(200_000)
                     }
-                } else if !AppBuildFeatures.isLocalNetworkTest {
-                    FileHandle.standardError.write(
-                        Data("another ESPDisplaySender instance is already running - exiting\n".utf8))
                 } else {
                     FileHandle.standardError.write(
-                        Data("another ESPDisplaySender LAN Test instance is already running - exiting\n".utf8))
+                        Data("another ESPDisplaySender instance is already running - exiting\n".utf8))
                 }
                 // Lock contention means the requested service already exists,
                 // not that this process crashed. A successful exit prevents
@@ -212,30 +203,21 @@ public enum ESPDisplaySenderApp {
         }
 
         let panelManager = MainActor.assumeIsolated {
-            let manager: PanelManager
-            if AppBuildFeatures.isLocalNetworkTest {
-                // This diagnostic artifact must not read production records,
-                // Keychain-backed WiFi settings, screen-device settings, or
-                // start capture and audio sessions for saved devices.
-                manager = PanelManager(
-                    previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
-            } else {
-                // Only flags the user actually passed override the saved
-                // settings, and those overrides are not written back.
-                var overrides: SenderSettings?
-                if opts.fpsExplicit || opts.spacingExplicit || opts.pacingExplicit {
-                    var partial = SettingsStore.load(from: SettingsStore.defaultURL).settings
-                    if opts.fpsExplicit { partial.fps = opts.fps }
-                    if opts.spacingExplicit { partial.spacingMicros = opts.spacingMicros }
-                    if opts.pacingExplicit { partial.adaptivePacing = opts.adaptivePacing }
-                    overrides = partial
-                }
-                // The display name is handed over so the window can preview an
-                // Automatic source the same way a session would resolve it.
-                manager = PanelManager(
-                    settings: overrides, defaultDisplayName: opts.displayName,
-                    coversScreenDevices: !opts.listDisplays && !opts.listWindows)
+            // Only flags the user actually passed override the saved settings,
+            // and those overrides are not written back.
+            var overrides: SenderSettings?
+            if opts.fpsExplicit || opts.spacingExplicit || opts.pacingExplicit {
+                var partial = SettingsStore.load(from: SettingsStore.defaultURL).settings
+                if opts.fpsExplicit { partial.fps = opts.fps }
+                if opts.spacingExplicit { partial.spacingMicros = opts.spacingMicros }
+                if opts.pacingExplicit { partial.adaptivePacing = opts.adaptivePacing }
+                overrides = partial
             }
+            // The display name is handed over so the window can preview an
+            // Automatic source the same way a session would resolve it.
+            let manager = PanelManager(
+                settings: overrides, defaultDisplayName: opts.displayName,
+                coversScreenDevices: !opts.listDisplays && !opts.listWindows)
             let localNetworkPermissionProbe = LocalNetworkPermissionProbe { observation in
                 Task { @MainActor in
                     manager.observeLocalNetworkPermission(observation)
@@ -265,13 +247,6 @@ public enum ESPDisplaySenderApp {
             manager.refreshMacPermissionGuidance(
                 forceLocalNetworkProbe:
                     launchedInBackground || manager.localNetworkWasPreviouslyVerified)
-            if AppBuildFeatures.isLocalNetworkTest {
-                // The diagnostic uses the no-disk/no-capture preview manager.
-                // Seed its sole checklist row after the live request closure is
-                // installed, so the first visible window explains the request
-                // and then starts the actual Bonjour browse.
-                manager.prepareLocalNetworkTestPermissionRequest()
-            }
             // Foreground launches make this request from the visible
             // checklist, after its explanation. A LaunchAgent launch has no
             // visible sheet, so it makes the same browse here: if macOS
@@ -300,10 +275,6 @@ public enum ESPDisplaySenderApp {
                 if !launchedInBackground && !opts.listDisplays && !opts.listWindows {
                     await panelManager.waitForForegroundStartupPermissionSetup()
                 }
-                if AppBuildFeatures.isLocalNetworkTest {
-                    try await runLocalNetworkTest(panelManager: panelManager)
-                    return
-                }
                 if !opts.listDisplays && !opts.listWindows {
                     await MainActor.run {
                         panelManager.startMacAudioRouting()
@@ -321,55 +292,6 @@ public enum ESPDisplaySenderApp {
         // Closing the manager returns to accessory mode without interrupting
         // capture.
         NSApplication.shared.run()
-    }
-
-    /// The separately signed Local Network diagnostic performs one real
-    /// Bonjour discovery and one real UDP path check. It never starts screen
-    /// capture, audio routing, sessions, or reads production saved devices.
-    private static func runLocalNetworkTest(panelManager: PanelManager) async throws {
-        func reportDenied(_ technicalDetail: String) {
-            Task { @MainActor in
-                panelManager.observeLocalNetworkPermission(
-                    .policyDenied(technicalDetail: technicalDetail))
-            }
-        }
-        func reportPathReady() {
-            Task { @MainActor in
-                panelManager.observeLocalNetworkPermission(.unicastPathReady)
-            }
-        }
-
-        print("Local Network test: discovering devices (_espdisp._udp) ...")
-        while true {
-            guard let device = await discoverFirstDevice(timeoutSeconds: 8) else {
-                print("Local Network test: no devices found yet - still browsing ...")
-                continue
-            }
-            let sender = FrameSender(
-                endpoint: device.endpoint,
-                onLocalNetworkDenied: reportDenied,
-                onLocalNetworkPathReady: reportPathReady)
-            do {
-                try await sender.start()
-                print("Local Network test passed: reached device \"\(device.name)\".")
-                await MainActor.run {
-                    panelManager.presentOperationOutcome(.success(
-                        "Local Network connection works",
-                        "ESPDisplaySender LAN Test reached \"\(device.name)\" over "
-                            + "the local network. The new app identity can reach "
-                            + "devices; please report this result before changing "
-                            + "the normal ESPDisplaySender identifier."))
-                }
-                // Keep the successful path and its harmless heartbeat alive so
-                // the user can see that it remains reachable.
-                while true {
-                    try await Task.sleep(nanoseconds: 60_000_000_000)
-                }
-            } catch {
-                print("Local Network test: device \"\(device.name)\" did not answer yet "
-                    + "- still browsing (\(error.localizedDescription))")
-            }
-        }
     }
 
     private static func runSender(

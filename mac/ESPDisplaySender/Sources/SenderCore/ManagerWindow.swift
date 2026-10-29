@@ -645,7 +645,7 @@ struct PanelDetailView: View {
             {
                 audioSection
             }
-            if AppBuildFeatures.includesCameraExtension, panel.capabilities.contains(.camera) {
+            if panel.capabilities.contains(.camera) {
                 cameraSection
             }
             diagnosticsSection

@@ -2,15 +2,6 @@ import XCTest
 @testable import SenderCore
 
 final class MacPermissionGuidanceTests: XCTestCase {
-    func testScreenRecordingProbeRecognizesTheUnattendedRequestArgument() {
-        XCTAssertTrue(
-            ScreenRecordingProbeApp.requestsAccessOnLaunch(
-                arguments: ["Screen Recording Probe", "--request-on-launch"]))
-        XCTAssertFalse(
-            ScreenRecordingProbeApp.requestsAccessOnLaunch(
-                arguments: ["Screen Recording Probe"]))
-    }
-
     func testScreenCaptureSessionsUseTheForegroundAuthorizationSnapshot() {
         defer { ScreenCapturePermissionGate.observeAuthorization(false) }
 
@@ -220,19 +211,6 @@ final class MacPermissionGuidanceTests: XCTestCase {
                 .localNetwork))
     }
 
-    @MainActor
-    func testLocalNetworkTestChecklistStartsAtAnExplainedRequest() {
-        let manager = PanelManager(
-            previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
-
-        manager.prepareLocalNetworkTestPermissionRequest()
-
-        XCTAssertEqual(manager.permissionChecklist.map(\.permission), MacPermission.allCases)
-        XCTAssertEqual(
-            manager.permissionChecklist.first(where: { $0.permission == .localNetwork })?.status,
-            .notYetAsked)
-    }
-
     func testACompletedSystemAudioCheckOpensSettingsAtLaunch() {
         let items = [
             PermissionChecklistItem(
@@ -264,9 +242,6 @@ final class MacPermissionGuidanceTests: XCTestCase {
     }
 
     func testCameraExtensionIsIncludedInAutomaticSetupAfterLocalNetwork() {
-        XCTAssertFalse(AppBuildFeatures.isLocalNetworkTest)
-        XCTAssertFalse(AppBuildFeatures.isScreenRecordingProbe)
-        XCTAssertTrue(AppBuildFeatures.includesCameraExtension)
         XCTAssertTrue(MacPermission.cameraExtension.isRequiredAtLaunch)
         XCTAssertTrue(MacPermission.requestOrder.contains(.cameraExtension))
         XCTAssertTrue(MacPermission.allCases.allSatisfy(\.isAvailableInThisBuild))
@@ -278,32 +253,6 @@ final class MacPermissionGuidanceTests: XCTestCase {
             MacPermission.requestOrder,
             [.screenRecording, .localNetwork, .cameraExtension, .systemAudioRecording,
              .accessibility])
-    }
-
-    func testLanTestUsesAnIndependentSingleInstanceLock() {
-        XCTAssertEqual(
-            AppBuildFeatures.processLockPath(isLocalNetworkTest: false),
-            "/tmp/espdisplaysender.lock")
-        XCTAssertEqual(
-            AppBuildFeatures.processLockPath(isLocalNetworkTest: true),
-            "/tmp/espdisplaysender-lan-test.lock")
-    }
-
-    func testForegroundAppRetiresOnlyTheOldDirectBinaryLoginAgent() {
-        XCTAssertTrue(LegacyLaunchAgentCleanup.shouldRetireLegacyAgent(
-            bundleIdentifier: "com.resourcefork.espdisplay"))
-        XCTAssertFalse(LegacyLaunchAgentCleanup.shouldRetireLegacyAgent(
-            bundleIdentifier: "com.espdisplay.sender"))
-        XCTAssertEqual(
-            LegacyLaunchAgentCleanup.launchServicesArguments(
-                appPath: "/Applications/ESPDisplaySender.app"),
-            [
-                "/usr/bin/open",
-                "-gj",
-                "/Applications/ESPDisplaySender.app",
-                "--args",
-                "--background",
-            ])
     }
 
     func testChecklistRequestsCameraAfterABlockedLocalNetworkDecision() {

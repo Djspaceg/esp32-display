@@ -54,40 +54,9 @@ PROJECT="$HERE/ESPDisplaySender/ESPDisplaySender.xcodeproj"
 SCHEME="ESPDisplaySender App"
 APP_PARENT="/Applications"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-if [[ "${ESPDISP_SCREEN_RECORDING_PROBE_APP:-}" == "1" ]]; then
-  APP_NAME="Screen Recording Probe"
-  APP_BUNDLE_IDENTIFIER="com.resourcefork.espdisplay.srprobe"
-  APP="$APP_PARENT/$APP_NAME.app"
-  STAGED_APP="$APP_PARENT/.ScreenRecordingProbe.app.staged"
-  LEGACY_APP=""
-  export ESPDISP_SKIP_FIRMWARE=1
-  export ESPDISP_SKIP_AUDIO_DRIVER=1
-  BUILD_SETTINGS=(
-    "APP_BUNDLE_IDENTIFIER=$APP_BUNDLE_IDENTIFIER"
-    "APP_PRODUCT_NAME=$APP_NAME"
-    "APP_INFOPLIST_FILE=$HERE/ScreenRecordingProbe-Info.plist"
-    "ESPDISP_SCREEN_RECORDING_PROBE=SCREEN_RECORDING_PROBE"
-    "ESPDISP_SKIP_CAMERA_EXTENSION=1"
-  )
-elif [[ "${ESPDISP_LAN_TEST_APP:-}" == "1" ]]; then
-  APP_NAME="ESPDisplaySender LAN Test"
-  APP_BUNDLE_IDENTIFIER="com.espdisplay.sender.lantest"
-  APP="$APP_PARENT/$APP_NAME.app"
-  STAGED_APP="$APP_PARENT/.ESPDisplaySenderLANTest.app.staged"
-  LEGACY_APP=""
-  BUILD_SETTINGS=(
-    "APP_BUNDLE_IDENTIFIER=$APP_BUNDLE_IDENTIFIER"
-    "APP_PRODUCT_NAME=$APP_NAME"
-    "ESPDISP_LAN_TEST=LAN_TEST"
-    "ESPDISP_SKIP_CAMERA_EXTENSION=1"
-  )
-else
-  APP_NAME="ESPDisplaySender"
-  APP="$APP_PARENT/$APP_NAME.app"
-  STAGED_APP="$APP_PARENT/.ESPDisplaySender.app.staged"
-  LEGACY_APP="$HOME/Applications/ESPDisplaySender.app"
-  BUILD_SETTINGS=()
-fi
+APP_NAME="ESPDisplaySender"
+APP="$APP_PARENT/$APP_NAME.app"
+STAGED_APP="$APP_PARENT/.ESPDisplaySender.app.staged"
 SCRATCH_PARENT="$WORKSPACE"
 DERIVED_DATA="$(mktemp -d "$SCRATCH_PARENT/.espdisplaysender.XXXXXX")"
 
@@ -162,7 +131,6 @@ xcodebuild \
   -derivedDataPath "$DERIVED_DATA" \
   -allowProvisioningUpdates \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
-  "${BUILD_SETTINGS[@]}" \
   build
 
 BUILT_APP="$DERIVED_DATA/Build/Products/Release/$APP_NAME.app"
@@ -187,38 +155,25 @@ codesign --verify --deep --strict --verbose=1 "$STAGED_APP"
 "$LSREGISTER" -u "$BUILT_APP"
 echo "unregistered the transient Xcode build product from LaunchServices"
 
-# The outgoing install is moved to the Trash rather than deleted, so a bad
-# build is recoverable and nothing recursive ever runs against /Applications.
-# Moving a running bundle is safe: its existing process keeps using the moved
-# files, while the new path is ready for the next launch. The old build number
-# makes a retired copy identifiable, and a numeric suffix preserves both when
-# the same build is installed more than once.
-retire_app() {
-  local target="$1" parent="$2" label="$3" info build retired suffix bundle_name
+# Keep only the known installed path registered. Deleting an app bundle while
+# its old process runs is safe: the existing process continues from its mapped
+# files, while the next launch sees the replacement at the same path.
+remove_previous_install() {
+  local target="$1"
   [[ -e "$target" ]] || return 0
-  require_under "$target" "$parent" "$label"
-  info="$target/Contents/Info.plist"
-  build="$(plutil -extract CFBundleVersion raw -o - "$info" 2>/dev/null || true)"
-  build="${build//[^A-Za-z0-9._-]/_}"
-  [[ -n "$build" ]] || build="unknown"
-  bundle_name="${target##*/}"
-  retired="$HOME/.Trash/$bundle_name.build-$build"
-  suffix=2
-  while [[ -e "$retired" || -L "$retired" ]]; do
-    retired="$HOME/.Trash/$bundle_name.build-$build-$suffix"
-    ((suffix += 1))
-  done
-  mkdir -p "$HOME/.Trash"
-  require_under "$retired" "$HOME/.Trash" "retired app"
-  mv -- "$target" "$retired"
-  echo "$label moved to $retired"
+  require_under "$target" "$APP_PARENT" "previous install"
+  [[ "$target" == "$APP_PARENT/ESPDisplaySender.app" ]] || {
+    echo "error: unexpected installed app path $target" >&2
+    exit 1
+  }
+  "$LSREGISTER" -u "$target" || true
+  discard_scratch "$target" "$APP_PARENT" "previous install"
+  echo "unregistered and deleted the previous install"
 }
 
-retire_app "$APP" "$APP_PARENT" "previous install"
-if [[ -n "$LEGACY_APP" ]]; then
-  retire_app "$LEGACY_APP" "$HOME/Applications" "legacy install"
-fi
+remove_previous_install "$APP"
 mv -- "$STAGED_APP" "$APP"
+"$LSREGISTER" -f -R -trusted "$APP"
 
 codesign --display --verbose=2 "$APP"
 if ! codesign -d --entitlements :- "$APP" 2>&1 \
@@ -227,12 +182,27 @@ if ! codesign -d --entitlements :- "$APP" 2>&1 \
   exit 1
 fi
 echo "verified Data Protection Keychain access group"
-echo "built and Apple Development signed $APP"
-if [[ -n "$LEGACY_APP" ]]; then
-  echo "open manager:      open $APP"
-  echo "install at login:  $HERE/install-launch-agent.sh"
-elif [[ "${ESPDISP_SCREEN_RECORDING_PROBE_APP:-}" == "1" ]]; then
-  echo "Screen Recording probe only: launch $APP manually, then press Request Screen Recording Access."
-else
-  echo "Local Network test only: launch $APP manually to test its first-use prompt."
+
+registered_paths="$("$LSREGISTER" -dump | awk '
+  /^path:[[:space:]]+/ {
+    if (path != "" && name == "ESPDisplaySender") print path
+    path = $0
+    sub(/^[^/]*\//, "/", path)
+    name = ""
+    next
+  }
+  /^name:[[:space:]]+/ { name = $2 }
+  END {
+    if (path != "" && name == "ESPDisplaySender") print path
+  }
+')"
+if [[ "$registered_paths" != "$APP" ]]; then
+  echo "error: expected exactly one registered ESPDisplaySender path: $APP" >&2
+  printf '%s\n' "$registered_paths" >&2
+  exit 1
 fi
+echo "verified exactly one registered ESPDisplaySender path"
+
+echo "built and Apple Development signed $APP"
+echo "open manager:      open $APP"
+echo "install at login:  $HERE/install-launch-agent.sh"
