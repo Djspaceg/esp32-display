@@ -8,8 +8,8 @@ import CoreAudio
 import CryptoKit
 import Foundation
 
-let bundleID = "com.espdisplay.audio-driver"
-let testUID = "com.espdisplay.check-driver.\(getpid())"
+let bundleID = "com.resourcefork.espdisplay.audio-driver"
+let testUID = "com.resourcefork.espdisplay.check-driver.\(getpid())"
 func code(_ s: String) -> AudioObjectPropertySelector {
     s.utf8.reduce(0) { $0 << 8 | AudioObjectPropertySelector($1) }
 }

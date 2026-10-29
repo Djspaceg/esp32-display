@@ -129,7 +129,7 @@ struct SystemAudioCaptureSource: Sendable {
 /// device catalog hides these: they come and go with every session restart,
 /// and a route change is itself a restart, so listing them would loop.
 enum SystemAudioTapIdentity {
-    static let aggregateUIDPrefix = "com.espdisplay.sender.system-audio-tap."
+    static let aggregateUIDPrefix = "com.resourcefork.espdisplay.system-audio-tap."
 
     static func isOwnAggregate(uid: String) -> Bool {
         uid.hasPrefix(aggregateUIDPrefix)

@@ -99,7 +99,7 @@ struct WifiNetworkTable: NSViewRepresentable {
             var editingDisabled: Bool
         }
 
-        static let rowType = NSPasteboard.PasteboardType("com.espdisplay.sender.saved-network-row")
+        static let rowType = NSPasteboard.PasteboardType("com.resourcefork.espdisplay.saved-network-row")
 
         weak var table: NSTableView?
         var onMove: (IndexSet, Int) -> Void = { _, _ in }

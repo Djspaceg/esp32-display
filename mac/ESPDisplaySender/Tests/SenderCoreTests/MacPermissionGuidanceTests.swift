@@ -2,6 +2,25 @@ import XCTest
 @testable import SenderCore
 
 final class MacPermissionGuidanceTests: XCTestCase {
+    func testScreenRecordingProbeRecognizesTheUnattendedRequestArgument() {
+        XCTAssertTrue(
+            ScreenRecordingProbeApp.requestsAccessOnLaunch(
+                arguments: ["Screen Recording Probe", "--request-on-launch"]))
+        XCTAssertFalse(
+            ScreenRecordingProbeApp.requestsAccessOnLaunch(
+                arguments: ["Screen Recording Probe"]))
+    }
+
+    func testScreenCaptureSessionsUseTheForegroundAuthorizationSnapshot() {
+        defer { ScreenCapturePermissionGate.observeAuthorization(false) }
+
+        ScreenCapturePermissionGate.observeAuthorization(false)
+        XCTAssertFalse(ScreenCapturePermissionGate.permitsScreenCaptureKit())
+
+        ScreenCapturePermissionGate.observeAuthorization(true)
+        XCTAssertTrue(ScreenCapturePermissionGate.permitsScreenCaptureKit())
+    }
+
     func testScreenRecordingMessageExplainsTheNewAppIdentityWithoutBlamingTheUser() {
         let message = MacPermission.screenRecording.message(for: .needsAccess)
 
@@ -37,6 +56,20 @@ final class MacPermissionGuidanceTests: XCTestCase {
         state.observeCaptureResult(works: true, authorized: true)
         XCTAssertEqual(state, .ready)
         XCTAssertNil(state.issueState)
+    }
+
+    func testDeniedPickerDoesNotActivateOrPresentScreenCaptureKit() {
+        var activationCount = 0
+        var presentationCount = 0
+        let picker = PickerSource(
+            hasScreenRecordingPermission: { false },
+            activateSystemPicker: { _ in activationCount += 1 },
+            presentSystemPicker: { _ in presentationCount += 1 })
+
+        XCTAssertFalse(picker.activate())
+        XCTAssertFalse(picker.present())
+        XCTAssertEqual(activationCount, 0)
+        XCTAssertEqual(presentationCount, 0)
     }
 
     func testGrantThatStillCannotCaptureAsksForRelaunch() {
@@ -80,7 +113,7 @@ final class MacPermissionGuidanceTests: XCTestCase {
         XCTAssertTrue(PermissionRequestSequence.shouldRequestAutomatically(items[2]))
     }
 
-    func testCheckingPermissionDoesNotFlashTheLaunchChecklist() {
+    func testUnknownPermissionDoesNotOpenSettingsAtLaunch() {
         let items = [
             PermissionChecklistItem(
                 permission: .screenRecording, status: .allowed, requiresRelaunch: false),
@@ -92,12 +125,48 @@ final class MacPermissionGuidanceTests: XCTestCase {
                 permission: .accessibility, status: .allowed, requiresRelaunch: false),
         ]
 
-        XCTAssertFalse(PermissionChecklistPresentation.shouldPresent(for: items))
+        XCTAssertFalse(PermissionChecklistLaunchDecision.shouldOpenSettings(for: items))
         XCTAssertNil(PermissionRequestSequence.next(in: items))
         XCTAssertEqual(items[1].statusText, "Checking")
     }
 
-    func testKnownMissingPermissionStillPresentsAfterChecksFinish() {
+    func testFirstUnknownLocalNetworkCheckOpensSettingsWithoutCallingItMissing() {
+        let items = [
+            PermissionChecklistItem(
+                permission: .screenRecording, status: .allowed, requiresRelaunch: false),
+            PermissionChecklistItem(
+                permission: .localNetwork, status: .checking, requiresRelaunch: false),
+        ]
+
+        XCTAssertTrue(PermissionChecklistLaunchDecision.shouldOpenSettings(
+            for: items, localNetworkWasPreviouslyVerified: false))
+        XCTAssertEqual(items[1].statusText, "Checking")
+    }
+
+    func testLocalNetworkLaunchHistoryDoesNotCarryAcrossSigningTeams() {
+        let oldIdentity = LocalNetworkLiveAccessHistory.identity(
+            bundleIdentifier: "com.resourcefork.espdisplay",
+            teamIdentifier: "OLDTEAM123")
+        let newIdentity = LocalNetworkLiveAccessHistory.identity(
+            bundleIdentifier: "com.resourcefork.espdisplay",
+            teamIdentifier: "4D22XL743H")
+        let suite = "LocalNetworkLaunchHistoryTests." + UUID().uuidString
+        let defaults = try! XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: LocalNetworkLiveAccessHistory.key(for: oldIdentity))
+
+        XCTAssertNotEqual(
+            LocalNetworkLiveAccessHistory.key(for: oldIdentity),
+            LocalNetworkLiveAccessHistory.key(for: newIdentity))
+        XCTAssertTrue(
+            LocalNetworkLiveAccessHistory.wasPreviouslyVerified(
+                for: oldIdentity, defaults: defaults))
+        XCTAssertFalse(
+            LocalNetworkLiveAccessHistory.wasPreviouslyVerified(
+                for: newIdentity, defaults: defaults))
+    }
+
+    func testKnownMissingPermissionOpensSettingsAtLaunch() {
         let items = [
             PermissionChecklistItem(
                 permission: .screenRecording, status: .allowed, requiresRelaunch: false),
@@ -105,8 +174,50 @@ final class MacPermissionGuidanceTests: XCTestCase {
                 permission: .localNetwork, status: .notYetAsked, requiresRelaunch: false),
         ]
 
-        XCTAssertTrue(PermissionChecklistPresentation.shouldPresent(for: items))
+        XCTAssertTrue(PermissionChecklistLaunchDecision.shouldOpenSettings(for: items))
         XCTAssertEqual(PermissionRequestSequence.next(in: items), .localNetwork)
+    }
+
+    func testScreenRecordingStatusUsesTheLivePreflightResult() {
+        var state = ScreenRecordingPermissionState.ready
+        state.observeAuthorization(false)
+
+        XCTAssertEqual(state.checklistStatus, .blocked)
+    }
+
+    func testARequestControlNeverBecomesDisabledForAMissingGrant() {
+        for permission in [
+            MacPermission.screenRecording,
+            .accessibility,
+            .systemAudioRecording,
+            .cameraExtension,
+        ] {
+            let item = PermissionChecklistItem(
+                permission: permission, status: .blocked, requiresRelaunch: false)
+            XCTAssertTrue(PermissionChecklistActions.isRequestEnabled(for: item))
+        }
+    }
+
+    func testAutomaticSetupAdvancesPastATerminalResult() {
+        let blocked = PermissionChecklistItem(
+            permission: .screenRecording, status: .blocked, requiresRelaunch: false)
+        let checking = PermissionChecklistItem(
+            permission: .screenRecording, status: .checking, requiresRelaunch: false)
+
+        XCTAssertTrue(PermissionRequestSequence.shouldAdvanceAfter(blocked))
+        XCTAssertFalse(PermissionRequestSequence.shouldAdvanceAfter(checking))
+    }
+
+    func testScreenAndAccessibilityWaitForForegroundBeforeAutomaticNextRequest() {
+        XCTAssertTrue(
+            PermissionRequestSequence.waitsForForegroundActivationAfterRequest(
+                .screenRecording))
+        XCTAssertTrue(
+            PermissionRequestSequence.waitsForForegroundActivationAfterRequest(
+                .accessibility))
+        XCTAssertFalse(
+            PermissionRequestSequence.waitsForForegroundActivationAfterRequest(
+                .localNetwork))
     }
 
     @MainActor
@@ -120,10 +231,9 @@ final class MacPermissionGuidanceTests: XCTestCase {
         XCTAssertEqual(
             manager.permissionChecklist.first(where: { $0.permission == .localNetwork })?.status,
             .notYetAsked)
-        XCTAssertTrue(manager.permissionChecklistPresented)
     }
 
-    func testACompletedSystemAudioCheckCanPresentItsRecoveryAction() {
+    func testACompletedSystemAudioCheckOpensSettingsAtLaunch() {
         let items = [
             PermissionChecklistItem(
                 permission: .screenRecording, status: .allowed, requiresRelaunch: false),
@@ -133,11 +243,11 @@ final class MacPermissionGuidanceTests: XCTestCase {
                 permission: .systemAudioRecording, status: .blocked, requiresRelaunch: false),
         ]
 
-        XCTAssertTrue(PermissionChecklistPresentation.shouldPresent(for: items))
+        XCTAssertTrue(PermissionChecklistLaunchDecision.shouldOpenSettings(for: items))
         XCTAssertEqual(PermissionRequestSequence.next(in: items), .systemAudioRecording)
     }
 
-    func testIndeterminateSystemAudioDoesNotFlashTheLaunchChecklist() {
+    func testIndeterminateSystemAudioDoesNotOpenSettingsAtLaunch() {
         let items = [
             PermissionChecklistItem(
                 permission: .screenRecording, status: .allowed, requiresRelaunch: false),
@@ -148,13 +258,14 @@ final class MacPermissionGuidanceTests: XCTestCase {
                 requiresRelaunch: false),
         ]
 
-        XCTAssertFalse(PermissionChecklistPresentation.shouldPresent(for: items))
+        XCTAssertFalse(PermissionChecklistLaunchDecision.shouldOpenSettings(for: items))
         XCTAssertNil(PermissionRequestSequence.next(in: items))
         XCTAssertEqual(items[2].statusText, "Checking")
     }
 
     func testCameraExtensionIsIncludedInAutomaticSetupAfterLocalNetwork() {
         XCTAssertFalse(AppBuildFeatures.isLocalNetworkTest)
+        XCTAssertFalse(AppBuildFeatures.isScreenRecordingProbe)
         XCTAssertTrue(AppBuildFeatures.includesCameraExtension)
         XCTAssertTrue(MacPermission.cameraExtension.isRequiredAtLaunch)
         XCTAssertTrue(MacPermission.requestOrder.contains(.cameraExtension))
@@ -178,6 +289,23 @@ final class MacPermissionGuidanceTests: XCTestCase {
             "/tmp/espdisplaysender-lan-test.lock")
     }
 
+    func testForegroundAppRetiresOnlyTheOldDirectBinaryLoginAgent() {
+        XCTAssertTrue(LegacyLaunchAgentCleanup.shouldRetireLegacyAgent(
+            bundleIdentifier: "com.resourcefork.espdisplay"))
+        XCTAssertFalse(LegacyLaunchAgentCleanup.shouldRetireLegacyAgent(
+            bundleIdentifier: "com.espdisplay.sender"))
+        XCTAssertEqual(
+            LegacyLaunchAgentCleanup.launchServicesArguments(
+                appPath: "/Applications/ESPDisplaySender.app"),
+            [
+                "/usr/bin/open",
+                "-gj",
+                "/Applications/ESPDisplaySender.app",
+                "--args",
+                "--background",
+            ])
+    }
+
     func testChecklistRequestsCameraAfterABlockedLocalNetworkDecision() {
         let blocked = PermissionChecklistItem(
             permission: .localNetwork, status: .blocked, requiresRelaunch: false)
@@ -186,7 +314,8 @@ final class MacPermissionGuidanceTests: XCTestCase {
 
         XCTAssertEqual(PermissionRequestSequence.next(in: [blocked, later]), .localNetwork)
         XCTAssertEqual(
-            PermissionRequestSequence.nextAutomaticRequest(in: [blocked, later]),
+            PermissionRequestSequence.nextAutomaticRequest(
+                in: [blocked, later], attempted: [.localNetwork]),
             .cameraExtension)
         XCTAssertTrue(PermissionRequestSequence.shouldRequestAutomatically(later))
     }
@@ -205,8 +334,23 @@ final class MacPermissionGuidanceTests: XCTestCase {
         XCTAssertEqual(
             permission.purpose,
             "Makes device camera frames available to other video apps.")
-        XCTAssertEqual(permission.settingsButtonTitle, "Open Extensions Settings")
+        XCTAssertEqual(
+            permission.settingsButtonTitle, "Open Login Items & Extensions")
         XCTAssertFalse(permission.message(for: .needsAccess).localizedCaseInsensitiveContains("declin"))
+        XCTAssertEqual(permission.steps, [
+            "Open System Settings, then General > Login Items & Extensions.",
+            "Under Extensions, click the info button next to Camera Extensions.",
+            "Turn on ESPDisplay Camera Extension, then click Done.",
+            "Return to ESPDisplaySender and relaunch it if macOS asks.",
+        ])
+        XCTAssertFalse(permission.steps.joined(separator: " ")
+            .localizedCaseInsensitiveContains("Camera pane"))
+    }
+
+    func testEmbeddedCameraExtensionUsesItsIdentifierAsItsBundleName() {
+        XCTAssertEqual(
+            CameraExtensionInstaller.extensionBundleName,
+            "com.resourcefork.espdisplay.camera-extension.systemextension")
     }
 
     func testLocalNetworkBlockUsesSettingsInsteadOfAnUnrepeatableRequest() {
@@ -222,30 +366,18 @@ final class MacPermissionGuidanceTests: XCTestCase {
     }
 
     func testBlockedLocalNetworkDoesNotDisableCameraSetup() {
-        let items = [
-            PermissionChecklistItem(
-                permission: .localNetwork, status: .blocked, requiresRelaunch: false),
-            PermissionChecklistItem(
-                permission: .cameraExtension, status: .notYetAsked, requiresRelaunch: false),
-        ]
+        let camera = PermissionChecklistItem(
+            permission: .cameraExtension, status: .notYetAsked, requiresRelaunch: false)
 
-        XCTAssertFalse(PermissionChecklistActions.waitingForAnotherRequest(
-            active: .localNetwork, items: items, current: .cameraExtension))
-        XCTAssertTrue(PermissionChecklistActions.offersInAppRequest(for: items[1]))
+        XCTAssertTrue(PermissionChecklistActions.offersInAppRequest(for: camera))
+        XCTAssertTrue(PermissionChecklistActions.isRequestEnabled(for: camera))
     }
 
-    func testCheckingCameraRequestDisablesOnlyDuplicateCameraSetup() {
-        let items = [
-            PermissionChecklistItem(
-                permission: .localNetwork, status: .blocked, requiresRelaunch: false),
-            PermissionChecklistItem(
-                permission: .cameraExtension, status: .checking, requiresRelaunch: false),
-        ]
+    func testCheckingCameraRequestStaysActionable() {
+        let camera = PermissionChecklistItem(
+            permission: .cameraExtension, status: .checking, requiresRelaunch: false)
 
-        XCTAssertTrue(PermissionChecklistActions.waitingForAnotherRequest(
-            active: .cameraExtension, items: items, current: .localNetwork))
-        XCTAssertFalse(PermissionChecklistActions.waitingForAnotherRequest(
-            active: .cameraExtension, items: items, current: .cameraExtension))
+        XCTAssertTrue(PermissionChecklistActions.isRequestEnabled(for: camera))
     }
 
     func testCameraRestartResultStaysActionableUntilTheMacRestarts() {
@@ -255,21 +387,71 @@ final class MacPermissionGuidanceTests: XCTestCase {
 
         XCTAssertEqual(item.statusText, "Approved - restart Mac required")
         XCTAssertFalse(item.isReady)
-        XCTAssertTrue(PermissionChecklistPresentation.shouldPresent(for: [item]))
+        XCTAssertTrue(PermissionChecklistLaunchDecision.shouldOpenSettings(for: [item]))
         XCTAssertEqual(
             MacPermission.cameraExtension.message(for: .grantedNeedsRestart),
             "Camera extension approved - restart your Mac before it appears in video apps.")
     }
 
-    @MainActor
-    func testOpeningPermissionsSettingsClosesTheDuplicateChecklistSheet() {
-        let manager = PanelManager(
-            previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
-        manager.permissionChecklistPresented = true
+    func testCameraExtensionPropertiesUseTheSystemExtensionEnabledState() {
+        let result = CameraExtensionInstaller.activation(
+            for: [
+                CameraExtensionPropertiesSnapshot(
+                    enabled: true, awaitingUserApproval: false, uninstalling: false)
+            ])
 
-        manager.openPermissionsSettings()
+        if case .installed = result {
+            return
+        }
+        XCTFail("An enabled System Extension must report Allowed.")
+    }
 
-        XCTAssertFalse(manager.permissionChecklistPresented)
+    func testEnabledCameraExtensionWinsOverOldCopiesWaitingToUninstall() {
+        let result = CameraExtensionInstaller.activation(
+            for: [
+                CameraExtensionPropertiesSnapshot(
+                    enabled: false, awaitingUserApproval: false, uninstalling: true,
+                    bundleVersion: "634.6"),
+                CameraExtensionPropertiesSnapshot(
+                    enabled: true, awaitingUserApproval: false, uninstalling: false,
+                    bundleVersion: "634.10"),
+                CameraExtensionPropertiesSnapshot(
+                    enabled: false, awaitingUserApproval: false, uninstalling: true,
+                    bundleVersion: "634.5"),
+            ])
+
+        if case .installed = result {
+            return
+        }
+        XCTFail("An activated enabled extension must stay Allowed while older copies uninstall.")
+    }
+
+    func testCameraActivationOnlyReplacesAnActiveVersionWhenTheEmbeddedVersionDiffers() {
+        let properties = [
+            CameraExtensionPropertiesSnapshot(
+                enabled: false, awaitingUserApproval: false, uninstalling: true,
+                bundleVersion: "634.6"),
+            CameraExtensionPropertiesSnapshot(
+                enabled: true, awaitingUserApproval: false, uninstalling: false,
+                bundleVersion: "634.10"),
+            CameraExtensionPropertiesSnapshot(
+                enabled: false, awaitingUserApproval: false, uninstalling: true,
+                bundleVersion: "634.9"),
+        ]
+
+        XCTAssertFalse(CameraExtensionInstaller.shouldSubmitActivation(
+            embeddedVersion: "634.10", properties: properties))
+        XCTAssertTrue(CameraExtensionInstaller.shouldSubmitActivation(
+            embeddedVersion: "634.12", properties: properties))
+        if case .installed? = CameraExtensionInstaller.activationAfterAssessment(
+            embeddedVersion: "634.10", properties: properties)
+        {
+            // The callback completes without replacing the active version.
+        } else {
+            XCTFail("The activation-assessment callback should complete for the active version.")
+        }
+        XCTAssertNil(CameraExtensionInstaller.activationAfterAssessment(
+            embeddedVersion: "634.12", properties: properties))
     }
 
     func testLocalNetworkPolicyDeniedDNSCodeIsRecognized() {
@@ -284,6 +466,11 @@ final class MacPermissionGuidanceTests: XCTestCase {
             LocalNetworkPermissionProbe.isLocalNetworkDenied(.posix(.EHOSTUNREACH)))
         XCTAssertFalse(
             LocalNetworkPermissionProbe.isLocalNetworkDenied(.posix(.ECONNREFUSED)))
+    }
+
+    func testLocalNetworkPositiveProbeUsesAPrivateUnicastAddress() {
+        XCTAssertEqual(LocalNetworkPermissionProbe.unicastProbeHost, "192.168.254.254")
+        XCTAssertFalse(LocalNetworkPermissionProbe.unicastProbeHost.hasSuffix(".255"))
     }
 
     @MainActor

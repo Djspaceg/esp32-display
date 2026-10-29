@@ -16,7 +16,7 @@ TARGET="$HAL/ESPDisplayAudio.driver"
 # the user can touch the copy between its check and the move.
 STAGING="$HAL/.ESPDisplayAudio.installing"
 STAGED="$STAGING/ESPDisplayAudio.driver"
-BUNDLE_ID="com.espdisplay.audio-driver"
+BUNDLE_ID="com.resourcefork.espdisplay.audio-driver"
 PROJECT_FILE="$HERE/../ESPDisplaySender/ESPDisplaySender.xcodeproj/project.pbxproj"
 
 if [[ "$(id -u)" != 0 ]]; then

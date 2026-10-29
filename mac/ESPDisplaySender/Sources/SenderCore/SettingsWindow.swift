@@ -307,10 +307,6 @@ struct PermissionChecklistRows: View {
     var body: some View {
         ForEach(manager.permissionChecklist) { item in
             let isActive = manager.activePermissionRequest == item.permission
-            let waitingForAnother = PermissionChecklistActions.waitingForAnotherRequest(
-                active: manager.activePermissionRequest,
-                items: manager.permissionChecklist,
-                current: item.permission)
             VStack(alignment: .leading, spacing: 7) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -352,13 +348,15 @@ struct PermissionChecklistRows: View {
                             Button("Request Again") {
                                 manager.requestPermissionAccess(for: item.permission)
                             }
-                            .disabled(waitingForAnother || isActive)
+                            .disabled(
+                                !PermissionChecklistActions.isRequestEnabled(for: item))
                         }
                     } else if item.status == .notYetAsked {
                         Button("Request Access") {
                             manager.requestPermissionAccess(for: item.permission)
                         }
-                        .disabled(waitingForAnother || isActive)
+                        .disabled(
+                            !PermissionChecklistActions.isRequestEnabled(for: item))
                         Button(item.permission.settingsButtonTitle) {
                             NSWorkspace.shared.open(item.permission.settingsURL)
                         }
@@ -366,7 +364,8 @@ struct PermissionChecklistRows: View {
                         Button("Request Access") {
                             manager.requestPermissionAccess(for: item.permission)
                         }
-                        .disabled(waitingForAnother || isActive)
+                        .disabled(
+                            !PermissionChecklistActions.isRequestEnabled(for: item))
                         Button(item.permission.settingsButtonTitle) {
                             NSWorkspace.shared.open(item.permission.settingsURL)
                         }
@@ -418,7 +417,13 @@ private struct PermissionsSettingsPane: View {
             }
         }
         .onAppear {
-            manager.refreshMacPermissionGuidance(forceLocalNetworkProbe: true)
+            manager.refreshMacPermissionGuidance()
+        }
+        .task {
+            // The page is now visible before its first native request.
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            manager.permissionsSettingsDidAppear()
         }
     }
 }
@@ -654,10 +659,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     init(manager: PanelManager) {
         self.manager = manager
-        navigation.onPaneShown = { [weak manager] pane in
-            guard pane == .permissions else { return }
-            manager?.openPermissionsSettings()
-        }
     }
 
     func show(_ pane: SettingsPane? = nil) {

@@ -10,7 +10,7 @@ private let frameRate: Int32 = 15
 
 @main
 final class CameraExtensionMain: NSObject, CMIOExtensionProviderSource {
-    private let queue = DispatchQueue(label: "com.espdisplay.camera-extension")
+    private let queue = DispatchQueue(label: "com.resourcefork.espdisplay.camera-extension")
     private let deviceSource = CameraDeviceSource()
     private lazy var provider = CMIOExtensionProvider(source: self, clientQueue: queue)
 
@@ -74,17 +74,17 @@ private final class CameraDeviceSource: NSObject, CMIOExtensionDeviceSource {
         super.init()
         device = CMIOExtensionDevice(
             localizedName: "ESPDisplay XIAOML Camera",
-            deviceID: UUID(uuidString: "B3FE8B2B-7A6C-4D4A-BCB8-5AB00B5CA001")!,
-            legacyDeviceID: "com.espdisplay.xiaoml-camera",
+            deviceID: UUID(uuidString: "66D0C1A2-8D38-4CEA-8B4C-0EE7ABF3330B")!,
+            legacyDeviceID: "com.resourcefork.espdisplay.xiaoml-camera",
             source: self)
         output = CameraOutputStream(
             localizedName: "Camera",
-            streamID: UUID(uuidString: "9C4D9E56-6F11-4EBB-BD1C-0DAA8E0F8A01")!,
+            streamID: UUID(uuidString: "D826EBCF-E093-47CB-ABF6-615C331315E6")!,
             format: format,
             device: device)
         sink = CameraSinkStream(
             localizedName: "ESPDisplay Input",
-            streamID: UUID(uuidString: "9C4D9E56-6F11-4EBB-BD1C-0DAA8E0F8A02")!,
+            streamID: UUID(uuidString: "622020CF-0F6A-43C1-8C70-09D8DDC50E8A")!,
             format: format,
             device: device)
         do {
@@ -106,7 +106,9 @@ private final class CameraDeviceSource: NSObject, CMIOExtensionDeviceSource {
         if properties.contains(.deviceTransportType) {
             result.transportType = kIOAudioDeviceTransportTypeVirtual
         }
-        if properties.contains(.deviceModel) { result.model = "XIAOML Kit" }
+        if properties.contains(.deviceModel) {
+            result.model = "com.resourcefork.espdisplay.camera-extension"
+        }
         return result
     }
 

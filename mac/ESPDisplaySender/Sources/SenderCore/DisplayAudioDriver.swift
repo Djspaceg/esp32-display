@@ -10,7 +10,7 @@ import SenderProtocol
 /// fails if the two disagree.
 enum DisplayAudioDriverProtocol {
     static let version = 3
-    static let bundleID = "com.espdisplay.audio-driver"
+    static let bundleID = "com.resourcefork.espdisplay.audio-driver"
     static let registerSelector = fourCharCode("ESrg")
     static let versionSelector = fourCharCode("ESvr")
     static let pcmSelector = fourCharCode("ESpc")
@@ -64,7 +64,7 @@ struct DisplayAudioDeviceSpec: Equatable, Sendable {
     /// sound.
     let latencyFrames: Int
 
-    static let uidPrefix = "com.espdisplay.display."
+    static let uidPrefix = "com.resourcefork.espdisplay.display."
 
     /// Stable across launches, so macOS remembers the device as the output
     /// the user chose: the board's hardware ID once known, its record name
@@ -277,7 +277,7 @@ final class CoreAudioDisplayAudioDriver: DisplayAudioDriverBridge, @unchecked Se
 enum DisplayAudioDriverToken {
     private static let query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "com.espdisplay.sender.audio-driver",
+        kSecAttrService as String: "com.resourcefork.espdisplay.audio-driver",
         kSecAttrAccount as String: "owner-token",
     ]
 

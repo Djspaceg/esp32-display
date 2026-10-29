@@ -5,6 +5,40 @@ import os
 import ScreenCaptureKit
 import SenderProtocol
 
+/// The first ScreenCaptureKit call is routed through replayd. When Screen
+/// Recording has not been granted, making that call from every device session
+/// repeatedly asks TCC to deny a non-promptable request. Keep the actual
+/// prompt on the explicit CoreGraphics action and keep all capture entry
+/// points out of ScreenCaptureKit until that action has succeeded.
+enum ScreenCapturePermissionGate {
+    private static let lock = NSLock()
+    /// ScreenCaptureKit runs its first request through replayd. Retrying its
+    /// CoreGraphics preflight in every device session makes replayd send TCC
+    /// denial traffic over and over, without giving macOS a prompt to show.
+    /// The foreground app samples that result at launch, activation, and the
+    /// explicit Request Access action; sessions only consume this cached
+    /// result.
+    private static var authorization = false
+
+    static var isAuthorized: Bool {
+        lock.withLock { authorization }
+    }
+
+    static func observeAuthorization(_ value: Bool) {
+        lock.withLock { authorization = value }
+    }
+
+    static func permitsScreenCaptureKit() -> Bool {
+        isAuthorized
+    }
+}
+
+struct ScreenRecordingAuthorizationRequired: Error, LocalizedError {
+    var errorDescription: String? {
+        "Screen Recording permission is needed before a picture can be sent."
+    }
+}
+
 /// ScreenCaptureKit capture of one display, scaled by SCK to the panel's own
 /// pixel size in BGRA, converted to RGB565BE and handed to a callback.
 final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
@@ -216,6 +250,9 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     static func shareableContent(
         excludingDesktopWindows: Bool, onScreenWindowsOnly: Bool
     ) async throws -> SCShareableContent {
+        guard ScreenCapturePermissionGate.permitsScreenCaptureKit() else {
+            throw ScreenRecordingAuthorizationRequired()
+        }
         // Circuit breaker: an expired call leaves its task parked inside
         // ScreenCaptureKit, so while it stays wedged ask at most every
         // `unresponsiveRetry` instead of leaking a task on every lookup.
@@ -714,6 +751,9 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private func start(
         filter: SCContentFilter, fps: Int, sourceRect: CGRect? = nil, contentSize: CGSize
     ) async throws {
+        guard ScreenCapturePermissionGate.permitsScreenCaptureKit() else {
+            throw ScreenRecordingAuthorizationRequired()
+        }
         let (width, height) = stateLock.withLock { (_outW, _outH) }
         stateLock.withLock {
             _configuredFPS = fps

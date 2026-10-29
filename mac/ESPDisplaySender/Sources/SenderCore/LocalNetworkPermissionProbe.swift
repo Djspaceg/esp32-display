@@ -7,6 +7,10 @@ import Network
 /// LaunchAgent launches, rather than waiting for the sender's capture setup.
 final class LocalNetworkPermissionProbe {
     static let serviceType = "_espdisp._udp"
+    /// A private unicast address used only to ask Network.framework whether
+    /// Local Network policy permits a UDP path. It is deliberately not a
+    /// subnet broadcast address and no datagram is sent to it.
+    static let unicastProbeHost = "192.168.254.254"
     static let recheckInterval: TimeInterval = 5
     /// `kDNSServiceErr_PolicyDenied`. Kept as the wire value because Network
     /// does not surface the DNS-SD constant to Swift on every SDK.
@@ -25,6 +29,7 @@ final class LocalNetworkPermissionProbe {
 
     private var browser: NWBrowser?
     private var accessConnection: NWConnection?
+    private var unicastPathConnection: NWConnection?
     private let queue = DispatchQueue(label: "espdisp.local-network-permission")
     private var generation: UInt64 = 0
     private var lastStartedAt = Date.distantPast
@@ -76,6 +81,7 @@ final class LocalNetworkPermissionProbe {
     private func startLocked() {
         browser?.cancel()
         accessConnection?.cancel()
+        unicastPathConnection?.cancel()
         generation &+= 1
         let callbackGeneration = generation
         lastStartedAt = Date()
@@ -107,6 +113,7 @@ final class LocalNetworkPermissionProbe {
         }
         browser.start(queue: queue)
         startAccessConnection(callbackGeneration: callbackGeneration)
+        startUnicastPathProbe(callbackGeneration: callbackGeneration)
     }
 
     /// A standard PTR query for this app's Bonjour service. It is a real,
@@ -150,6 +157,39 @@ final class LocalNetworkPermissionProbe {
         connection.send(content: Self.mdnsQuery, completion: .contentProcessed { _ in })
     }
 
+    /// Local Network permission applies to packets sent to private unicast
+    /// addresses, not just Bonjour multicast. A UDP path does not require a
+    /// device response, so it gives the checklist a live access result even
+    /// while every device is booting or connected only over USB.
+    private func startUnicastPathProbe(callbackGeneration: UInt64) {
+        let connection = NWConnection(
+            host: NWEndpoint.Host(Self.unicastProbeHost), port: 9, using: .udp)
+        unicastPathConnection = connection
+        connection.pathUpdateHandler = { [weak self] path in
+            guard let self, self.generation == callbackGeneration else { return }
+            if path.status == .satisfied {
+                self.onObservation(.unicastPathReady)
+            } else if path.status == .unsatisfied,
+                      Self.isLocalNetworkDenied(path.unsatisfiedReason)
+            {
+                self.onObservation(.policyDenied(technicalDetail: "unicast path: \(path)"))
+            }
+        }
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self, self.generation == callbackGeneration else { return }
+            switch state {
+            case .waiting(let error), .failed(let error):
+                if Self.isLocalNetworkDenied(error) {
+                    self.onObservation(
+                        .policyDenied(technicalDetail: "unicast probe: \(error)"))
+                }
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+    }
+
     /// Run a new browse periodically after a denial, and when the foreground
     /// app becomes active, so granting access clears the banner without a
     /// second manual request.
@@ -168,6 +208,8 @@ final class LocalNetworkPermissionProbe {
             self?.browser = nil
             self?.accessConnection?.cancel()
             self?.accessConnection = nil
+            self?.unicastPathConnection?.cancel()
+            self?.unicastPathConnection = nil
             self?.generation &+= 1
         }
     }

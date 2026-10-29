@@ -5,6 +5,11 @@
 # button copies it from there into /Library/Audio/Plug-Ins/HAL.
 set -euo pipefail
 
+if [[ -n "${ESPDISP_SKIP_AUDIO_DRIVER:-}" ]]; then
+  echo "skipping audio driver for diagnostic app"
+  exit 0
+fi
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP="${CODESIGNING_FOLDER_PATH:?CODESIGNING_FOLDER_PATH is not set}"
 DESTINATION="$APP/Contents/Library/Audio/ESPDisplayAudio.driver"

@@ -114,6 +114,7 @@ final class KnobGrantRowViewTests: XCTestCase {
             previewPanels: [panel], savedNetworkNames: [], usbSerialPorts: [])
         manager.serialIODisabled = true
         manager.mediaKeysAuthorized = { authorized }
+        manager.refreshMediaKeyAuthorization()
         manager.selectedServiceName = panel.serviceName
         return ViewReading(PanelDetailView(panel: panel, manager: manager))
     }

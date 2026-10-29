@@ -10,8 +10,14 @@ enum AppBuildFeatures {
     static let isLocalNetworkTest = false
     #endif
 
+    #if SCREEN_RECORDING_PROBE
+    static let isScreenRecordingProbe = true
+    #else
+    static let isScreenRecordingProbe = false
+    #endif
+
     static var includesCameraExtension: Bool {
-        !isLocalNetworkTest
+        !isLocalNetworkTest && !isScreenRecordingProbe
     }
 
     static func processLockPath(isLocalNetworkTest: Bool) -> String {
@@ -122,7 +128,7 @@ enum MacPermission: String, CaseIterable, Equatable, Sendable {
         case .localNetwork:
             return "Open Local Network Settings"
         case .cameraExtension:
-            return "Open Extensions Settings"
+            return "Open Login Items & Extensions"
         }
     }
 
@@ -158,9 +164,10 @@ enum MacPermission: String, CaseIterable, Equatable, Sendable {
             ]
         case .cameraExtension:
             return [
-                "Request installation.",
-                "Approve ESPDisplay Camera Extension in Login Items & Extensions.",
-                "Relaunch ESPDisplaySender if macOS asks for it.",
+                "Open System Settings, then General > Login Items & Extensions.",
+                "Under Extensions, click the info button next to Camera Extensions.",
+                "Turn on ESPDisplay Camera Extension, then click Done.",
+                "Return to ESPDisplaySender and relaunch it if macOS asks.",
             ]
         }
     }
@@ -259,6 +266,15 @@ enum ScreenRecordingPermissionState: Equatable, Sendable {
         case .ready: return nil
         case .needsAccess: return .needsAccess
         case .grantedNeedsRelaunch: return .grantedNeedsRelaunch
+        }
+    }
+
+    var checklistStatus: PermissionChecklistStatus {
+        switch self {
+        case .ready, .grantedNeedsRelaunch:
+            return .allowed
+        case .needsAccess:
+            return .blocked
         }
     }
 }

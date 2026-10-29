@@ -59,32 +59,96 @@ struct PermissionChecklistItem: Identifiable, Equatable {
     }
 }
 
-/// Decides when a known permission problem should open the launch sheet. A
-/// pending probe is not evidence that permission is missing.
-enum PermissionChecklistPresentation {
-    static func shouldPresent(for items: [PermissionChecklistItem]) -> Bool {
-        items.contains { $0.permission.isRequiredAtLaunch && $0.needsAttention }
+/// Decides whether the foreground launch should open Settings > Permissions.
+/// Unknown checks are not treated as missing grants, so a configured app does
+/// not open Settings merely while macOS is still answering.
+enum PermissionChecklistLaunchDecision {
+    static func shouldOpenSettings(
+        for items: [PermissionChecklistItem],
+        localNetworkWasPreviouslyVerified: Bool = true
+    ) -> Bool {
+        if items.contains(where: { $0.permission.isRequiredAtLaunch && $0.needsAttention }) {
+            return true
+        }
+        // Local Network has no preflight API. On the first foreground launch
+        // for this app identity, make the explanatory page visible before the
+        // real probe runs. The row continues to say Checking, never Missing.
+        return !localNetworkWasPreviouslyVerified
+            && items.contains {
+                $0.permission == .localNetwork && $0.status == .checking
+            }
     }
 }
 
-/// Shared action policy for the permanent Settings page and the launch sheet.
-/// A blocked row is not an in-flight macOS request, so it must not prevent a
-/// person from setting up another capability such as the camera extension.
-enum PermissionChecklistActions {
-    static func waitingForAnotherRequest(
-        active: MacPermission?,
-        items: [PermissionChecklistItem],
-        current: MacPermission
-    ) -> Bool {
-        guard let active, active != current,
-              let activeItem = items.first(where: { $0.permission == active })
-        else { return false }
-        return activeItem.status == .checking
+/// A prior *live* unicast path success is a launch-routing hint only. It is
+/// never used to label the row: the live probe remains the source of Allowed,
+/// Blocked, or Checking. Remembering that proof avoids opening Settings on
+/// each later launch before Network.framework has replied.
+enum LocalNetworkLiveAccessHistory {
+    private static let keyPrefix = "ESPDisplaySender.local-network-live-access."
+
+    static var wasPreviouslyVerified: Bool {
+        wasPreviouslyVerified(for: currentIdentity())
     }
 
+    static func record(allowed: Bool) {
+        UserDefaults.standard.set(allowed, forKey: key(for: currentIdentity()))
+    }
+
+    static func wasPreviouslyVerified(
+        for identity: String, defaults: UserDefaults = .standard
+    ) -> Bool {
+        defaults.bool(forKey: key(for: identity))
+    }
+
+    static func key(for identity: String) -> String {
+        keyPrefix + identity
+    }
+
+    static func identity(
+        bundleIdentifier: String, teamIdentifier: String?
+    ) -> String {
+        bundleIdentifier + "." + (teamIdentifier ?? "unsigned")
+    }
+
+    private static func currentIdentity() -> String {
+        identity(
+            bundleIdentifier: Bundle.main.bundleIdentifier ?? "unknown",
+            teamIdentifier: signingTeamIdentifier())
+    }
+
+    private static func signingTeamIdentifier() -> String? {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, [], &code)
+            == errSecSuccess,
+              let code
+        else {
+            return nil
+        }
+        var information: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(), &information) == errSecSuccess,
+              let information = information as? [String: Any]
+        else {
+            return nil
+        }
+        return information[kSecCodeInfoTeamIdentifier as String] as? String
+    }
+}
+
+/// Shared action policy for the permanent Settings page and its in-context
+/// banner links. A blocked row must remain actionable until macOS reports a
+/// grant, even while another permission is being checked.
+enum PermissionChecklistActions {
     static func offersInAppRequest(for item: PermissionChecklistItem) -> Bool {
         item.status != .allowed
             && (item.status != .blocked || item.permission.offersInAppRequestWhenBlocked)
+    }
+
+    /// A missing grant remains actionable. A request in progress may have to
+    /// be completed in System Settings, but it must never turn this control
+    /// into a dead end.
+    static func isRequestEnabled(for item: PermissionChecklistItem) -> Bool {
+        offersInAppRequest(for: item)
     }
 }
 
@@ -104,81 +168,37 @@ enum PermissionRequestSequence {
         }
     }
 
-    /// The first row whose macOS request has not yet been attempted. Unlike
-    /// `next(in:)`, this moves past a terminal block so independent features
-    /// such as the camera extension can still be requested.
-    static func nextAutomaticRequest(in items: [PermissionChecklistItem]) -> MacPermission? {
+    /// The first unresolved row this launch has not requested yet. The status
+    /// remains a live macOS result; `attempted` is only the one-shot request
+    /// sequencer and is never used to label a row.
+    static func nextAutomaticRequest(
+        in items: [PermissionChecklistItem],
+        attempted: Set<MacPermission>
+    ) -> MacPermission? {
         MacPermission.requestOrder.first { permission in
             guard let item = items.first(where: { $0.permission == permission }) else {
                 return false
             }
-            return shouldRequestAutomatically(item)
+            return !attempted.contains(permission)
+                && shouldRequestAutomatically(item)
         }
     }
 
     static func shouldRequestAutomatically(_ item: PermissionChecklistItem) -> Bool {
-        item.status == .notYetAsked && !item.requiresRelaunch && !item.requiresRestart
-    }
-}
-
-/// A privacy decision is tied to the app identity, not merely its bundle ID.
-/// Remembering which prompt this identity has already requested lets the
-/// checklist distinguish "not yet asked" from "blocked" on a later launch.
-struct PermissionPromptHistory {
-    private static let prefix = "ESPDisplaySender.permission-requested."
-
-    let identity: String
-    private let defaults: UserDefaults
-
-    init(identity: String = AppPermissionIdentity.current, defaults: UserDefaults = .standard) {
-        self.identity = identity
-        self.defaults = defaults
+        !item.isReady
+            && !item.requiresRelaunch
+            && !item.requiresRestart
+            && (item.status != .checking || item.permission == .localNetwork)
     }
 
-    func wasRequested(_ permission: MacPermission) -> Bool {
-        defaults.bool(forKey: key(for: permission))
+    static func shouldAdvanceAfter(_ item: PermissionChecklistItem) -> Bool {
+        item.isReady || item.status == .blocked
     }
 
-    func markRequested(_ permission: MacPermission) {
-        defaults.set(true, forKey: key(for: permission))
-    }
-
-    private func key(for permission: MacPermission) -> String {
-        let encoded = Data(identity.utf8).base64EncodedString()
-        return Self.prefix + encoded + "." + permission.rawValue
-    }
-}
-
-/// The current designated requirement is the identity macOS sees after a
-/// rebuild or re-sign. The bundle version is only a fallback for a malformed
-/// local development signature.
-enum AppPermissionIdentity {
-    static var current: String {
-        var staticCode: SecStaticCode?
-        let url = Bundle.main.bundleURL as CFURL
-        guard SecStaticCodeCreateWithPath(url, [], &staticCode) == errSecSuccess,
-              let staticCode
-        else {
-            return fallback
-        }
-        var requirement: SecRequirement?
-        guard SecCodeCopyDesignatedRequirement(staticCode, [], &requirement) == errSecSuccess,
-              let requirement
-        else {
-            return fallback
-        }
-        var text: CFString?
-        guard SecRequirementCopyString(requirement, [], &text) == errSecSuccess,
-              let text
-        else {
-            return fallback
-        }
-        return text as String
-    }
-
-    private static var fallback: String {
-        let identifier = Bundle.main.bundleIdentifier ?? "ESPDisplaySender"
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-        return identifier + "." + version
+    /// These APIs show their own prompt but provide no callback for a
+    /// dismissal. An automatic setup sequence waits until AppKit reports the
+    /// app active again before advancing to another native request.
+    static func waitsForForegroundActivationAfterRequest(_ permission: MacPermission) -> Bool {
+        permission == .screenRecording || permission == .accessibility
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Security
 
 /// Whether a password is one the panel would accept, decided the same way the
@@ -85,78 +86,382 @@ protocol OTAPasswordStoring: AnyObject {
     func remove(forHardwareID hardwareID: String) throws
 }
 
-/// The real store: one generic-password item per panel in the login keychain.
+/// The protected Keychain database that holds the one combined credential
+/// record. The login store is read only by the short, one-time transition from
+/// the former file-backed item; normal app work uses Data Protection.
+enum CredentialKeychainStore: String, Equatable, Sendable {
+    case dataProtection
+    case login
+}
+
+protocol GenericPasswordKeychain: AnyObject {
+    func data(
+        service: String, account: String, in store: CredentialKeychainStore
+    ) throws -> Data?
+    func write(
+        data: Data, service: String, account: String, in store: CredentialKeychainStore
+    ) throws
+    func remove(
+        service: String, account: String, in store: CredentialKeychainStore
+    ) throws
+}
+
+/// The Security.framework implementation behind the credential vault.
+final class SecurityGenericPasswordKeychain: GenericPasswordKeychain {
+    private static let logger = Logger(
+        subsystem: "com.resourcefork.espdisplay", category: "keychain")
+    private static let accessGroup = "4D22XL743H.com.resourcefork.espdisplay"
+
+    func data(
+        service: String, account: String, in store: CredentialKeychainStore
+    ) throws -> Data? {
+        var query = Self.identity(service: service, account: account, store: store)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        Self.log(
+            operation: "SecItemCopyMatching data", service: service, account: account,
+            store: store, status: status)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else {
+            throw KeychainCredentialVault.Failure.keychain(status: status)
+        }
+        return data
+    }
+
+    func write(
+        data: Data, service: String, account: String, in store: CredentialKeychainStore
+    ) throws {
+        let identity = Self.identity(service: service, account: account, store: store)
+        let values = [kSecValueData as String: data]
+        let updated = SecItemUpdate(identity as CFDictionary, values as CFDictionary)
+        Self.log(
+            operation: "SecItemUpdate", service: service, account: account,
+            store: store, status: updated)
+        if updated == errSecSuccess { return }
+        guard updated == errSecItemNotFound else {
+            throw KeychainCredentialVault.Failure.keychain(status: updated)
+        }
+        var item = identity
+        item[kSecValueData as String] = data
+        let added = SecItemAdd(item as CFDictionary, nil)
+        Self.log(
+            operation: "SecItemAdd", service: service, account: account,
+            store: store, status: added)
+        guard added == errSecSuccess else {
+            throw KeychainCredentialVault.Failure.keychain(status: added)
+        }
+    }
+
+    func remove(
+        service: String, account: String, in store: CredentialKeychainStore
+    ) throws {
+        let status = SecItemDelete(
+            Self.identity(service: service, account: account, store: store) as CFDictionary)
+        Self.log(
+            operation: "SecItemDelete", service: service, account: account,
+            store: store, status: status)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainCredentialVault.Failure.keychain(status: status)
+        }
+    }
+
+    private static func identity(
+        service: String, account: String, store: CredentialKeychainStore
+    ) -> [String: Any] {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        if store == .dataProtection {
+            query[kSecUseDataProtectionKeychain as String] = true
+            query[kSecAttrAccessGroup as String] = accessGroup
+        }
+        return query
+    }
+
+    private static func log(
+        operation: String, service: String, account: String,
+        store: CredentialKeychainStore, status: OSStatus
+    ) {
+        logger.notice(
+            "Keychain \(operation, privacy: .public) store \(store.rawValue, privacy: .public) service \(service, privacy: .public) account \(account, privacy: .private(mask: .hash)) OSStatus \(status, privacy: .public)")
+    }
+}
+
+/// The versioned payload stored in the app's only WiFi/OTA credential item.
+/// Passwords remain in the Keychain, never in settings or device records.
+struct CredentialVaultPayload: Codable, Equatable {
+    static let currentVersion = 1
+
+    let version: Int
+    var wifiPasswords: [String: String]
+    var otaPasswords: [String: String]
+
+    init(
+        version: Int = currentVersion,
+        wifiPasswords: [String: String] = [:],
+        otaPasswords: [String: String] = [:]
+    ) {
+        self.version = version
+        self.wifiPasswords = wifiPasswords
+        self.otaPasswords = otaPasswords
+    }
+}
+
+/// The shared credential vault for both saved WiFi and OTA passwords.
 ///
-/// KEYED BY HARDWARE ID, not by service name. The hardware ID is the 6-byte
-/// deviceID from EINF, which survives a rename; the Bonjour service name does
-/// not, and a rename is a normal thing to do (`tools/espdisp.py` renames, and so
-/// does the manager window). Keying on the name would silently lose the password
-/// the first time someone renamed a panel, at which point the next update would
-/// ask for it again with no indication why.
-///
-/// The password does NOT go in `SenderSettings` or `PanelPersistence`. Both are
-/// plain files - UserDefaults and a JSON record - and neither is a place for a
-/// secret that grants a firmware write on the LAN.
-final class KeychainOTAPasswordStore: OTAPasswordStoring {
-    /// One service for the whole app, so every item is visible together in
-    /// Keychain Access under a name that says what it is for.
-    static let service = "com.espdisplay.sender.ota"
+/// Normal reads and writes use the app's Data Protection Keychain entry. The
+/// short login-keychain transition only moves the single combined item written
+/// by the preceding release. It never searches for old per-password records.
+final class KeychainCredentialVault: @unchecked Sendable {
+    static let service = "com.resourcefork.espdisplay.credentials"
+    static let account = "credentials-v1"
+    static let credentialStore = CredentialKeychainStore.dataProtection
+    static let shared = KeychainCredentialVault(keychain: SecurityGenericPasswordKeychain())
+    private static let logger = Logger(
+        subsystem: "com.resourcefork.espdisplay", category: "keychain")
 
     enum Failure: Error, LocalizedError, Equatable {
         case keychain(status: OSStatus)
+        case invalidPayload
+        case transitionVerificationFailed
 
         var errorDescription: String? {
             switch self {
             case .keychain(let status):
                 let detail = SecCopyErrorMessageString(status, nil) as String?
-                return "The Keychain refused to store the password "
-                    + "(\(detail ?? "OSStatus \(status)"))."
+                switch status {
+                case errSecInteractionNotAllowed:
+                    return "macOS did not allow ESPDisplaySender to read or write "
+                        + "this login Keychain item (User interaction is not allowed; "
+                        + "OSStatus \(status))."
+                case errSecAuthFailed:
+                    return "macOS rejected the older saved password's access rule "
+                        + "(Authentication failed; OSStatus \(status))."
+                case errSecParam:
+                    return "macOS rejected the Keychain item attributes "
+                        + "(Invalid parameter; OSStatus \(status))."
+                default:
+                    return "The Keychain refused the credential update "
+                        + "(\(detail ?? "OSStatus \(status)"))."
+                }
+            case .invalidPayload:
+                return "The shared WiFi and OTA password record is not valid."
+            case .transitionVerificationFailed:
+                return "The saved WiFi and OTA password record could not be verified "
+                    + "after moving it to macOS's protected app Keychain."
             }
         }
     }
 
+    private let keychain: GenericPasswordKeychain
+    private let lock = NSLock()
+    private var cachedPayload: CredentialVaultPayload?
+    private var loginTransitionAttempted = false
+    private var loginTransitionFailure: Error?
+
+    init(keychain: GenericPasswordKeychain) {
+        self.keychain = keychain
+    }
+
+    /// Reads the one app-owned record once at process startup. When the
+    /// immediately previous release left it in the login Keychain, `payload`
+    /// moves only that item into Data Protection before returning.
+    func prepareForLaunch() throws {
+        try lock.withLock {
+            _ = try payload()
+            if let loginTransitionFailure { throw loginTransitionFailure }
+        }
+    }
+
+    func savedNetworkNames() throws -> [String] {
+        try lock.withLock {
+            return try payload().wifiPasswords.keys.sorted {
+                $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+            }
+        }
+    }
+
+    func wifiCredential(for ssid: String) throws -> SavedWiFiCredential? {
+        try lock.withLock {
+            guard let password = try payload().wifiPasswords[ssid] else { return nil }
+            return SavedWiFiCredential(ssid: ssid, password: password)
+        }
+    }
+
+    func saveWiFiCredential(_ credential: SavedWiFiCredential) throws {
+        try lock.withLock {
+            var next = try writablePayload()
+            next.wifiPasswords[credential.ssid] = credential.password
+            try writeAndVerify(next)
+            cachedPayload = next
+        }
+    }
+
+    func removeWiFiCredential(ssid: String) throws {
+        try lock.withLock {
+            var next = try writablePayload()
+            guard next.wifiPasswords.removeValue(forKey: ssid) != nil else { return }
+            try writeAndVerify(next)
+            cachedPayload = next
+        }
+    }
+
+    func otaPassword(for hardwareID: String) throws -> String? {
+        try lock.withLock {
+            try payload().otaPasswords[hardwareID]
+        }
+    }
+
+    func storeOTAPassword(_ password: String, for hardwareID: String) throws {
+        try lock.withLock {
+            var next = try writablePayload()
+            next.otaPasswords[hardwareID] = password
+            try writeAndVerify(next)
+            cachedPayload = next
+        }
+    }
+
+    func removeOTAPassword(for hardwareID: String) throws {
+        try lock.withLock {
+            var next = try writablePayload()
+            guard next.otaPasswords.removeValue(forKey: hardwareID) != nil else { return }
+            try writeAndVerify(next)
+            cachedPayload = next
+        }
+    }
+
+    private func payload() throws -> CredentialVaultPayload {
+        if let cachedPayload { return cachedPayload }
+        if let loginTransitionFailure { throw loginTransitionFailure }
+        if let data = try keychain.data(
+            service: Self.service, account: Self.account, in: Self.credentialStore)
+        {
+            let current = try decode(data)
+            cachedPayload = current
+            return current
+        }
+        if Self.credentialStore == .dataProtection, !loginTransitionAttempted {
+            loginTransitionAttempted = true
+            do {
+                guard let data = try keychain.data(
+                    service: Self.service, account: Self.account, in: .login)
+                else {
+                    let empty = CredentialVaultPayload()
+                    cachedPayload = empty
+                    return empty
+                }
+                let current = try decode(data)
+                do {
+                    try moveLoginItemToDataProtection(data, expected: current)
+                } catch {
+                    // The one source item is still intact. Its names and
+                    // passwords stay available for reads this launch, but a
+                    // later edit must not create a second divergent record.
+                    // `prepareForLaunch` surfaces the move failure once.
+                    cachedPayload = current
+                    loginTransitionFailure = error
+                    Self.logger.error(
+                        "Credential transition retained the login record after failure: \(error.localizedDescription, privacy: .public)")
+                    return current
+                }
+                cachedPayload = current
+                return current
+            } catch {
+                loginTransitionFailure = error
+                throw error
+            }
+        }
+        let empty = CredentialVaultPayload()
+        cachedPayload = empty
+        return empty
+    }
+
+    private func writablePayload() throws -> CredentialVaultPayload {
+        if let loginTransitionFailure { throw loginTransitionFailure }
+        return try payload()
+    }
+
+    private func writeAndVerify(_ payload: CredentialVaultPayload) throws {
+        let data: Data
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            data = try encoder.encode(payload)
+        } catch {
+            throw Failure.invalidPayload
+        }
+        try keychain.write(
+            data: data, service: Self.service, account: Self.account,
+            in: Self.credentialStore)
+        guard let stored = try keychain.data(
+            service: Self.service, account: Self.account, in: Self.credentialStore),
+              try decode(stored) == payload
+        else {
+            throw Failure.transitionVerificationFailed
+        }
+    }
+
+    private func decode(_ data: Data) throws -> CredentialVaultPayload {
+        guard let payload = try? JSONDecoder().decode(CredentialVaultPayload.self, from: data),
+              payload.version == CredentialVaultPayload.currentVersion
+        else {
+            throw Failure.invalidPayload
+        }
+        return payload
+    }
+
+    /// The only transitional code retained after legacy imports were removed.
+    /// It reads one prior combined item, writes and verifies its Data
+    /// Protection replacement, then removes the prior item. A failed move
+    /// leaves the login entry in place and removes the just-created
+    /// Data-Protection entry when possible.
+    private func moveLoginItemToDataProtection(
+        _ data: Data, expected: CredentialVaultPayload
+    ) throws {
+        do {
+            try keychain.write(
+                data: data, service: Self.service, account: Self.account,
+                in: .dataProtection)
+            guard let copied = try keychain.data(
+                service: Self.service, account: Self.account, in: .dataProtection),
+                  try decode(copied) == expected
+            else {
+                throw Failure.transitionVerificationFailed
+            }
+            try keychain.remove(
+                service: Self.service, account: Self.account, in: .login)
+            Self.logger.notice(
+                "Credential transition login-to-data-protection completed for the combined record")
+        } catch {
+            try? keychain.remove(
+                service: Self.service, account: Self.account, in: .dataProtection)
+            throw error
+        }
+    }
+}
+
+/// The real OTA store delegates to the shared WiFi/OTA Keychain payload while
+/// preserving the protocol callers use. Hardware IDs remain the OTA map key so
+/// a device rename cannot lose its remembered update password.
+final class KeychainOTAPasswordStore: OTAPasswordStoring {
+    static let service = KeychainCredentialVault.service
+    static let account = KeychainCredentialVault.account
+    typealias Failure = KeychainCredentialVault.Failure
+
     func password(forHardwareID hardwareID: String) -> String? {
-        var query = Self.baseQuery(hardwareID)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        try? KeychainCredentialVault.shared.otaPassword(for: hardwareID)
     }
 
     func store(_ password: String, forHardwareID hardwareID: String) throws {
-        let data = Data(password.utf8)
-        let query = Self.baseQuery(hardwareID)
-        // Update in place when an item is already there. Adding over an existing
-        // item returns errSecDuplicateItem rather than replacing it, so a changed
-        // password would appear to save and then not be the one used.
-        let update = [kSecValueData as String: data]
-        let updated = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-        if updated == errSecSuccess { return }
-        guard updated == errSecItemNotFound else {
-            throw Failure.keychain(status: updated)
-        }
-        var insert = query
-        insert[kSecValueData as String] = data
-        let added = SecItemAdd(insert as CFDictionary, nil)
-        guard added == errSecSuccess else { throw Failure.keychain(status: added) }
+        try KeychainCredentialVault.shared.storeOTAPassword(password, for: hardwareID)
     }
 
     func remove(forHardwareID hardwareID: String) throws {
-        let status = SecItemDelete(Self.baseQuery(hardwareID) as CFDictionary)
-        // Already gone is the outcome the caller asked for.
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw Failure.keychain(status: status)
-        }
-    }
-
-    private static func baseQuery(_ hardwareID: String) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: hardwareID,
-        ]
+        try KeychainCredentialVault.shared.removeOTAPassword(for: hardwareID)
     }
 }
 

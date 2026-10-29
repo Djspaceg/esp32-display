@@ -76,6 +76,11 @@ final class CameraPreview: ObservableObject {
 final class CameraExtensionBridge {
     static let shared = CameraExtensionBridge()
     static let deviceName = "ESPDisplay XIAOML Camera"
+    static let deviceModelID = "com.resourcefork.espdisplay.camera-extension"
+
+    static func isOurCamera(localizedName: String, modelID: String) -> Bool {
+        localizedName == deviceName && modelID == deviceModelID
+    }
 
     private let queue = DispatchQueue(label: "espdisplay.camera-extension")
     private let formatDescription: CMVideoFormatDescription
@@ -137,7 +142,7 @@ final class CameraExtensionBridge {
             mediaType: .video,
             position: .unspecified).devices
         guard let captureDevice = captureDevices.first(where: {
-            $0.localizedName == Self.deviceName
+            Self.isOurCamera(localizedName: $0.localizedName, modelID: $0.modelID)
         }) else { return nil }
         return cmioDevice(uniqueID: captureDevice.uniqueID)
     }

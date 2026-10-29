@@ -15,34 +15,20 @@ struct SavedWiFiCredential: Equatable, Sendable {
 }
 
 /// App-managed WiFi credentials. Passwords never enter panel persistence or
-/// UserDefaults; each SSID is a generic-password item in the login Keychain.
+/// UserDefaults; WiFi and OTA passwords share one versioned Data Protection
+/// Keychain item through `KeychainCredentialVault`.
 enum WifiCredentialStore {
-    private static let service = "com.espdisplay.sender.wifi"
-    /// Still written beside an open network, so a build from before empty
-    /// meant open, which required it, copies the network too. Never read.
-    private static let openNetworkMarker = Data("open-network-v1".utf8)
+    static let service = KeychainCredentialVault.service
 
     static func savedNetworkNames() -> [String] {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-        ]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else {
-            return []
-        }
-        let items: [[String: Any]]
-        if let many = result as? [[String: Any]] {
-            items = many
-        } else if let one = result as? [String: Any] {
-            items = [one]
-        } else {
-            return []
-        }
-        return items.compactMap { $0[kSecAttrAccount as String] as? String }
-            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        savedNetworkNames(using: KeychainCredentialVault.shared)
+    }
+
+    /// The app's list path is kept separately testable from the static
+    /// production vault. This calls the same production code with an injected
+    /// Keychain implementation in tests, never the app's protected Keychain.
+    static func savedNetworkNames(using vault: KeychainCredentialVault) -> [String] {
+        (try? vault.savedNetworkNames()) ?? []
     }
 
     /// What one Keychain lookup found. An empty password and an unreadable
@@ -72,17 +58,13 @@ enum WifiCredentialStore {
     }
 
     static func read(_ ssid: String) -> Read {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: ssid,
-            kSecReturnData as String: true,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        return decode(ssid: ssid, status: status, result: result)
+        do {
+            guard let credential = try KeychainCredentialVault.shared.wifiCredential(for: ssid)
+            else { return .notSaved }
+            return .saved(credential)
+        } catch {
+            return .unreadable
+        }
     }
 
     /// `read`'s verdict on what `SecItemCopyMatching` returned, apart from
@@ -102,38 +84,45 @@ enum WifiCredentialStore {
     /// Save a network; an empty password saves it as open.
     @discardableResult
     static func save(ssid: String, password: String) -> Bool {
-        let isOpenNetwork = password.isEmpty
-        let identity: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: ssid,
-        ]
-        let values: [String: Any] = [
-            kSecValueData as String: Data(password.utf8),
-            kSecAttrGeneric as String: isOpenNetwork ? openNetworkMarker : Data(),
-        ]
-        let updated = SecItemUpdate(identity as CFDictionary, values as CFDictionary)
-        if updated == errSecSuccess { return true }
-        guard updated == errSecItemNotFound else { return false }
+        saveFailure(ssid: ssid, password: password) == nil
+    }
 
-        var item = identity
-        item[kSecValueData as String] = Data(password.utf8)
-        item[kSecAttrGeneric as String] = isOpenNetwork ? openNetworkMarker : Data()
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+    /// Save a network and retain the exact Keychain result for a selectable
+    /// recovery message. A locked Keychain, an older item's access rule, and
+    /// a malformed write all need different recovery steps.
+    static func saveFailure(ssid: String, password: String) -> String? {
+        saveFailure(
+            ssid: ssid, password: password, using: KeychainCredentialVault.shared)
+    }
+
+    static func saveFailure(
+        ssid: String, password: String, using vault: KeychainCredentialVault
+    ) -> String? {
+        do {
+            try vault.saveWiFiCredential(
+                SavedWiFiCredential(ssid: ssid, password: password))
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     /// Delete one saved network. An item that is already gone counts as
     /// removed, so a second removal is not reported as a failure.
     @discardableResult
     static func remove(ssid: String) -> Bool {
-        let identity: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: ssid,
-        ]
-        let status = SecItemDelete(identity as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
+        removeFailure(ssid: ssid) == nil
+    }
+
+    /// Delete a saved network, returning the exact Keychain result if macOS
+    /// refused the request.
+    static func removeFailure(ssid: String) -> String? {
+        do {
+            try KeychainCredentialVault.shared.removeWiFiCredential(ssid: ssid)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 }
 

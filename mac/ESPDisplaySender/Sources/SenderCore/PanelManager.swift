@@ -43,8 +43,18 @@ final class PanelManager: ObservableObject {
     /// Replaced by tests, which must not prompt or change the volume of
     /// whoever runs them.
     var mediaKeysAuthorized: () -> Bool = { MediaControl.isAuthorized }
+    /// Cached only by explicit permission refreshes. SwiftUI redraws while
+    /// device telemetry arrives, so rendering must not turn into a TCC probe.
+    @Published internal(set) var accessibilityPermissionIsAllowed = false
     var requestMediaKeyAuthorization: () -> Void = {
         MediaControl.requestAuthorizationOnce()
+    }
+    /// The Permissions checklist must make a fresh, user-requested
+    /// Accessibility request even if a device gesture already used its
+    /// one-shot prompt guard. Gesture handling retains that guard so a noisy
+    /// knob cannot repeatedly prompt.
+    var requestAccessibilityPermission: () -> Void = {
+        MediaControl.requestAuthorization()
     }
     /// Re-starts the Bonjour permission probe. Installed by the app bootstrap;
     /// tests and previews leave it inert.
@@ -52,10 +62,10 @@ final class PanelManager: ObservableObject {
     /// Rechecks the Local Network probe after its small interval, or
     /// immediately after the foreground app becomes active.
     var refreshLocalNetworkAuthorization: (_ immediately: Bool) -> Void = { _ in }
-    /// The bootstrap uses this to recheck an existing Local Network decision
-    /// without starting a first-use request before the launch sheet explains it.
-    var hasRequestedLocalNetworkPermission: Bool {
-        permissionPromptHistory.wasRequested(.localNetwork)
+    /// Reads macOS's current System Extensions state. Installed by the app
+    /// bootstrap; tests and previews provide an inert result.
+    var inspectCameraExtension: (@escaping (CameraExtensionActivation) -> Void) -> Void = {
+        completion in completion(.notInstalled)
     }
     var mediaKeySender: (MediaControl.Key) -> String? = { MediaControl.send($0) }
     /// Posts a recorded key combination; replaced by tests, like the media key.
@@ -72,26 +82,19 @@ final class PanelManager: ObservableObject {
     /// The live rows in Settings and the first-launch checklist. They are
     /// rebuilt from the real permission probes every time the manager refreshes.
     @Published private(set) var permissionChecklist: [PermissionChecklistItem] = []
-    /// A foreground launch presents this automatically while any capability is
-    /// unavailable. Background launches leave it queued until a window exists.
-    @Published var permissionChecklistPresented = false
     @Published private(set) var activePermissionRequest: MacPermission?
-    private let permissionPromptHistory = PermissionPromptHistory()
-    /// Local Network has no preflight API. Delay the initial first-run
-    /// "not yet asked" result briefly; a pending probe is never treated as
-    /// missing access.
-    private static let localNetworkInitialGracePeriod: TimeInterval = 1.5
-    private var localNetworkInitialCheckStartedAt = Date()
-    private var localNetworkInitialCheckTask: Task<Void, Never>?
     private var localNetworkChecklistStatus: PermissionChecklistStatus?
     private var localNetworkTechnicalDetail: String?
     private var systemAudioChecklistStatus: PermissionChecklistStatus?
     private var cameraExtensionNeedsApproval = false
     private var cameraExtensionActivated = false
     private var cameraExtensionNeedsRestart = false
+    private var cameraExtensionStatusIsChecking = true
     private var cameraExtensionTechnicalDetail: String?
     private var automaticPermissionSequence = false
-    private var permissionChecklistDismissedThisLaunch = false
+    private var automaticPermissionsRequested: Set<MacPermission> = []
+    private var automaticRequestAwaitingAppActivation: MacPermission?
+    private var launchPermissionSetupPending = false
     private var foregroundStartupUnblocked = false
     private var foregroundStartupContinuation: CheckedContinuation<Void, Never>?
     private var screenRecordingTechnicalDetail: String?
@@ -114,6 +117,7 @@ final class PanelManager: ObservableObject {
     /// bring back what it held, so only Dismiss clears these.
     static let panelRecordsReadIssueSource = "display records (read)"
     static let settingsReadIssueSource = "app settings (read)"
+    static let credentialTransitionIssueSource = "combined credentials"
     /// Persisted app settings, including streaming policy and sidebar ordering.
     @Published private(set) var settings = SenderSettings()
     /// Live image of what the selected panel is being sent. Its own observable
@@ -286,12 +290,12 @@ final class PanelManager: ObservableObject {
     var wifiNetworkNamesReader: @Sendable () -> [String] = {
         WifiCredentialStore.savedNetworkNames()
     }
-    var wifiCredentialWriter: @Sendable (SavedWiFiCredential) -> Bool = { credential in
-        WifiCredentialStore.save(
+    var wifiCredentialWriter: @Sendable (SavedWiFiCredential) -> String? = { credential in
+        WifiCredentialStore.saveFailure(
             ssid: credential.ssid, password: credential.password)
     }
-    var wifiCredentialRemover: @Sendable (String) -> Bool = { ssid in
-        WifiCredentialStore.remove(ssid: ssid)
+    var wifiCredentialRemover: @Sendable (String) -> String? = { ssid in
+        WifiCredentialStore.removeFailure(ssid: ssid)
     }
     /// One automatic preset sync in flight per board, keyed by hardware ID
     /// rather than by service name: the sync writes to a physical board.
@@ -358,6 +362,23 @@ final class PanelManager: ObservableObject {
             .map(\.snapshot)
         sortPanels()
         selectedServiceName = panels.first?.serviceName
+        // The immediately prior build's one combined login-Keychain item
+        // moves once into the app's Data Protection Keychain. A failed move
+        // retains its decoded data for this launch, so saved WiFi networks do
+        // not disappear while the source item remains intact.
+        do {
+            try KeychainCredentialVault.shared.prepareForLaunch()
+            resolve(.credentialTransition, source: Self.credentialTransitionIssueSource)
+        } catch {
+            report(
+                .credentialTransition,
+                source: Self.credentialTransitionIssueSource,
+                detail: "Saved WiFi and OTA passwords are still in their existing "
+                    + "Keychain record. macOS did not allow the one-time move into "
+                    + "ESPDisplaySender's protected Keychain. Relaunch after allowing "
+                    + "the one request, or keep using the saved passwords this launch.",
+                technicalDetail: error.localizedDescription)
+        }
         applySavedNetworkNames(WifiCredentialStore.savedNetworkNames())
         usbDevices = WifiConfigUI.candidatePorts().map {
             WifiConfigUI.USBDeviceOption(path: $0)
@@ -378,13 +399,15 @@ final class PanelManager: ObservableObject {
             Task { @MainActor in
                 self?.refreshUSBPorts()
                 self?.refreshAudioDevices()
-                self?.refreshMacPermissionGuidance()
+                // Privacy status reads can appear to tccd as access-request
+                // IPC. They run only at launch, when this app becomes active,
+                // or after a user presses a permission action - never on the
+                // two-second housekeeping timer.
                 self?.sortPanels()
                 self?.objectWillChange.send()
             }
         }
         refreshMacPermissionGuidance()
-        scheduleInitialLocalNetworkCheck()
         // Dragging the marquee streams straight through to whichever panel it
         // was opened for.
         regionSelector.onChange = { [weak self] region in
@@ -703,49 +726,43 @@ final class PanelManager: ObservableObject {
     /// granted while the existing process still needs a relaunch.
     func recordScreenCaptureAttempt(succeeded: Bool, technicalDetail: String? = nil) {
         screenRecordingPermissionState.observeCaptureResult(
-            works: succeeded, authorized: CGPreflightScreenCaptureAccess())
+            works: succeeded, authorized: ScreenCapturePermissionGate.isAuthorized)
         screenRecordingTechnicalDetail = technicalDetail
         refreshPermissionChecklist()
     }
 
-    /// Re-check grants when the app returns from System Settings and on the
-    /// existing two-second housekeeping timer. The screen-capture probe runs
-    /// only while there is an unresolved capture issue.
-    func refreshMacPermissionGuidance(forceLocalNetworkProbe: Bool = false) {
+    /// Re-check grants at launch, when the app returns from System Settings,
+    /// and after an explicit permission action. They are intentionally not
+    /// sampled on the two-second housekeeping timer: ScreenCaptureKit routes
+    /// a denied preflight through replayd, which cannot show a prompt.
+    func refreshMacPermissionGuidance(
+        forceLocalNetworkProbe: Bool = false, checkSystemAudio: Bool = true
+    ) {
         if forceLocalNetworkProbe
             || issues.contains(where: { $0.issue == .localNetwork })
-            || (localNetworkChecklistStatus == nil
-                && permissionPromptHistory.wasRequested(.localNetwork))
         {
             refreshLocalNetworkAuthorization(forceLocalNetworkProbe)
         }
         refreshMediaKeyAuthorization()
-        refreshSystemAudioRecordingAuthorization()
+        if checkSystemAudio {
+            refreshSystemAudioRecordingAuthorization()
+        }
+        refreshCameraExtensionStatus()
 
         let authorized = CGPreflightScreenCaptureAccess()
+        ScreenCapturePermissionGate.observeAuthorization(authorized)
         screenRecordingPermissionState.observeAuthorization(authorized)
+        if screenRecordingPermissionState == .ready {
+            _ = picker?.activate()
+        } else {
+            picker?.deactivate()
+        }
         guard screenRecordingPermissionState != .ready else {
             screenRecordingTechnicalDetail = nil
             refreshPermissionChecklist()
             return
         }
         refreshPermissionChecklist()
-        if authorized {
-            Task { [weak self] in
-                do {
-                    _ = try await SCShareableContent.excludingDesktopWindows(
-                        false, onScreenWindowsOnly: false)
-                    await MainActor.run {
-                        self?.recordScreenCaptureAttempt(succeeded: true)
-                    }
-                } catch {
-                    await MainActor.run {
-                        self?.recordScreenCaptureAttempt(
-                            succeeded: false, technicalDetail: error.localizedDescription)
-                    }
-                }
-            }
-        }
     }
 
     /// Ask macOS itself for a grant when it still has a prompt to show.
@@ -754,29 +771,34 @@ final class PanelManager: ObservableObject {
         requestPermissionAccess(for: permission)
     }
 
-    /// The checklist's action path. It records the attempt under this exact
-    /// signed app identity, so a new signature correctly starts at "Not yet
-    /// asked" instead of inheriting a stale denial label.
+    /// The checklist's action path. Each action invokes the matching macOS
+    /// API, while the row itself remains driven only by the API's live state.
     func requestPermissionAccess(for permission: MacPermission) {
         guard permission != .cameraExtension || !CameraExtensionInstaller.isActivationPending
         else {
-            operationOutcome = .success(
-                "Camera extension request is pending",
-                "Approve ESPDisplay Camera Extension in System Settings, then return here.")
+            operationOutcome = nil
             return
         }
         activePermissionRequest = permission
         switch permission {
         case .screenRecording:
+            if automaticPermissionSequence,
+               PermissionRequestSequence.waitsForForegroundActivationAfterRequest(permission)
+            {
+                automaticRequestAwaitingAppActivation = permission
+            }
             _ = CGRequestScreenCaptureAccess()
-            permissionPromptHistory.markRequested(permission)
             refreshMacPermissionGuidance()
         case .accessibility:
-            requestMediaKeyAuthorization()
-            permissionPromptHistory.markRequested(permission)
+            if automaticPermissionSequence,
+               PermissionRequestSequence.waitsForForegroundActivationAfterRequest(permission)
+            {
+                automaticRequestAwaitingAppActivation = permission
+            }
+            requestAccessibilityPermission()
+            refreshMacPermissionGuidance()
         case .systemAudioRecording:
             systemAudioChecklistStatus = .checking
-            permissionPromptHistory.markRequested(permission)
             let completeTCCRequest: @Sendable (Bool) -> Void = { [weak self] granted in
                 Task { @MainActor in
                     guard let self else { return }
@@ -799,63 +821,26 @@ final class PanelManager: ObservableObject {
                 }
             }
         case .localNetwork:
-            permissionPromptHistory.markRequested(permission)
-            localNetworkInitialCheckTask?.cancel()
-            localNetworkInitialCheckTask = nil
-            localNetworkChecklistStatus = nil
+            localNetworkChecklistStatus = .checking
             localNetworkTechnicalDetail = nil
             requestLocalNetworkAuthorization()
             unblockForegroundStartup()
             refreshPermissionChecklist()
         case .cameraExtension:
-            // The request may wait for approval across the point where the
-            // app is closed. Record the real activation attempt immediately,
-            // rather than forgetting it until macOS later sends a callback.
-            permissionPromptHistory.markRequested(permission)
+            if CameraExtensionInstaller.isWaitingForUserApproval {
+                NSWorkspace.shared.open(permission.settingsURL)
+                operationOutcome = nil
+                refreshPermissionChecklist()
+                return
+            }
             cameraExtensionNeedsApproval = false
             cameraExtensionNeedsRestart = false
+            cameraExtensionStatusIsChecking = true
             cameraExtensionTechnicalDetail = nil
             CameraExtensionInstaller.activate { [weak self] result in
                 Task { @MainActor in
                     guard let self else { return }
-                    switch result {
-                    case .installed:
-                        self.cameraExtensionNeedsApproval = false
-                        self.cameraExtensionActivated = true
-                        self.cameraExtensionNeedsRestart = false
-                        self.cameraExtensionTechnicalDetail = nil
-                        self.operationOutcome = .success(
-                            "Camera extension installed",
-                            "ESPDisplay XIAOML Camera is ready in video apps.")
-                    case .needsUserApproval:
-                        self.cameraExtensionNeedsApproval = true
-                        self.cameraExtensionNeedsRestart = false
-                        self.operationOutcome = .success(
-                            "Camera extension needs approval",
-                            "Approve ESPDisplay Camera Extension in System Settings, "
-                                + "then return here.")
-                    case .needsRestart:
-                        self.cameraExtensionNeedsApproval = false
-                        self.cameraExtensionActivated = false
-                        self.cameraExtensionNeedsRestart = true
-                        self.cameraExtensionTechnicalDetail = nil
-                        self.operationOutcome = .success(
-                            "Camera extension approved",
-                            "Restart your Mac before ESPDisplay XIAOML Camera appears in video apps.")
-                    case .requestInProgress:
-                        self.operationOutcome = .success(
-                            "Camera extension request is pending",
-                            "Approve ESPDisplay Camera Extension in System Settings, "
-                                + "then return here.")
-                    case .failed(let error):
-                        self.cameraExtensionNeedsApproval = true
-                        self.cameraExtensionNeedsRestart = false
-                        self.cameraExtensionTechnicalDetail = error.localizedDescription
-                        self.operationOutcome = .failure(
-                            "Camera extension could not install",
-                            error.localizedDescription)
-                    }
-                    self.refreshPermissionChecklist()
+                    self.observeCameraExtensionStatus(result, reportsFailure: true)
                 }
             }
         }
@@ -867,23 +852,19 @@ final class PanelManager: ObservableObject {
     func observeLocalNetworkPermission(_ observation: LocalNetworkPermissionProbe.Observation) {
         switch observation {
         case .policyDenied(let technicalDetail):
-            localNetworkInitialCheckTask?.cancel()
-            localNetworkInitialCheckTask = nil
-            permissionPromptHistory.markRequested(.localNetwork)
+            LocalNetworkLiveAccessHistory.record(allowed: false)
             localNetworkChecklistStatus = .blocked
             localNetworkTechnicalDetail = technicalDetail
             refreshPermissionChecklist()
         case .browserReady:
             break
         case .unicastPathReady:
-            localNetworkInitialCheckTask?.cancel()
-            localNetworkInitialCheckTask = nil
+            LocalNetworkLiveAccessHistory.record(allowed: true)
             localNetworkChecklistStatus = .allowed
             localNetworkTechnicalDetail = nil
             refreshPermissionChecklist()
         case .deviceAnswered:
-            localNetworkInitialCheckTask?.cancel()
-            localNetworkInitialCheckTask = nil
+            LocalNetworkLiveAccessHistory.record(allowed: true)
             localNetworkChecklistStatus = .allowed
             localNetworkTechnicalDetail = nil
             refreshPermissionChecklist()
@@ -907,8 +888,73 @@ final class PanelManager: ObservableObject {
         refreshPermissionChecklist()
     }
 
+    /// Reads the system extension registry on launch and app activation. The
+    /// virtual camera device can be absent until a client opens it, so device
+    /// discovery is not used as a permission status signal.
+    private func refreshCameraExtensionStatus() {
+        guard AppBuildFeatures.includesCameraExtension,
+              !CameraExtensionInstaller.isActivationPending,
+              !CameraExtensionInstaller.isInspectionPending
+        else { return }
+        cameraExtensionStatusIsChecking = true
+        inspectCameraExtension { [weak self] result in
+            Task { @MainActor in
+                self?.observeCameraExtensionStatus(result, reportsFailure: false)
+            }
+        }
+    }
+
+    private func observeCameraExtensionStatus(
+        _ result: CameraExtensionActivation,
+        reportsFailure: Bool
+    ) {
+        switch result {
+        case .installed:
+            cameraExtensionNeedsApproval = false
+            cameraExtensionActivated = true
+            cameraExtensionNeedsRestart = false
+            cameraExtensionStatusIsChecking = false
+            cameraExtensionTechnicalDetail = nil
+            operationOutcome = nil
+        case .notInstalled:
+            cameraExtensionNeedsApproval = false
+            cameraExtensionActivated = false
+            cameraExtensionNeedsRestart = false
+            cameraExtensionStatusIsChecking = false
+            cameraExtensionTechnicalDetail = nil
+        case .needsUserApproval:
+            cameraExtensionNeedsApproval = true
+            cameraExtensionActivated = false
+            cameraExtensionNeedsRestart = false
+            cameraExtensionStatusIsChecking = false
+            operationOutcome = nil
+        case .needsRestart:
+            cameraExtensionNeedsApproval = false
+            cameraExtensionActivated = false
+            cameraExtensionNeedsRestart = true
+            cameraExtensionStatusIsChecking = false
+            cameraExtensionTechnicalDetail = nil
+            operationOutcome = nil
+        case .requestInProgress:
+            cameraExtensionStatusIsChecking = true
+            operationOutcome = nil
+        case .failed(let error):
+            cameraExtensionNeedsApproval = true
+            cameraExtensionActivated = false
+            cameraExtensionNeedsRestart = false
+            cameraExtensionStatusIsChecking = false
+            cameraExtensionTechnicalDetail = error.localizedDescription
+            if reportsFailure {
+                operationOutcome = .failure(
+                    "Camera extension could not install",
+                    error.localizedDescription)
+            }
+        }
+        refreshPermissionChecklist()
+    }
+
     /// The same source powers the checklist and the in-context banners. A
-    /// "not yet asked" row is proactive guidance, not an error banner.
+    /// status is published only after its matching macOS check has answered.
     private func refreshPermissionChecklist() {
         let next = MacPermission.allCases
             .filter(\.isAvailableInThisBuild)
@@ -927,23 +973,9 @@ final class PanelManager: ObservableObject {
             .filter { $0.permission.isRequiredAtLaunch }
             .allSatisfy(\.isReady)
         if allRequiredReady {
-            permissionChecklistPresented = false
-            permissionChecklistDismissedThisLaunch = false
             automaticPermissionSequence = false
             activePermissionRequest = nil
             unblockForegroundStartup()
-        } else if PermissionChecklistPresentation.shouldPresent(for: next),
-                  !permissionChecklistDismissedThisLaunch
-        {
-            permissionChecklistPresented = true
-        } else if !PermissionChecklistPresentation.shouldPresent(for: next) {
-            permissionChecklistPresented = false
-            // A previously requested Local Network grant is rechecked in the
-            // background, so its unicast probe can prove or disprove it
-            // without holding startup or flashing a sheet.
-            if permissionPromptHistory.wasRequested(.localNetwork) {
-                unblockForegroundStartup()
-            }
         }
         advanceAutomaticPermissionSequence()
     }
@@ -956,21 +988,9 @@ final class PanelManager: ObservableObject {
         let requiresRestart: Bool
         switch permission {
         case .screenRecording:
-            switch screenRecordingPermissionState {
-            case .ready:
-                status = .allowed
-                requiresRelaunch = false
-                requiresRestart = false
-            case .needsAccess:
-                status = permissionPromptHistory.wasRequested(permission)
-                    ? .blocked : .notYetAsked
-                requiresRelaunch = false
-                requiresRestart = false
-            case .grantedNeedsRelaunch:
-                status = .allowed
-                requiresRelaunch = true
-                requiresRestart = false
-            }
+            status = screenRecordingPermissionState.checklistStatus
+            requiresRelaunch = screenRecordingPermissionState == .grantedNeedsRelaunch
+            requiresRestart = false
         case .localNetwork:
             status = localNetworkChecklistStatus ?? .checking
             requiresRelaunch = false
@@ -980,18 +1000,16 @@ final class PanelManager: ObservableObject {
             requiresRelaunch = false
             requiresRestart = false
         case .accessibility:
-            status = mediaKeysAuthorized()
-                ? .allowed
-                : (permissionPromptHistory.wasRequested(permission)
-                    ? .blocked : .notYetAsked)
+            status = accessibilityPermissionIsAllowed ? .allowed : .blocked
             requiresRelaunch = false
             requiresRestart = false
         case .cameraExtension:
-            status = (cameraExtensionActivated || CameraExtensionInstaller.isInstalled)
+            status = cameraExtensionActivated
                 ? .allowed
-                : (cameraExtensionNeedsApproval
-                    || permissionPromptHistory.wasRequested(permission)
-                    ? .blocked : .notYetAsked)
+                : (cameraExtensionStatusIsChecking
+                    ? .checking
+                    : (cameraExtensionNeedsApproval
+                        ? .blocked : .notYetAsked))
             requiresRelaunch = false
             requiresRestart = cameraExtensionNeedsRestart
         }
@@ -1033,63 +1051,54 @@ final class PanelManager: ObservableObject {
             permissionState: state)
     }
 
-    /// A Local Network request is only known to be missing after this short
-    /// initial grace period. A device that reports a usable unicast path first
-    /// makes the row Allowed without ever showing the launch sheet.
-    private func scheduleInitialLocalNetworkCheck() {
-        guard !permissionPromptHistory.wasRequested(.localNetwork) else { return }
-        localNetworkInitialCheckTask?.cancel()
-        let startedAt = localNetworkInitialCheckStartedAt
-        localNetworkInitialCheckTask = Task { [weak self] in
-            let nanoseconds = UInt64(Self.localNetworkInitialGracePeriod * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: nanoseconds)
-            guard !Task.isCancelled, let self,
-                  self.localNetworkChecklistStatus == nil,
-                  self.localNetworkInitialCheckStartedAt == startedAt,
-                  !self.permissionPromptHistory.wasRequested(.localNetwork)
-            else { return }
-            self.localNetworkChecklistStatus = .notYetAsked
-            self.refreshPermissionChecklist()
-        }
-    }
-
     /// Prepares the separately signed LAN diagnostic to make its one intended
-    /// request from a visible, explained checklist. Its preview manager does
-    /// not run the production initializer, so it deliberately has no normal
-    /// launch grace task to promote this row from Checking.
+    /// request from Settings > Permissions.
     func prepareLocalNetworkTestPermissionRequest() {
-        localNetworkInitialCheckTask?.cancel()
-        localNetworkInitialCheckTask = nil
         localNetworkChecklistStatus = .notYetAsked
-        permissionChecklistDismissedThisLaunch = false
         refreshPermissionChecklist()
     }
 
-    /// Called once the first interactive window has a checklist on screen.
-    /// The next row is requested only after the previous row really becomes
-    /// usable, so macOS never receives a stack of simultaneous prompts.
-    func beginAutomaticPermissionRequests() {
-        permissionChecklistDismissedThisLaunch = false
+    /// Arms first-launch requests. The Settings page starts the sequence after
+    /// its explanatory rows are on screen; background launches never arm it.
+    func prepareLaunchPermissionSetup() -> Bool {
+        guard PermissionChecklistLaunchDecision.shouldOpenSettings(
+            for: permissionChecklist,
+            localNetworkWasPreviouslyVerified:
+                LocalNetworkLiveAccessHistory.wasPreviouslyVerified)
+        else {
+            unblockForegroundStartup()
+            return false
+        }
+        launchPermissionSetupPending = true
+        return true
+    }
+
+    /// Called by Settings > Permissions once it is visible. The next request
+    /// runs only after the previous one has a live terminal result, so macOS
+    /// never receives a stack of prompts.
+    func permissionsSettingsDidAppear() {
+        guard launchPermissionSetupPending else { return }
+        launchPermissionSetupPending = false
         automaticPermissionSequence = true
         refreshPermissionChecklist()
     }
 
-    func dismissPermissionChecklist() {
-        automaticPermissionSequence = false
-        permissionChecklistDismissedThisLaunch = true
-        permissionChecklistPresented = false
-        unblockForegroundStartup()
-    }
-
-    /// Settings > Permissions is the permanent version of the same checklist.
-    /// Opening it closes the modal and leaves the user in one place to finish
-    /// setup, instead of displaying two copies at once.
-    func openPermissionsSettings() {
-        dismissPermissionChecklist()
+    /// A Screen Recording or Accessibility request does not report whether its
+    /// native prompt was dismissed. Keep the automatic sequence on that one
+    /// row until the app returns to the foreground and macOS can be read
+    /// again, rather than stacking the next request behind an open prompt.
+    func resumeAutomaticPermissionSequenceAfterAppActivation() {
+        guard automaticRequestAwaitingAppActivation != nil else { return }
+        automaticRequestAwaitingAppActivation = nil
+        refreshPermissionChecklist()
     }
 
     var cameraExtensionActivationPending: Bool {
         CameraExtensionInstaller.isActivationPending
+    }
+
+    var localNetworkWasPreviouslyVerified: Bool {
+        LocalNetworkLiveAccessHistory.wasPreviouslyVerified
     }
 
     /// Foreground capture and discovery wait until the visible checklist has
@@ -1113,26 +1122,25 @@ final class PanelManager: ObservableObject {
 
     private func advanceAutomaticPermissionSequence() {
         guard automaticPermissionSequence else { return }
+        guard automaticRequestAwaitingAppActivation == nil else { return }
         if let activePermissionRequest,
            let active = permissionChecklist.first(where: {
                $0.permission == activePermissionRequest
            })
         {
-            if activePermissionRequest == .localNetwork, active.status == .blocked {
-                // DNS-SD has delivered a terminal policy denial. Keep the
-                // Local Network row and its Settings-only recovery visible,
-                // but continue to the independent Camera Extension request.
+            if PermissionRequestSequence.shouldAdvanceAfter(active) {
                 self.activePermissionRequest = nil
             } else {
-                guard active.isReady else { return }
-                self.activePermissionRequest = nil
+                return
             }
         }
         let requiredItems = permissionChecklist.filter {
             $0.permission.isRequiredAtLaunch
         }
-        guard let permission = PermissionRequestSequence.nextAutomaticRequest(in: requiredItems)
+        guard let permission = PermissionRequestSequence.nextAutomaticRequest(
+            in: requiredItems, attempted: automaticPermissionsRequested)
         else { return }
+        automaticPermissionsRequested.insert(permission)
         activePermissionRequest = permission
         if permission == .localNetwork {
             unblockForegroundStartup()

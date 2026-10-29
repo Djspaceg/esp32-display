@@ -4,6 +4,14 @@ import XCTest
 @testable import SenderProtocol
 
 final class CameraStreamTests: XCTestCase {
+    func testCameraIdentityDoesNotMistakeTheLegacyExtensionForTheNewOne() {
+        XCTAssertFalse(CameraExtensionBridge.isOurCamera(
+            localizedName: CameraExtensionBridge.deviceName, modelID: "XIAOML Kit"))
+        XCTAssertTrue(CameraExtensionBridge.isOurCamera(
+            localizedName: CameraExtensionBridge.deviceName,
+            modelID: CameraExtensionBridge.deviceModelID))
+    }
+
     func testAssemblerWaitsForAllFragmentsAndReassemblesInOrder() throws {
         let jpeg = Data((0..<1_400).map { UInt8($0 & 0xff) })
         let packets = CameraProtocol.fragments(for: jpeg, resolution: .vga, frameID: 9)

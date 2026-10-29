@@ -165,10 +165,10 @@ final class WifiNetworkSettingsTests: XCTestCase {
             previewPanels: [], savedNetworkNames: [], usbSerialPorts: [])
         manager.useWifiCredentials(store)
         manager.wifiCredentialWriter = { _ in
-            XCTFail("the migration wrote a credential"); return false
+            XCTFail("the migration wrote a credential"); return "unexpected write"
         }
         manager.wifiCredentialRemover = { _ in
-            XCTFail("the migration removed a credential"); return false
+            XCTFail("the migration removed a credential"); return "unexpected removal"
         }
 
         manager.applySavedNetworkNames(store.names)

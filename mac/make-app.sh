@@ -53,7 +53,23 @@ WORKSPACE="$(cd "$HERE/.." && pwd)"
 PROJECT="$HERE/ESPDisplaySender/ESPDisplaySender.xcodeproj"
 SCHEME="ESPDisplaySender App"
 APP_PARENT="/Applications"
-if [[ "${ESPDISP_LAN_TEST_APP:-}" == "1" ]]; then
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ "${ESPDISP_SCREEN_RECORDING_PROBE_APP:-}" == "1" ]]; then
+  APP_NAME="Screen Recording Probe"
+  APP_BUNDLE_IDENTIFIER="com.resourcefork.espdisplay.srprobe"
+  APP="$APP_PARENT/$APP_NAME.app"
+  STAGED_APP="$APP_PARENT/.ScreenRecordingProbe.app.staged"
+  LEGACY_APP=""
+  export ESPDISP_SKIP_FIRMWARE=1
+  export ESPDISP_SKIP_AUDIO_DRIVER=1
+  BUILD_SETTINGS=(
+    "APP_BUNDLE_IDENTIFIER=$APP_BUNDLE_IDENTIFIER"
+    "APP_PRODUCT_NAME=$APP_NAME"
+    "APP_INFOPLIST_FILE=$HERE/ScreenRecordingProbe-Info.plist"
+    "ESPDISP_SCREEN_RECORDING_PROBE=SCREEN_RECORDING_PROBE"
+    "ESPDISP_SKIP_CAMERA_EXTENSION=1"
+  )
+elif [[ "${ESPDISP_LAN_TEST_APP:-}" == "1" ]]; then
   APP_NAME="ESPDisplaySender LAN Test"
   APP_BUNDLE_IDENTIFIER="com.espdisplay.sender.lantest"
   APP="$APP_PARENT/$APP_NAME.app"
@@ -106,14 +122,35 @@ fi
 # CFBundleVersion requires, and monotonic, so a higher number is always the newer
 # build. A tree with uncommitted changes gets the same count with a trailing .1,
 # which is still numeric and still sorts above the clean commit it came from.
+# When rebuilding the same source while that number is already installed, advance
+# the numeric suffix so Finder and the app can distinguish the replacement.
 #
 # The marketing version (MARKETING_VERSION, 1.1) is deliberately NOT touched: that
 # one is the user's to decide.
-BUILD_NUMBER="$(git -C "$HERE/.." rev-list --count HEAD)"
+BASE_BUILD_NUMBER="$(git -C "$HERE/.." rev-list --count HEAD)"
+BUILD_REVISION=0
 SOURCE_COMMIT="$(git -C "$HERE/.." rev-parse --short HEAD)"
 if [[ -n "$(git -C "$HERE/.." status --porcelain --untracked-files=no)" ]]; then
-  BUILD_NUMBER="${BUILD_NUMBER}.1"
+  BUILD_REVISION=1
   SOURCE_COMMIT="${SOURCE_COMMIT}-dirty"
+fi
+if [[ -f "$APP/Contents/Info.plist" ]]; then
+  INSTALLED_BUILD_NUMBER="$(plutil -extract CFBundleVersion raw -o - \
+    "$APP/Contents/Info.plist" 2>/dev/null || true)"
+  if [[ "$INSTALLED_BUILD_NUMBER" == "$BASE_BUILD_NUMBER" ]]; then
+    INSTALLED_REVISION=0
+  elif [[ "$INSTALLED_BUILD_NUMBER" == "$BASE_BUILD_NUMBER".* ]]; then
+    INSTALLED_REVISION="${INSTALLED_BUILD_NUMBER#"$BASE_BUILD_NUMBER".}"
+  else
+    INSTALLED_REVISION=""
+  fi
+  if [[ "$INSTALLED_REVISION" == <-> && "$INSTALLED_REVISION" -ge "$BUILD_REVISION" ]]; then
+    BUILD_REVISION=$((INSTALLED_REVISION + 1))
+  fi
+fi
+BUILD_NUMBER="$BASE_BUILD_NUMBER"
+if (( BUILD_REVISION > 0 )); then
+  BUILD_NUMBER="${BASE_BUILD_NUMBER}.${BUILD_REVISION}"
 fi
 echo "build number $BUILD_NUMBER from source $SOURCE_COMMIT"
 
@@ -137,6 +174,18 @@ fi
 discard_scratch "$STAGED_APP" "$APP_PARENT" "staged app"
 ditto "$BUILT_APP" "$STAGED_APP"
 codesign --verify --deep --strict --verbose=1 "$STAGED_APP"
+
+# Xcode build products can be registered by LaunchServices even though they
+# are immediately discarded. Those dead registrations can later be chosen as
+# the display label for a privacy entry. Keep only the installed app
+# registered. The staging path is deliberately hidden and was never
+# registered, so asking LaunchServices to unregister it fails its scan.
+[[ -x "$LSREGISTER" ]] || {
+  echo "error: LaunchServices register tool is missing: $LSREGISTER" >&2
+  exit 1
+}
+"$LSREGISTER" -u "$BUILT_APP"
+echo "unregistered the transient Xcode build product from LaunchServices"
 
 # The outgoing install is moved to the Trash rather than deleted, so a bad
 # build is recoverable and nothing recursive ever runs against /Applications.
@@ -172,10 +221,18 @@ fi
 mv -- "$STAGED_APP" "$APP"
 
 codesign --display --verbose=2 "$APP"
+if ! codesign -d --entitlements :- "$APP" 2>&1 \
+  | grep -Fq "<string>4D22XL743H.com.resourcefork.espdisplay</string>"; then
+  echo "error: installed app lacks its Data Protection Keychain access group" >&2
+  exit 1
+fi
+echo "verified Data Protection Keychain access group"
 echo "built and Apple Development signed $APP"
 if [[ -n "$LEGACY_APP" ]]; then
   echo "open manager:      open $APP"
   echo "install at login:  $HERE/install-launch-agent.sh"
+elif [[ "${ESPDISP_SCREEN_RECORDING_PROBE_APP:-}" == "1" ]]; then
+  echo "Screen Recording probe only: launch $APP manually, then press Request Screen Recording Access."
 else
   echo "Local Network test only: launch $APP manually to test its first-use prompt."
 fi

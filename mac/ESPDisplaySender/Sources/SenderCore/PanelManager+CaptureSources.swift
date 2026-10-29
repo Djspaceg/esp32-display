@@ -442,7 +442,12 @@ extension PanelManager {
         guard let picker else { return }
         pickerTarget = serviceName
         selectedServiceName = serviceName
-        picker.present(style: style)
+        guard picker.present(style: style) else {
+            recordScreenCaptureAttempt(
+                succeeded: false,
+                technicalDetail: ScreenRecordingAuthorizationRequired().localizedDescription)
+            return
+        }
     }
 
     func setPaused(_ paused: Bool, for serviceName: String) {

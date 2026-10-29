@@ -127,7 +127,7 @@ struct WifiNetworksSection: View {
                 + "networks, in this order, as the presets its own picker "
                 + "offers; drag a network to change its slot. A device's active "
                 + "network stays in its slot, so a copy never restarts it. "
-                + "Passwords are kept in your login Keychain, and changes here "
+                + "Passwords are kept in the app's protected Keychain, and changes here "
                 + "take effect immediately.")
         })
         if let current = editor {
@@ -235,7 +235,7 @@ struct WifiNetworksSection: View {
     /// different: with nothing saved the copy does nothing at all, so the
     /// displays keep what they hold rather than being erased.
     private var removalMessage: String {
-        let keychain = "This deletes the saved password from your login Keychain"
+        let keychain = "This deletes the saved password from the app's protected Keychain"
         if manager.savedNetworkNames.count <= 1 {
             return keychain + ". It is the last saved network, so nothing is "
                 + "copied to the devices afterwards and each keeps the presets "
@@ -296,7 +296,7 @@ struct WifiNetworksSection: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
         } else if current.passwordUnreadable, current.password.isEmpty {
-            Text("The saved password could not be read from your login Keychain, "
+            Text("The saved password could not be read from the app's protected Keychain, "
                 + "so it is not shown here. Enter it again to save. To make this "
                 + "an open network, remove it and add it with no password.")
                 .font(.callout)
@@ -304,7 +304,7 @@ struct WifiNetworksSection: View {
         } else {
             Text(current.password.isEmpty
                 ? "With no password, this is saved as an open network."
-                : "Kept in your login Keychain.")
+                : "Kept in the app's protected Keychain.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }

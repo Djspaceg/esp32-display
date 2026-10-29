@@ -39,6 +39,8 @@
 	     audio-input entitlement. -->
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>ESPDisplaySender plays this Mac's sound on your ESP devices' speakers.</string>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>ESPDisplaySender installs a camera extension so device camera frames appear in other video apps.</string>
 	<!-- Background by default; the manager opts into Dock/menu presence only while visible. -->
 	<key>LSUIElement</key>
 	<true/>

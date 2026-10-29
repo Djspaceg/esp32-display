@@ -169,10 +169,13 @@ final class FirmwareUpdateTests: XCTestCase {
             manager.rememberedOTAPassword(for: "020000123456"), "a-real-password")
     }
 
-    /// The service name is fixed, and the account is the hardware ID. Pinned
-    /// because changing either one orphans every password already stored.
-    func testKeychainServiceNameIsPinned() {
-        XCTAssertEqual(KeychainOTAPasswordStore.service, "com.espdisplay.sender.ota")
+    /// WiFi and OTA passwords now share one item under the permanent app
+    /// identifier. The hardware ID remains only the OTA map key inside it.
+    func testKeychainCredentialRecordUsesTheNewAppIdentity() {
+        XCTAssertEqual(
+            KeychainOTAPasswordStore.service,
+            "com.resourcefork.espdisplay.credentials")
+        XCTAssertEqual(KeychainOTAPasswordStore.account, "credentials-v1")
     }
 
     func testUntickingRememberForgetsTheStoredPassword() {
@@ -1363,5 +1366,236 @@ final class FirmwareUpdateTests: XCTestCase {
                 : FirmwareBundle.magic)
             + lengthLine + encoded + area
         return try FirmwareBundle.read(file)
+    }
+}
+
+final class KeychainCredentialVaultTests: XCTestCase {
+    func testCombinedStoreKeepsWiFiAndOTAPasswordsInOneDataProtectionRecord() throws {
+        let keychain = InMemoryGenericPasswordKeychain()
+        let vault = KeychainCredentialVault(keychain: keychain)
+
+        try vault.saveWiFiCredential(SavedWiFiCredential(ssid: "Studio", password: "wifi-pass"))
+        try vault.storeOTAPassword("ota-pass", for: "020000123456")
+
+        let record = try XCTUnwrap(
+            keychain.data(
+                service: KeychainCredentialVault.service,
+                account: KeychainCredentialVault.account,
+                in: .dataProtection))
+        let payload = try JSONDecoder().decode(CredentialVaultPayload.self, from: record)
+        XCTAssertEqual(payload.version, CredentialVaultPayload.currentVersion)
+        XCTAssertEqual(payload.wifiPasswords, ["Studio": "wifi-pass"])
+        XCTAssertEqual(payload.otaPasswords, ["020000123456": "ota-pass"])
+        XCTAssertEqual(
+            keychain.allRecords.filter { $0.service == KeychainCredentialVault.service }.count,
+            1)
+    }
+
+    func testOneLoginCombinedRecordMovesOnlyAfterTheDataProtectionCopyVerifies() throws {
+        let payload = CredentialVaultPayload(
+            wifiPasswords: ["Studio": "wifi-pass"],
+            otaPasswords: ["020000123456": "ota-pass"])
+        let data = try JSONEncoder().encode(payload)
+        let keychain = InMemoryGenericPasswordKeychain(records: [
+            .init(
+                service: KeychainCredentialVault.service,
+                account: KeychainCredentialVault.account,
+                data: data,
+                store: .login),
+        ])
+        let vault = KeychainCredentialVault(keychain: keychain)
+
+        try vault.prepareForLaunch()
+
+        XCTAssertEqual(try vault.savedNetworkNames(), ["Studio"])
+        XCTAssertEqual(try vault.otaPassword(for: "020000123456"), "ota-pass")
+        XCTAssertEqual(
+            try keychain.data(
+                service: KeychainCredentialVault.service,
+                account: KeychainCredentialVault.account,
+                in: .dataProtection),
+            data)
+        XCTAssertNil(try keychain.data(
+            service: KeychainCredentialVault.service,
+            account: KeychainCredentialVault.account,
+            in: .login))
+    }
+
+    func testFailedDataProtectionMovePreservesTheLoginRecord() throws {
+        let payload = CredentialVaultPayload(wifiPasswords: ["Studio": "wifi-pass"])
+        let data = try JSONEncoder().encode(payload)
+        let keychain = InMemoryGenericPasswordKeychain(records: [
+            .init(
+                service: KeychainCredentialVault.service,
+                account: KeychainCredentialVault.account,
+                data: data,
+                store: .login),
+        ])
+        keychain.failWritesForStore = .dataProtection
+        let vault = KeychainCredentialVault(keychain: keychain)
+
+        XCTAssertThrowsError(try vault.prepareForLaunch())
+        XCTAssertEqual(
+            try keychain.data(
+                service: KeychainCredentialVault.service,
+                account: KeychainCredentialVault.account,
+                in: .login),
+            data)
+        XCTAssertNil(try keychain.data(
+            service: KeychainCredentialVault.service,
+            account: KeychainCredentialVault.account,
+            in: .dataProtection))
+    }
+
+    func testFailedLoginRemovalPreservesTheLoginRecordAndRemovesTheNewCopy() throws {
+        let payload = CredentialVaultPayload(wifiPasswords: ["Studio": "wifi-pass"])
+        let data = try JSONEncoder().encode(payload)
+        let keychain = InMemoryGenericPasswordKeychain(records: [
+            .init(
+                service: KeychainCredentialVault.service,
+                account: KeychainCredentialVault.account,
+                data: data,
+                store: .login),
+        ])
+        keychain.failRemovalsForStore = .login
+        let vault = KeychainCredentialVault(keychain: keychain)
+
+        XCTAssertThrowsError(try vault.prepareForLaunch())
+        XCTAssertEqual(
+            try keychain.data(
+                service: KeychainCredentialVault.service,
+                account: KeychainCredentialVault.account,
+                in: .login),
+            data)
+        XCTAssertNil(try keychain.data(
+            service: KeychainCredentialVault.service,
+            account: KeychainCredentialVault.account,
+            in: .dataProtection))
+    }
+
+    func testFailedTransitionDoesNotReadTheLoginKeychainAgainThisLaunch() throws {
+        let payload = CredentialVaultPayload(wifiPasswords: ["Studio": "wifi-pass"])
+        let keychain = InMemoryGenericPasswordKeychain(records: [
+            .init(
+                service: KeychainCredentialVault.service,
+                account: KeychainCredentialVault.account,
+                data: try JSONEncoder().encode(payload),
+                store: .login),
+        ])
+        keychain.failWritesForStore = .dataProtection
+        let vault = KeychainCredentialVault(keychain: keychain)
+
+        XCTAssertEqual(try vault.savedNetworkNames(), ["Studio"])
+        XCTAssertEqual(try vault.savedNetworkNames(), ["Studio"])
+
+        XCTAssertEqual(keychain.dataReadStores, [.dataProtection, .login])
+    }
+
+    func testFailedTransitionKeepsSavedNetworkNamesAvailableReadOnly() throws {
+        let payload = CredentialVaultPayload(wifiPasswords: ["Studio": "wifi-pass"])
+        let keychain = InMemoryGenericPasswordKeychain(records: [
+            .init(
+                service: KeychainCredentialVault.service,
+                account: KeychainCredentialVault.account,
+                data: try JSONEncoder().encode(payload),
+                store: .login),
+        ])
+        keychain.failWritesForStore = .dataProtection
+        let vault = KeychainCredentialVault(keychain: keychain)
+
+        XCTAssertEqual(try vault.savedNetworkNames(), ["Studio"])
+        XCTAssertThrowsError(try vault.saveWiFiCredential(
+            SavedWiFiCredential(ssid: "Workshop", password: "new-pass")))
+        XCTAssertEqual(keychain.dataReadStores, [.dataProtection, .login])
+    }
+
+    func testNormalLaunchReadsOnlyTheDataProtectionEntryOnce() throws {
+        let payload = CredentialVaultPayload(
+            wifiPasswords: ["Studio": "wifi-pass"],
+            otaPasswords: ["020000123456": "ota-pass"])
+        let keychain = InMemoryGenericPasswordKeychain(records: [
+            .init(
+                service: KeychainCredentialVault.service,
+                account: KeychainCredentialVault.account,
+                data: try JSONEncoder().encode(payload),
+                store: .dataProtection),
+        ])
+        let vault = KeychainCredentialVault(keychain: keychain)
+
+        try vault.prepareForLaunch()
+        XCTAssertEqual(try vault.savedNetworkNames(), ["Studio"])
+        XCTAssertEqual(try vault.otaPassword(for: "020000123456"), "ota-pass")
+        XCTAssertEqual(keychain.dataReadStores, [.dataProtection])
+    }
+}
+
+private final class InMemoryGenericPasswordKeychain: GenericPasswordKeychain {
+    struct Record: Equatable {
+        let service: String
+        let account: String
+        let data: Data
+        let store: CredentialKeychainStore
+
+        init(
+            service: String,
+            account: String,
+            data: Data,
+            store: CredentialKeychainStore = .login
+        ) {
+            self.service = service
+            self.account = account
+            self.data = data
+            self.store = store
+        }
+    }
+
+    private var storage: [String: Record] = [:]
+    var failWritesForStore: CredentialKeychainStore?
+    var failRemovalsForStore: CredentialKeychainStore?
+    private(set) var dataReadStores: [CredentialKeychainStore] = []
+
+    init(records: [Record] = []) {
+        for record in records {
+            storage[key(for: record.service, account: record.account, store: record.store)] = record
+        }
+    }
+
+    var allRecords: [Record] {
+        storage.values.sorted {
+            ($0.store.rawValue, $0.service, $0.account)
+                < ($1.store.rawValue, $1.service, $1.account)
+        }
+    }
+
+    func data(
+        service: String, account: String, in store: CredentialKeychainStore
+    ) throws -> Data? {
+        dataReadStores.append(store)
+        return storage[key(for: service, account: account, store: store)]?.data
+    }
+
+    func write(
+        data: Data, service: String, account: String, in store: CredentialKeychainStore
+    ) throws {
+        if store == failWritesForStore {
+            throw KeychainCredentialVault.Failure.keychain(status: errSecParam)
+        }
+        storage[key(for: service, account: account, store: store)] = Record(
+            service: service, account: account, data: data, store: store)
+    }
+
+    func remove(
+        service: String, account: String, in store: CredentialKeychainStore
+    ) throws {
+        if store == failRemovalsForStore {
+            throw KeychainCredentialVault.Failure.keychain(status: errSecIO)
+        }
+        storage[key(for: service, account: account, store: store)] = nil
+    }
+
+    private func key(
+        for service: String, account: String, store: CredentialKeychainStore
+    ) -> String {
+        store.rawValue + "\u{0}" + service + "\u{0}" + account
     }
 }

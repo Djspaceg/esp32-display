@@ -3,16 +3,16 @@ import SenderProtocol
 import SwiftUI
 
 extension Notification.Name {
-    static let espDisplayShowManager = Notification.Name("com.espdisplay.sender.showManager")
+    static let espDisplayShowManager = Notification.Name("com.resourcefork.espdisplay.showManager")
     /// Opens the Settings window, at the pane named by the `pane` user-info
     /// key when there is one; see `SettingsPane.open`.
-    static let espDisplayShowSettings = Notification.Name("com.espdisplay.sender.showSettings")
+    static let espDisplayShowSettings = Notification.Name("com.resourcefork.espdisplay.showSettings")
     /// Posted by the File menu, handled by whichever manager window is showing -
     /// the same indirection `espDisplayShowSettings` uses, and for the same reason:
     /// the menu holds no reference to a view.
-    static let espDisplayAddDevice = Notification.Name("com.espdisplay.sender.addDevice")
+    static let espDisplayAddDevice = Notification.Name("com.resourcefork.espdisplay.addDevice")
     /// Posted by File > Recover Board, handled the same way.
-    static let espDisplayRecoverBoard = Notification.Name("com.espdisplay.sender.recoverBoard")
+    static let espDisplayRecoverBoard = Notification.Name("com.resourcefork.espdisplay.recoverBoard")
 }
 
 // MARK: - Window
@@ -67,6 +67,9 @@ struct ManagerView: View {
                             onRequestAccess: {
                                 manager.requestPermissionAccess(for: issue.issue)
                             },
+                            onOpenPermissions: {
+                                SettingsPane.open(.permissions)
+                            },
                             requestIsPending: issue.issue.permission == .cameraExtension
                                 && manager.cameraExtensionActivationPending,
                             onRelaunch: { AppRelauncher.relaunch() })
@@ -74,6 +77,15 @@ struct ManagerView: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 8)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let outcome = manager.operationOutcome, outcome.appearsAsNonmodalNotice {
+                OperationOutcomeNotice(
+                    outcome: outcome,
+                    onDismiss: { manager.clearOperationOutcome() })
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
             }
         }
         // No minimum frame here. A SwiftUI minimum on the hosted root is
@@ -92,13 +104,6 @@ struct ManagerView: View {
                 manager.refreshUSBDevices()
             }
             .frame(width: 560, height: 620)
-        }
-        .sheet(
-            isPresented: Binding(
-                get: { manager.permissionChecklistPresented },
-                set: { if !$0 { manager.dismissPermissionChecklist() } })
-        ) {
-            PermissionChecklistSheet(manager: manager)
         }
         .onReceive(
             NotificationCenter.default.publisher(for: .espDisplayRecoverBoard)
@@ -143,15 +148,15 @@ struct ManagerView: View {
         .alert(
             manager.operationOutcome?.title ?? "",
             isPresented: Binding(
-                get: { manager.operationOutcome != nil },
+                get: { manager.operationOutcome?.kind == .failure },
                 set: { if !$0 { manager.clearOperationOutcome() } }
             )
         ) {
             Button("OK") { manager.clearOperationOutcome() }
             // An alert's text cannot be selected, so every outcome offers its
             // text to copy instead.
-            if let outcome = manager.operationOutcome {
-                Button(outcome.kind == .failure ? "Copy Message" : "Copy Result") {
+            if let outcome = manager.operationOutcome, outcome.kind == .failure {
+                Button("Copy Message") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(
                         outcome.title + "\n\n" + outcome.alertText, forType: .string)
@@ -326,6 +331,7 @@ private struct IssueBanner: View {
     let issue: ReportedIssue
     let onDismiss: () -> Void
     let onRequestAccess: () -> Void
+    let onOpenPermissions: () -> Void
     let requestIsPending: Bool
     let onRelaunch: () -> Void
     @State private var showingDetails = false
@@ -378,6 +384,7 @@ private struct IssueBanner: View {
     private var directActions: some View {
         HStack(spacing: 6) {
             if let permission = issue.issue.permission {
+                Button("Open Permissions", action: onOpenPermissions)
                 if shouldShowSettings(for: permission) {
                     Button(permission.settingsButtonTitle) {
                         NSWorkspace.shared.open(permission.settingsURL)
@@ -402,6 +409,7 @@ private struct IssueBanner: View {
     @ViewBuilder
     private var menuActions: some View {
         if let permission = issue.issue.permission {
+            Button("Open Permissions", action: onOpenPermissions)
             if shouldShowSettings(for: permission) {
                 Button(permission.settingsButtonTitle) {
                     NSWorkspace.shared.open(permission.settingsURL)
@@ -469,44 +477,44 @@ private struct IssueBanner: View {
     }
 }
 
-/// The first-launch companion to the permanent Settings > Permissions section.
-/// It names each capability before macOS receives the corresponding request,
-/// then holds the sequence at a blocked row instead of stacking prompts.
-private struct PermissionChecklistSheet: View {
-    @ObservedObject var manager: PanelManager
+/// Completion feedback stays in the window rather than interrupting work with
+/// an alert. Its text remains selectable and there is an explicit copy action
+/// for the LAN Test and other results a support report may need.
+private struct OperationOutcomeNotice: View {
+    let outcome: OperationOutcome
+    let onDismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Permissions")
-                .font(.title2.weight(.semibold))
-            Text("macOS requests the setup needed for sending one permission at "
-                + "a time. The next row waits until the current one works.")
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    PermissionChecklistRows(manager: manager)
-                }
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(outcome.title)
+                    .font(.callout.weight(.medium))
+                Text(outcome.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
-            HStack {
-                Button("Open Permissions Settings") {
-                    SettingsPane.open(.permissions)
-                }
-                Spacer()
-                Button("Not Now") {
-                    manager.dismissPermissionChecklist()
-                }
+            Spacer(minLength: 0)
+            Button("Copy Result") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(
+                    outcome.title + "\n\n" + outcome.alertText, forType: .string)
             }
+            .controlSize(.small)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Dismiss this result")
+            .accessibilityLabel("Dismiss: \(outcome.title)")
         }
-        .padding(22)
-        .frame(width: 620, height: 520)
-        .textSelection(.enabled)
-        .task {
-            // Let the explanation render before the first macOS prompt.
-            try? await Task.sleep(for: .milliseconds(400))
-            guard !Task.isCancelled else { return }
-            manager.beginAutomaticPermissionRequests()
-        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .glassCard(tint: .green)
     }
 }
 
@@ -623,7 +631,9 @@ struct PanelDetailView: View {
             }
             // Outside the touch gate: a knob board's knob sends media keys
             // under every preset, touch screen or not.
-            if panel.offersMediaKeyGrant(authorized: manager.mediaKeysAuthorized()) {
+            if panel.offersMediaKeyGrant(
+                authorized: manager.accessibilityPermissionIsAllowed)
+            {
                 mediaKeyGrantSection
             }
             if panel.capabilities.contains(.idleText) {
@@ -2362,8 +2372,9 @@ final class ManagerWindowController: NSObject, NSWindowDelegate,
             .publisher(for: NSApplication.didBecomeActiveNotification)
             .receive(on: RunLoop.main)
             .sink {
-                [weak self] _ in self?.manager.refreshMacPermissionGuidance(
-                    forceLocalNetworkProbe: true)
+                [weak self] _ in
+                self?.manager.refreshMacPermissionGuidance(forceLocalNetworkProbe: true)
+                self?.manager.resumeAutomaticPermissionSequenceAfterAppActivation()
             }
         settingsWindow.onClose = { [weak self] in
             self?.enterAccessoryModeWhenNoWindowsAreVisible()
@@ -2515,11 +2526,20 @@ final class ESPDisplayApplicationDelegate: NSObject, NSApplicationDelegate {
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(showManagerFromNotification),
             name: .espDisplayShowManager, object: nil)
-        if Self.showsManager(
-            requested: showAtLaunch,
-            pendingRecovery: offersResumeAtLaunch && UsbRepairModel.offered(
-                manager.recoveryStore?.load(), fromRecoverBoard: true) != nil) {
+        let pendingRecovery = offersResumeAtLaunch && UsbRepairModel.offered(
+            manager.recoveryStore?.load(), fromRecoverBoard: true) != nil
+        if pendingRecovery {
             managerWindow.show()
+            return
+        }
+        guard showAtLaunch else { return }
+        // Give the launch-time System Extensions and Local Network probes a
+        // short chance to report. Known missing grants open the permanent
+        // Settings page; all-granted and still-unknown states open nothing.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(600))
+            guard let self, self.manager.prepareLaunchPermissionSetup() else { return }
+            self.managerWindow.showSettings(.permissions)
         }
     }
 
@@ -2534,16 +2554,16 @@ final class ESPDisplayApplicationDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    /// An interrupted recovery is the sole background-launch case that opens
+    /// a window. A fully permitted foreground launch opens nothing.
+    static func showsManager(pendingRecovery: Bool) -> Bool {
+        pendingRecovery
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         manager.screenDevices.tearDown()
         manager.stopMacAudioRouting()
         manager.flushPersistence()
-    }
-
-    /// The window is shown at launch when asked for, and also on a background
-    /// (login) launch when a recovery was interrupted, so Resume is offered.
-    static func showsManager(requested: Bool, pendingRecovery: Bool) -> Bool {
-        requested || pendingRecovery
     }
 
     @objc private func showManagerFromNotification(_ notification: Notification) {

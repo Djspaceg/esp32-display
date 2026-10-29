@@ -47,11 +47,11 @@ extension PanelManager {
             return problem
         }
         let credential = SavedWiFiCredential(ssid: ssid, password: password)
-        guard wifiCredentialWriter(credential) else {
+        if let failure = wifiCredentialWriter(credential) {
             return WifiConfigUI.ConfigFailure(
                 title: "Keychain storage failed",
-                message: "\"\(ssid)\" could not be saved to your login Keychain, "
-                    + "so nothing changed. Unlock the Keychain and try again.")
+                message: "\"\(ssid)\" could not be saved to the app's protected Keychain, "
+                    + "so nothing changed. " + failure + " Retry the save.")
         }
         var order = settings.wifiPresetOrder ?? savedNetworkNames
         if !order.contains(ssid) { order.append(ssid) }
@@ -75,12 +75,12 @@ extension PanelManager {
     /// clears it from every attached board's slots, except a slot a board is
     /// joined through, which the sync never touches.
     func removeSavedNetwork(_ ssid: String) -> WifiConfigUI.ConfigFailure? {
-        guard wifiCredentialRemover(ssid) else {
+        if let failure = wifiCredentialRemover(ssid) {
             return WifiConfigUI.ConfigFailure(
                 title: "Keychain removal failed",
-                message: "\"\(ssid)\" could not be removed from your login "
-                    + "Keychain, so it is still saved. Unlock the Keychain and "
-                    + "try again.")
+                message: "\"\(ssid)\" could not be removed from the app's protected "
+                    + "Keychain, so it is still saved. " + failure + " Retry "
+                    + "the removal.")
         }
         let order = (settings.wifiPresetOrder ?? savedNetworkNames)
             .filter { $0 != ssid }
@@ -133,7 +133,7 @@ extension PanelManager {
 }
 
 /// Saved networks held in memory, for previews and tests, which run unsigned
-/// and must never write the login Keychain. An empty password is an open
+/// and must never write the protected Keychain. An empty password is an open
 /// network here too.
 final class InMemoryWifiCredentials: @unchecked Sendable {
     private let lock = NSLock()
@@ -174,11 +174,15 @@ final class InMemoryWifiCredentials: @unchecked Sendable {
 
 extension PanelManager {
     /// Point every saved-network read and write at `store` instead of the
-    /// login Keychain.
+    /// app's protected Keychain.
     func useWifiCredentials(_ store: InMemoryWifiCredentials) {
         wifiCredentialLookup = { store.credential(for: $0) }
         wifiNetworkNamesReader = { store.names }
-        wifiCredentialWriter = { store.save($0) }
-        wifiCredentialRemover = { store.remove($0) }
+        wifiCredentialWriter = {
+            store.save($0) ? nil : "The temporary credential store refused the save."
+        }
+        wifiCredentialRemover = {
+            store.remove($0) ? nil : "The temporary credential store refused the removal."
+        }
     }
 }

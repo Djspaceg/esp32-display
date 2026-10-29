@@ -176,6 +176,16 @@ final class OperationOutcomeTests: XCTestCase {
         XCTAssertEqual(OperationOutcome.failure("a", "b").kind, .failure)
     }
 
+    func testSuccessResultsUseANonmodalNoticeSoTheLanTestCanBeCopied() {
+        XCTAssertTrue(
+            OperationOutcome.success(
+                "Local Network connection works",
+                "ESPDisplaySender LAN Test reached a device.").appearsAsNonmodalNotice)
+        XCTAssertFalse(
+            OperationOutcome.failure(
+                "Could not connect", "Retry the connection.").appearsAsNonmodalNotice)
+    }
+
     /// An action for a panel that is not in the list does nothing at all, rather
     /// than reporting a confusing outcome about a display the user cannot see.
     func testActionForUnknownPanelIsIgnored() {

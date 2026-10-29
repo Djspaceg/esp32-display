@@ -8,13 +8,15 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-LABEL="com.espdisplay.sender"
+LABEL="com.resourcefork.espdisplay"
+LEGACY_LABEL="com.espdisplay.sender"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 echo "==> Stopping any running sender"
 # make-app.sh deletes and replaces the app bundle, so move the running copy out
 # of the way first. Not being loaded is the normal case, not a failure.
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || echo "    (was not running)"
+launchctl bootout "gui/$(id -u)/$LEGACY_LABEL" 2>/dev/null || true
 
 echo "==> Building (Release, via Xcode - this takes a minute)"
 "$HERE/make-app.sh"

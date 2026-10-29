@@ -20,10 +20,31 @@ import ScreenCaptureKit
 /// commands. `allowsChangingSelectedContent` keeps that live.
 final class PickerSource: NSObject, SCContentSharingPickerObserver {
     private let lock = NSLock()
+    private let hasScreenRecordingPermission: () -> Bool
+    private let activateSystemPicker: (PickerSource) -> Void
+    private let presentSystemPicker: (SCShareableContentStyle?) -> Void
     private var _filter: SCContentFilter?
     private var _generation: UInt64 = 0
+    private var isActive = false
     var onSelection: ((SCContentFilter) -> Void)?
     var onCancellation: (() -> Void)?
+
+    init(
+        hasScreenRecordingPermission: @escaping () -> Bool = {
+            ScreenCapturePermissionGate.isAuthorized
+        },
+        activateSystemPicker: @escaping (PickerSource) -> Void = {
+            source in PickerSource.configureSystemPicker(for: source)
+        },
+        presentSystemPicker: @escaping (SCShareableContentStyle?) -> Void = {
+            style in PickerSource.presentSystemPicker(style: style)
+        }
+    ) {
+        self.hasScreenRecordingPermission = hasScreenRecordingPermission
+        self.activateSystemPicker = activateSystemPicker
+        self.presentSystemPicker = presentSystemPicker
+        super.init()
+    }
 
     /// Latest user selection and a generation counter. The capture loop
     /// compares generations to notice a new pick without polling system UI.
@@ -40,8 +61,19 @@ final class PickerSource: NSObject, SCContentSharingPickerObserver {
         return _generation
     }
 
-    /// Opt in to Control Center's picker. Safe to call once at startup.
-    func activate() {
+    /// Opt in to Control Center's picker once Screen Recording has been
+    /// granted. The picker talks to replayd, so it must not be used as a
+    /// permission probe: only the explicit CoreGraphics request may ask TCC.
+    @discardableResult
+    func activate() -> Bool {
+        guard hasScreenRecordingPermission() else { return false }
+        guard !isActive else { return true }
+        activateSystemPicker(self)
+        isActive = true
+        return true
+    }
+
+    private static func configureSystemPicker(for source: PickerSource) {
         let picker = SCContentSharingPicker.shared
         var config = SCContentSharingPickerConfiguration()
         // Spell the modes out rather than relying on the default, so which
@@ -57,15 +89,17 @@ final class PickerSource: NSObject, SCContentSharingPickerObserver {
         // Allow Control Center to offer the picker even before a stream
         // exists, so the user can choose a source at any time.
         picker.maximumStreamCount = 1
-        picker.add(self)
+        picker.add(source)
         picker.isActive = true
     }
 
     /// Stop observing the picker and hand the system UI back.
     func deactivate() {
+        guard isActive else { return }
         let picker = SCContentSharingPicker.shared
         picker.remove(self)
         picker.isActive = false
+        isActive = false
     }
 
     /// Show the picker now (used on demand, e.g. SIGUSR1, or when no source
@@ -77,7 +111,15 @@ final class PickerSource: NSObject, SCContentSharingPickerObserver {
     /// picker's initial screen offered no route to window selection at all
     /// (bugzilla 1918996). Whether that still applies here is untested, but
     /// asking for the mode explicitly costs nothing either way.
-    func present(style: SCShareableContentStyle? = nil) {
+    @discardableResult
+    func present(style: SCShareableContentStyle? = nil) -> Bool {
+        guard hasScreenRecordingPermission() else { return false }
+        guard activate() else { return false }
+        presentSystemPicker(style)
+        return true
+    }
+
+    private static func presentSystemPicker(style: SCShareableContentStyle?) {
         guard let style else {
             SCContentSharingPicker.shared.present()
             return

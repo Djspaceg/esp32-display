@@ -7,7 +7,7 @@
 	<key>CFBundleExecutable</key>
 	<string>ESPDisplayAudio</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.espdisplay.audio-driver</string>
+	<string>com.resourcefork.espdisplay.audio-driver</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

@@ -147,6 +147,12 @@ public enum ESPDisplaySenderApp {
         // in a plain CLI process without one.
         _ = NSApplication.shared
 
+        if AppBuildFeatures.isScreenRecordingProbe {
+            ScreenRecordingProbeApp.run()
+            return
+        }
+        LegacyLaunchAgentCleanup.retireOnCurrentAppLaunch()
+
         // Xcode's Canvas injects the preview view into this process. Keep the
         // AppKit event loop alive, but skip the sender's lock, persistence,
         // discovery, capture, serial, and Keychain startup paths while previews
@@ -159,7 +165,6 @@ public enum ESPDisplaySenderApp {
 
         let opts = parseOptions()
         let launchedInBackground = opts.background
-            || ProcessInfo.processInfo.environment["ESPDISP_AGENT"] != nil
 
         if opts.configure {
             // The standalone dialog that saved a network while sending it to
@@ -246,13 +251,20 @@ public enum ESPDisplaySenderApp {
                     localNetworkPermissionProbe.refresh()
                 }
             }
-            // The manager's initial read runs before these closures are
-            // installed. Recheck an existing Local Network decision now, but
-            // never trigger a first-use prompt before the checklist explains
-            // why it is needed.
-            if manager.hasRequestedLocalNetworkPermission {
-                manager.refreshMacPermissionGuidance(forceLocalNetworkProbe: true)
+            manager.inspectCameraExtension = { completion in
+                CameraExtensionInstaller.inspect(completion: completion)
             }
+            // The manager's initial read runs before these live probes are
+            // installed. Refresh each status now so the Settings page reflects
+            // the current network path and System Extensions registry rather
+            // than a request remembered by an earlier build.
+            // A background LaunchAgent has no visible Settings page, so it
+            // makes the Local Network request here. A foreground launch waits
+            // until the Permissions page is visible before its first browse,
+            // unless a prior live path already established the grant.
+            manager.refreshMacPermissionGuidance(
+                forceLocalNetworkProbe:
+                    launchedInBackground || manager.localNetworkWasPreviouslyVerified)
             if AppBuildFeatures.isLocalNetworkTest {
                 // The diagnostic uses the no-disk/no-capture preview manager.
                 // Seed its sole checklist row after the live request closure is
@@ -510,24 +522,38 @@ public enum ESPDisplaySenderApp {
         case "capture":
             // Keep the manager, discovery, telemetry, and device controls
             // alive when Screen Recording permission is unavailable. A newly
-            // signed app may need macOS approval again; capture sessions keep
-            // retrying and become usable after the next permitted launch.
-            do {
-                _ = try await SCShareableContent.excludingDesktopWindows(
-                    false, onScreenWindowsOnly: false)
-                await MainActor.run {
-                    panelManager.recordScreenCaptureAttempt(succeeded: true)
-                }
-            } catch {
-                let message = "screen capture is unavailable - allow ESPDisplaySender in "
-                    + "System Settings > Privacy & Security > Screen & System Audio Recording "
-                    + "to resume streaming (\(error.localizedDescription))\n"
-                FileHandle.standardError.write(Data(message.utf8))
+            // signed app may need macOS approval again. The foreground
+            // lifecycle refreshes the cached grant after the user responds;
+            // device sessions never repeat CoreGraphics preflight themselves.
+            let screenRecordingAllowed = CGPreflightScreenCaptureAccess()
+            ScreenCapturePermissionGate.observeAuthorization(screenRecordingAllowed)
+            if !screenRecordingAllowed {
                 // Without this the window shows panels that are online and
                 // idle with no indication that macOS is blocking capture.
                 await MainActor.run {
                     panelManager.recordScreenCaptureAttempt(
-                        succeeded: false, technicalDetail: error.localizedDescription)
+                        succeeded: false,
+                        technicalDetail: ScreenRecordingAuthorizationRequired()
+                            .localizedDescription)
+                }
+            } else {
+                do {
+                    _ = try await SCShareableContent.excludingDesktopWindows(
+                        false, onScreenWindowsOnly: false)
+                    await MainActor.run {
+                        panelManager.recordScreenCaptureAttempt(succeeded: true)
+                    }
+                } catch {
+                    let message = "screen capture is unavailable - allow ESPDisplaySender in "
+                        + "System Settings > Privacy & Security > Screen & System Audio Recording "
+                        + "to resume streaming (\(error.localizedDescription))\n"
+                    FileHandle.standardError.write(Data(message.utf8))
+                    // Without this the window shows panels that are online and
+                    // idle with no indication that macOS is blocking capture.
+                    await MainActor.run {
+                        panelManager.recordScreenCaptureAttempt(
+                            succeeded: false, technicalDetail: error.localizedDescription)
+                    }
                 }
             }
 
@@ -536,13 +562,17 @@ public enum ESPDisplaySenderApp {
             // (window or display), else the user's picker selection, else
             // automatic virtual-display tracking.
             let picker = PickerSource()
-            picker.activate()
+            _ = picker.activate()
             await MainActor.run { panelManager.attachPicker(picker) }
-            print("macOS content picker active - pick or change the source any time from "
-                + "the screen-sharing icon in the menu bar (or send SIGUSR1 to open it)")
+            if screenRecordingAllowed {
+                print("macOS content picker active - pick or change the source any time from "
+                    + "the screen-sharing icon in the menu bar (or send SIGUSR1 to open it)")
+            } else {
+                print("macOS content picker waits for Screen Recording permission.")
+            }
 
             let sigSource = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
-            sigSource.setEventHandler { picker.present() }
+            sigSource.setEventHandler { _ = picker.present() }
             sigSource.resume()
             signal(SIGUSR1, SIG_IGN)
 

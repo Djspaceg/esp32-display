@@ -42,6 +42,12 @@ struct OperationOutcome: Equatable, Sendable {
     static func success(_ title: String, _ message: String) -> OperationOutcome {
         OperationOutcome(kind: .success, title: title, message: message)
     }
+
+    /// Successful work is useful feedback, but never a blocking alert. The
+    /// manager renders it as a compact copyable notice instead.
+    var appearsAsNonmodalNotice: Bool {
+        kind == .success
+    }
 }
 
 /// A process-wide problem the app cannot resolve on its own, so the user has
@@ -51,6 +57,7 @@ enum AppIssue: String, CaseIterable, Sendable {
     case deviceConfig
     case persistence
     case wifiPresetSync
+    case credentialTransition
     case accessibility
     case systemAudioRecording
     case localNetwork
@@ -62,6 +69,7 @@ enum AppIssue: String, CaseIterable, Sendable {
         case .deviceConfig: return "Per-device source file ignored"
         case .persistence: return "Device settings could not be saved"
         case .wifiPresetSync: return "WiFi presets could not be copied"
+        case .credentialTransition: return "Saved credentials could not be moved"
         case .accessibility: return MacPermission.accessibility.title
         case .systemAudioRecording: return MacPermission.systemAudioRecording.title
         case .localNetwork: return MacPermission.localNetwork.title
@@ -79,7 +87,7 @@ enum AppIssue: String, CaseIterable, Sendable {
         case .systemAudioRecording: return .systemAudioRecording
         case .localNetwork: return .localNetwork
         case .cameraExtension: return .cameraExtension
-        case .deviceConfig, .persistence, .wifiPresetSync: return nil
+        case .deviceConfig, .persistence, .wifiPresetSync, .credentialTransition: return nil
         }
     }
 

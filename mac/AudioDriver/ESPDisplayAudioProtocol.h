@@ -11,8 +11,8 @@
 #define ESPDISP_AUDIO_PROTOCOL_VERSION 3
 
 // The bundle identifier the app looks the plug-in up by.
-#define ESPDISP_AUDIO_BUNDLE_ID "com.espdisplay.audio-driver"
-#define ESPDISP_AUDIO_MODEL_UID "com.espdisplay.audio-driver.display"
+#define ESPDISP_AUDIO_BUNDLE_ID "com.resourcefork.espdisplay.audio-driver"
+#define ESPDISP_AUDIO_MODEL_UID "com.resourcefork.espdisplay.audio-driver.display"
 
 // Plug-in object, settable CFDictionary: which displays this client wants a
 // device for. Sent again at least every few seconds as a heartbeat; an empty

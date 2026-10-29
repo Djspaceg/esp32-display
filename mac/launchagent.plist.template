@@ -3,36 +3,19 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.espdisplay.sender</string>
+	<string>com.resourcefork.espdisplay</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>__BIN__</string>
+		<string>/usr/bin/open</string>
+		<string>-gj</string>
+		<string>__APP__</string>
+		<string>--args</string>
 		<string>--background</string>
 	</array>
-	<!-- No --fps here on purpose. An explicitly passed flag overrides the frame
-	     rate saved from the Settings window, so hardcoding one would silently
-	     revert the user's choice at every login. The stored default is already
-	     40, so dropping the flag changes nothing for anyone who never opens
-	     Settings. -->
-	<!-- Start at login... -->
+	<!-- LaunchServices owns the app process without activating it. The app
+	     receives the background argument after identification. -->
 	<key>RunAtLoad</key>
 	<true/>
-	<!-- Restart after crashes or startup failures, but not after a clean Quit.
-	     launchd throttles abnormal respawns, and the sender's single-instance
-	     lock makes a manual double-click coexist safely. -->
-	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
-	<!-- Marks abnormal agent respawns so a lock collision exits quietly;
-	     a foreground launch instead asks the primary process to show its
-	     manager window. -->
-	<key>EnvironmentVariables</key>
-	<dict>
-		<key>ESPDISP_AGENT</key>
-		<string>1</string>
-	</dict>
 	<key>StandardOutPath</key>
 	<string>/tmp/espdisplaysender.log</string>
 	<key>StandardErrorPath</key>

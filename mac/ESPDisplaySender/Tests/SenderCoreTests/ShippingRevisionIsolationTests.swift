@@ -39,7 +39,7 @@ final class ShippingRevisionIsolationTests: XCTestCase {
             "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
             <plist version="1.0"><dict>\
             <key>CFBundleIdentifier</key>\
-            <string>com.espdisplay.test.shipping-isolation</string>\
+            <string>com.resourcefork.espdisplay.test.shipping-isolation</string>\
             </dict></plist>
             """.utf8).write(to: wrapper.appendingPathComponent("Contents/Info.plist"))
 

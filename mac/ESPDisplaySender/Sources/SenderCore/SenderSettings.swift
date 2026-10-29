@@ -56,7 +56,7 @@ struct SenderSettings: Codable, Equatable {
     var audioTuning = AudioRuntimeTuning()
     /// The app's saved WiFi networks, by SSID, in the order they are copied
     /// into every board's ten preset slots. Passwords are not here: they stay
-    /// in the login Keychain (`WifiCredentialStore`), which is also what says
+    /// in the app's protected Keychain (`WifiCredentialStore`), which is also what says
     /// which networks exist. This only orders them.
     ///
     /// nil means never migrated: builds before this setting sorted the

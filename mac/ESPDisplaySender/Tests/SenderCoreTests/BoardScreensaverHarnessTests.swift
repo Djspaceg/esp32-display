@@ -25,7 +25,7 @@ final class BoardScreensaverHarnessTests: XCTestCase {
               let hardwareID = environment["ESPDISP_BOARD_ID"]
         else { throw XCTSkip("no board configured") }
         guard NSRunningApplication.runningApplications(
-            withBundleIdentifier: "com.espdisplay.sender").isEmpty
+            withBundleIdentifier: "com.resourcefork.espdisplay").isEmpty
         else { throw XCTSkip("ESPDisplaySender is running and would push over this") }
         let requested = Double(environment["ESPDISP_BOARD_HOLD_SECONDS"] ?? "") ?? 75
         let hold = requested.isFinite ? min(max(requested, 0), 600) : 75
