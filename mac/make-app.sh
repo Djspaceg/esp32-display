@@ -173,6 +173,7 @@ remove_previous_install() {
 
 remove_previous_install "$APP"
 mv -- "$STAGED_APP" "$APP"
+"$LSREGISTER" -u "$STAGED_APP" || true
 "$LSREGISTER" -f -R -trusted "$APP"
 
 codesign --display --verbose=2 "$APP"
@@ -187,7 +188,8 @@ registered_paths="$("$LSREGISTER" -dump | awk '
   /^path:[[:space:]]+/ {
     if (path != "" && name == "ESPDisplaySender") print path
     path = $0
-    sub(/^[^/]*\//, "/", path)
+    sub(/^path:[[:space:]]+/, "", path)
+    sub(/[[:space:]]+\(0x[[:xdigit:]]+\)$/, "", path)
     name = ""
     next
   }
