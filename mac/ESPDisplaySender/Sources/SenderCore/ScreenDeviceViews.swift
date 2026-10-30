@@ -122,12 +122,19 @@ struct ScreenDeviceDetailView: View {
                     LabeledContent("Refresh", value: "Up to \(screen.maximumFPS) fps")
                 }
                 LabeledContent("Identity", value: identityDescription(entry))
-                Toggle("Use as a device", isOn: Binding(
-                    get: { entry.inUse },
-                    set: { $0 ? controller.use(key) : controller.stopUsing(key) }))
-                    .toggleStyle(.switch)
-                    .disabled(!entry.inUse && entry.screen == nil)
-                    .accessibilityIdentifier("screen-device-use")
+                HStack(spacing: 6) {
+                    Text("Use as a device")
+                    Toggle("Use as a device", isOn: Binding(
+                        get: { entry.inUse },
+                        set: { $0 ? controller.use(key) : controller.stopUsing(key) }))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityLabel("Use as a device")
+                }
+                .fixedSize()
+                .disabled(!entry.inUse && entry.screen == nil)
+                .accessibilityIdentifier("screen-device-use")
             } header: {
                 Text("Device")
             } footer: {

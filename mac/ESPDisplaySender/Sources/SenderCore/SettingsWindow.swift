@@ -522,9 +522,17 @@ private struct StreamingSettingsPane: View {
             }
 
             Section {
-                Toggle("Tune automatically", isOn: Binding(
-                    get: { manager.settings.adaptivePacing },
-                    set: { on in change(manager) { $0.adaptivePacing = on } }))
+                HStack(spacing: 6) {
+                    Text("Tune automatically")
+                    Toggle("Tune automatically", isOn: Binding(
+                        get: { manager.settings.adaptivePacing },
+                        set: { on in change(manager) { $0.adaptivePacing = on } }))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityLabel("Tune automatically")
+                }
+                .fixedSize()
                 LabeledContent("Packet pacing") {
                     HStack(spacing: 10) {
                         Slider(

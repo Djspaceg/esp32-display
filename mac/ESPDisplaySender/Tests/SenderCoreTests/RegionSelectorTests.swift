@@ -241,6 +241,53 @@ final class MarqueeActionZoneTests: XCTestCase {
     }
 }
 
+/// Done and Cancel move outside the marquee when its own action row either does
+/// not fit or would sit beneath a system-reserved part of the display.
+final class MarqueeExternalActionPlacementTests: XCTestCase {
+
+    private let visibleFrame = CGRect(x: 0, y: 80, width: 1440, height: 820)
+
+    func testNarrowMarqueeGetsControlsOutsideItsFrame() throws {
+        let marquee = CGRect(x: 600, y: 300, width: 172, height: 320)
+
+        XCTAssertTrue(
+            RegionSelector.needsExternalActions(
+                for: marquee, visibleFrame: visibleFrame))
+        let placement = try XCTUnwrap(
+            RegionSelector.externalActionPlacement(
+                for: marquee, visibleFrame: visibleFrame))
+
+        XCTAssertEqual(placement.side, .below)
+        XCTAssertTrue(visibleFrame.contains(placement.frame))
+        XCTAssertFalse(placement.frame.intersects(marquee))
+    }
+
+    func testDockObscuredInternalButtonsMoveAboveTheMarquee() throws {
+        // The marquee may reach below the visible frame to capture the dock
+        // edge, but its action row cannot remain there.
+        let marquee = CGRect(x: 500, y: 0, width: 344, height: 640)
+
+        XCTAssertTrue(
+            RegionSelector.needsExternalActions(
+                for: marquee, visibleFrame: visibleFrame))
+        let placement = try XCTUnwrap(
+            RegionSelector.externalActionPlacement(
+                for: marquee, visibleFrame: visibleFrame))
+
+        XCTAssertEqual(placement.side, .above)
+        XCTAssertTrue(visibleFrame.contains(placement.frame))
+        XCTAssertFalse(placement.frame.intersects(marquee))
+    }
+
+    func testInternalButtonsStayPutWhenTheyAreVisible() {
+        let marquee = CGRect(x: 500, y: 200, width: 344, height: 640)
+
+        XCTAssertFalse(
+            RegionSelector.needsExternalActions(
+                for: marquee, visibleFrame: visibleFrame))
+    }
+}
+
 /// Which part of the marquee the pointer is over.
 ///
 /// Three things read this classifier: what a click does, which cursor is shown,

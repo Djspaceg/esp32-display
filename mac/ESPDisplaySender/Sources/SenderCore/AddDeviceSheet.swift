@@ -335,8 +335,16 @@ struct AddDeviceSheet: View {
                         .disabled(running)
                 }
             }
-            Toggle("Erase the whole chip first", isOn: $eraseAll)
-                .disabled(running)
+            HStack(spacing: 6) {
+                Text("Erase the whole chip first")
+                Toggle("Erase the whole chip first", isOn: $eraseAll)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityLabel("Erase the whole chip first")
+            }
+            .fixedSize()
+            .disabled(running)
         } header: {
             Text("Firmware")
         } footer: {

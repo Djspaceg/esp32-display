@@ -859,8 +859,16 @@ struct FirmwareUpdateSheet: View {
         Section {
             SecureField("OTA password", text: $password)
                 .disabled(isPushing)
-            Toggle("Remember this password", isOn: $rememberPassword)
-                .disabled(isPushing)
+            HStack(spacing: 6) {
+                Text("Remember this password")
+                Toggle("Remember this password", isOn: $rememberPassword)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityLabel("Remember this password")
+            }
+            .fixedSize()
+            .disabled(isPushing)
             if let passwordProblem {
                 Text(passwordProblem)
                     .font(.callout)

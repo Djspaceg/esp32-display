@@ -56,6 +56,8 @@ final class RegionSelector: NSObject {
     private(set) var region: RegionSpec?
 
     private var view: MarqueeView?
+    /// A separate control bar when the marquee cannot safely hold its actions.
+    private var actionWindow: NSWindow?
     /// True while this class is placing the window, so its own frame changes are
     /// not mistaken for the user dragging.
     private var isApplying = false
@@ -72,6 +74,7 @@ final class RegionSelector: NSObject {
 
     func hide() {
         window?.orderOut(nil)
+        actionWindow?.orderOut(nil)
     }
 
     /// Frame a region without the user's involvement - used by the preset
@@ -86,6 +89,9 @@ final class RegionSelector: NSObject {
             Self.globalFrame(for: clamped, onScreenWithFrame: screen.frame),
             display: true)
         isApplying = false
+        updateActionWindow(
+            for: Self.globalFrame(for: clamped, onScreenWithFrame: screen.frame),
+            visibleFrame: screen.visibleFrame)
         view?.aspect = CGSize(width: clamped.width, height: clamped.height)
         view?.sizeLabel = clamped.sizeDescription
         // Rotating a square swaps two equal sides; hide the button rather than
@@ -357,6 +363,67 @@ final class RegionSelector: NSObject {
         )
     }
 
+    /// A location for Done and Cancel outside a marquee that cannot expose its
+    /// own controls. The control bar stays fully within the screen's visible
+    /// frame, so a Dock or screen edge cannot cover it.
+    struct ExternalActionPlacement: Equatable {
+        enum Side: Equatable { case below, above, right, left }
+        let side: Side
+        let frame: CGRect
+    }
+
+    private nonisolated static let externalActionSize = CGSize(width: 170, height: 22)
+    private nonisolated static let externalActionGap: CGFloat = 8
+
+    nonisolated static func needsExternalActions(
+        for frame: CGRect, visibleFrame: CGRect
+    ) -> Bool {
+        let bounds = CGRect(origin: .zero, size: frame.size)
+        guard let zones = actionZones(in: bounds) else { return true }
+        let internalFrame = zones.done.union(zones.cancel)
+            .offsetBy(dx: frame.minX, dy: frame.minY)
+        return !visibleFrame.contains(internalFrame)
+    }
+
+    nonisolated static func externalActionPlacement(
+        for frame: CGRect, visibleFrame: CGRect
+    ) -> ExternalActionPlacement? {
+        let size = externalActionSize
+        guard visibleFrame.width >= size.width, visibleFrame.height >= size.height else {
+            return nil
+        }
+        func centered(_ midpoint: CGFloat, length: CGFloat, in frame: CGRect) -> CGFloat {
+            min(max(midpoint - length / 2, frame.minX), frame.maxX - length)
+        }
+        let x = centered(frame.midX, length: size.width, in: visibleFrame)
+        let y = centered(frame.midY, length: size.height, in: visibleFrame)
+        let candidates: [(ExternalActionPlacement.Side, CGRect)] = [
+            (.below, CGRect(
+                x: x, y: frame.minY - externalActionGap - size.height,
+                width: size.width, height: size.height)),
+            (.above, CGRect(
+                x: x, y: frame.maxY + externalActionGap,
+                width: size.width, height: size.height)),
+            (.right, CGRect(
+                x: frame.maxX + externalActionGap, y: y,
+                width: size.width, height: size.height)),
+            (.left, CGRect(
+                x: frame.minX - externalActionGap - size.width, y: y,
+                width: size.width, height: size.height)),
+        ]
+        if let candidate = candidates.first(where: {
+            visibleFrame.contains($0.1) && !$0.1.intersects(frame)
+        }) {
+            return .init(side: candidate.0, frame: candidate.1)
+        }
+
+        // On a very constrained desktop, being clickable matters more than
+        // preserving a gap that does not physically fit.
+        return .init(
+            side: .below,
+            frame: CGRect(x: x, y: visibleFrame.minY, width: size.width, height: size.height))
+    }
+
     /// The scale presets and rotate, in a row above Done/Cancel, or nil when the
     /// rectangle cannot hold them. They live here rather than in the manager
     /// window because adjusting a region you cannot see is meaningless - these
@@ -432,6 +499,41 @@ final class RegionSelector: NSObject {
         return window
     }
 
+    private func makeActionWindowIfNeeded() -> NSWindow {
+        if let actionWindow { return actionWindow }
+        let frame = CGRect(origin: .zero, size: Self.externalActionSize)
+        let window = MarqueeWindow(
+            contentRect: frame, styleMask: [.borderless], backing: .buffered,
+            defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.isMovable = false
+        window.level = .floating
+        window.sharingType = .none
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary]
+
+        let view = MarqueeActionsView(frame: frame)
+        view.onConfirm = { [weak self] in self?.onConfirm?() }
+        view.onCancel = { [weak self] in self?.onCancel?() }
+        window.contentView = view
+        actionWindow = window
+        return window
+    }
+
+    private func updateActionWindow(for frame: CGRect, visibleFrame: CGRect) {
+        guard Self.needsExternalActions(for: frame, visibleFrame: visibleFrame),
+              let placement = Self.externalActionPlacement(
+                for: frame, visibleFrame: visibleFrame)
+        else {
+            actionWindow?.orderOut(nil)
+            return
+        }
+        let window = makeActionWindowIfNeeded()
+        window.setFrame(placement.frame, display: true)
+        window.orderFront(nil)
+    }
+
     /// The user dragged or resized. Place the window, re-home the region to
     /// whichever display now holds it, and report.
     private func userMoved(to proposed: CGRect) {
@@ -468,6 +570,9 @@ final class RegionSelector: NSObject {
             Self.globalFrame(for: clamped, onScreenWithFrame: screen.frame),
             display: true)
         isApplying = false
+        updateActionWindow(
+            for: Self.globalFrame(for: clamped, onScreenWithFrame: screen.frame),
+            visibleFrame: screen.visibleFrame)
 
         view?.aspect = CGSize(width: clamped.width, height: clamped.height)
         view?.sizeLabel = clamped.sizeDescription
@@ -488,6 +593,62 @@ private final class MarqueeWindow: NSWindow {
     /// Borderless windows do not accept key events by default, and Return and
     /// Escape have to reach the marquee.
     override var canBecomeKey: Bool { true }
+}
+
+/// Done and Cancel outside a constrained marquee. Its own small window leaves
+/// the selected rectangle exactly equal to the pixels being captured.
+private final class MarqueeActionsView: NSView {
+    private static let buttonWidth: CGFloat = 82
+    private static let buttonGap: CGFloat = 6
+
+    var onConfirm: (() -> Void)?
+    var onCancel: (() -> Void)?
+
+    private var doneRect: CGRect {
+        CGRect(x: bounds.minX, y: bounds.minY, width: Self.buttonWidth, height: bounds.height)
+    }
+
+    private var cancelRect: CGRect {
+        CGRect(
+            x: doneRect.maxX + Self.buttonGap, y: bounds.minY,
+            width: Self.buttonWidth, height: bounds.height)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if doneRect.contains(point) {
+            onConfirm?()
+        } else if cancelRect.contains(point) {
+            onCancel?()
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        drawButton("Done  ⏎", in: doneRect, prominent: true)
+        drawButton("Cancel  ⎋", in: cancelRect, prominent: false)
+    }
+
+    private func drawButton(_ title: String, in rect: CGRect, prominent: Bool) {
+        let background = prominent
+            ? NSColor.controlAccentColor.withAlphaComponent(0.95)
+            : NSColor.black.withAlphaComponent(0.78)
+        background.setFill()
+        NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6).fill()
+        NSColor.white.withAlphaComponent(0.25).setStroke()
+        let edge = NSBezierPath(
+            roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+        edge.lineWidth = 1
+        edge.stroke()
+
+        let string = NSAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.white,
+        ])
+        let size = string.size()
+        string.draw(at: NSPoint(
+            x: rect.midX - size.width / 2,
+            y: rect.midY - size.height / 2))
+    }
 }
 
 /// Draws the rectangle and turns mouse and key events into requests to move it.

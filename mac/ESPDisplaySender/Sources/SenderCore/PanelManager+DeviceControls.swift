@@ -234,7 +234,10 @@ extension PanelManager {
     func supportsQuarterTurnRotation(_ serviceName: String) -> Bool {
         guard let panel = panels.first(where: { $0.serviceName == serviceName })
         else { return false }
-        if panel.capabilities.contains(.rotate), panel.geometry != nil { return true }
+        guard let geometry = panel.geometry, geometry.width == geometry.height else {
+            return false
+        }
+        if panel.capabilities.contains(.rotate) { return true }
         guard let device = verifiedUSBDevice(for: serviceName) else { return false }
         return usbDevice(device, reports: .quarterTurn)
     }
@@ -296,9 +299,13 @@ extension PanelManager {
     ) -> [OperationPath] {
         switch requirement {
         case .networkControl(let capability):
-            // A quarter turn needs the panel's shape, to know whether the
-            // region has to turn with it.
-            if capability == .rotate, panel.geometry == nil { return [] }
+            // Quarter turns only belong to square panels. A rectangular panel
+            // uses its existing 180-degree flip, preserving its capture shape.
+            if capability == .rotate,
+               (panel.geometry == nil
+                || panel.geometry?.width != panel.geometry?.height) {
+                return []
+            }
             guard networkControlReady(serviceName, panel: panel),
                   panel.capabilities.contains(capability)
             else { return [] }
@@ -307,6 +314,11 @@ extension PanelManager {
             guard sessions[serviceName] != nil, panel.isOnline else { return [] }
             return [.network]
         case .usbSerial(let evidence):
+            if evidence == .quarterTurn,
+               (panel.geometry == nil
+                || panel.geometry?.width != panel.geometry?.height) {
+                return []
+            }
             guard case .verified(let device) = usbSerialState(for: serviceName),
                   usbDevice(device, reports: evidence)
             else { return [] }

@@ -335,14 +335,14 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertFalse(manager.canControl(panel.serviceName, capability: .rotate))
     }
 
-    func testRectangularNetworkPanelWithRotateCapabilityOffersQuarterTurns() {
+    func testRectangularNetworkPanelWithRotateCapabilityStaysFlipOnly() {
         var panel = controllablePanel(capabilities: .flip.union(.rotate))
         panel.geometry = PanelGeometry(width: 172, height: 320)
         let manager = makeManager([panel])
         manager.register(makeSession(name: panel.serviceName))
 
-        XCTAssertTrue(manager.supportsQuarterTurnRotation(panel.serviceName))
-        XCTAssertTrue(manager.canControl(panel.serviceName, capability: .rotate))
+        XCTAssertFalse(manager.supportsQuarterTurnRotation(panel.serviceName))
+        XCTAssertFalse(manager.canControl(panel.serviceName, capability: .rotate))
         XCTAssertTrue(manager.canControl(panel.serviceName, capability: .flip))
     }
 
@@ -359,7 +359,7 @@ final class PanelManagerTests: XCTestCase {
         XCTAssertTrue(manager.canControl(panel.serviceName, capability: .flip))
     }
 
-    func testS3LCD190WithReportedRotateCapabilityOffersQuarterTurnsOverVerifiedUSB() {
+    func testS3LCD190WithReportedRotateCapabilityStaysFlipOnlyOverVerifiedUSB() {
         let path = "/dev/cu.usbmodem-190"
         var panel = controllablePanel(
             capabilities: .power.union(.flip),
@@ -380,8 +380,8 @@ final class PanelManagerTests: XCTestCase {
             identity: identity,
             generation: manager.usbPathGeneration(path))
 
-        XCTAssertTrue(manager.supportsQuarterTurnRotation(panel.serviceName))
-        XCTAssertTrue(manager.canControl(panel.serviceName, capability: .rotate))
+        XCTAssertFalse(manager.supportsQuarterTurnRotation(panel.serviceName))
+        XCTAssertFalse(manager.canControl(panel.serviceName, capability: .rotate))
     }
 
     func testUnknownGeometryStaysFlipOnlyEvenIfRotateCapabilityIsSet() {

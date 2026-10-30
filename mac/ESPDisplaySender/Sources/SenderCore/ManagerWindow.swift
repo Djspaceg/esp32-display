@@ -783,16 +783,15 @@ struct PanelDetailView: View {
     /// AppKit anchored it bottom-left, so the content ran off the *top* of the
     /// window where nothing could scroll it back.
     ///
-    /// The row background is cleared because the card brings its own glass, and
-    /// glass does not stack.
+    /// The row background is cleared because the card brings its own glass.
+    /// Keeping this outside a `Section` prevents Form from wrapping it in a
+    /// second rounded surface.
     private var heroSection: some View {
-        Section {
-            MirrorHero(
-                panel: panel, preview: manager.preview,
-                facts: heroFacts)
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 6, trailing: 0))
-        }
+        MirrorHero(
+            panel: panel, preview: manager.preview,
+            facts: heroFacts)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 6, trailing: 0))
     }
 
     /// What a board without a screen shows in place of the hero, the source
@@ -824,12 +823,10 @@ struct PanelDetailView: View {
     private var heroFacts: [MirrorHero.Fact] {
         let usb = manager.usbAttachment(for: panel.serviceName)
         return [
-            .init(label: "Board", value: panel.boardModelDescription),
+            .init(label: "Device", value: panel.boardModelDescription),
             .init(label: "USB", value: usb.summary, isMuted: usb.port == nil),
             .init(label: "Network", value: panel.networkSummary,
                   isMuted: panel.address == nil),
-            .init(label: "Up", value: panel.uptimeSummary,
-                  isMuted: panel.uptimeSeconds == 0),
         ] + (panel.capabilities.contains(.battery)
             // Only for a panel that advertises a battery. A C6 has no PMU and
             // will never report one, so an unconditional row would read as a
@@ -888,29 +885,29 @@ struct PanelDetailView: View {
         } header: {
             Text("Source")
         } footer: {
-            Text("A region streams a rectangle of one screen, locked to the device's "
-                + (panel.shapeDescription.map { "\($0) shape" } ?? "shape")
-                + " — 1× sends one "
-                + "screen point per pixel on the device's screen, higher multiples frame more and "
-                + "scale it down. Choosing a display, window, or application "
-                + "instead uses the macOS picker. Either choice is remembered and "
-                + "reapplied when the sender restarts.")
+            Text("A region keeps this device's shape; larger values frame more and scale it down.")
         }
     }
 
     private var cameraSection: some View {
         Section {
             LabeledContent("Streaming") {
-                Toggle("Stream camera", isOn: Binding(
-                    get: { panel.cameraStreaming },
-                    set: {
-                        manager.setCameraStreaming(
-                            $0, resolution: panel.cameraResolution,
-                            for: panel.serviceName)
-                    }))
-                    .toggleStyle(.switch)
-                    .fixedSize()
-                    .disabled(manager.sessions[panel.serviceName] == nil)
+                HStack(spacing: 6) {
+                    Text("Stream camera")
+                    Toggle("Stream camera", isOn: Binding(
+                        get: { panel.cameraStreaming },
+                        set: {
+                            manager.setCameraStreaming(
+                                $0, resolution: panel.cameraResolution,
+                                for: panel.serviceName)
+                        }))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityLabel("Stream camera")
+                }
+                .fixedSize()
+                .disabled(manager.sessions[panel.serviceName] == nil)
             }
             LabeledContent("Resolution") {
                 Picker("Camera resolution", selection: Binding(
@@ -959,17 +956,16 @@ struct PanelDetailView: View {
 
     /// The marquee controls, shown only while Region is the chosen source.
     ///
-    /// Only the button that summons the marquee lives here. The scale presets
-    /// and rotate moved onto the marquee overlay itself: adjusting a rectangle
-    /// you cannot see is meaningless, so controls that reshape it exist only
-    /// while it is on screen showing their effect (RegionSelector.presetZones).
+    /// The manager keeps Done and Cancel beside Select region so the selection
+    /// can still be accepted when the marquee's own buttons need to move outside
+    /// the framed area.
     private var regionControls: some View {
         LabeledContent("Rectangle") {
             HStack(spacing: 8) {
                 // Not gated on the panel being online: choosing what to send
                 // is a decision about this Mac's screen, and the preview
                 // shows the answer with the panel switched off.
-                Button(manager.isChoosingRegion ? "Done" : "Adjust…") {
+                Button(manager.isChoosingRegion ? "Done" : "Select region…") {
                     if manager.isChoosingRegion {
                         manager.finishChoosingRegion()
                     } else {
@@ -979,6 +975,12 @@ struct PanelDetailView: View {
                 .help("Drag an aspect-locked rectangle over your screen to "
                     + "choose what this device shows; its size presets (and, "
                     + "on devices with square screens, rotation) are on the rectangle itself")
+                if manager.isChoosingRegion {
+                    Button("Cancel") {
+                        manager.cancelChoosingRegion()
+                    }
+                    .help("Discard this region selection")
+                }
                 if let region = panel.source.region {
                     Text(region.sizeDescription)
                         .font(.caption)
@@ -1047,34 +1049,44 @@ struct PanelDetailView: View {
             }
         } else {
             LabeledContent("Orientation") {
-                Toggle("Rotate 180°", isOn: Binding(
-                    get: { panel.flipped },
-                    set: { manager.setFlip($0, for: panel.serviceName) }))
-                    .toggleStyle(.switch)
-                    .fixedSize()
-                    .disabled(!manager.canControl(panel.serviceName, capability: .flip))
-                    .help(controlHelp(.flip, "Rotate the image on the device"))
+                HStack(spacing: 6) {
+                    Text("Rotate 180°")
+                    Toggle("Rotate 180°", isOn: Binding(
+                        get: { panel.flipped },
+                        set: { manager.setFlip($0, for: panel.serviceName) }))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityLabel("Rotate 180°")
+                }
+                .fixedSize()
+                .disabled(!manager.canControl(panel.serviceName, capability: .flip))
+                .help(controlHelp(.flip, "Rotate the image on the device"))
             }
         }
         if let status = manager.automaticRotationStatus(panel.serviceName),
            let enabled = status.automaticRotationEnabled,
            let effective = status.effectiveRotation {
             LabeledContent("Automatic orientation") {
-                Toggle("Automatic orientation", isOn: Binding(
-                    get: { enabled },
-                    set: {
-                        manager.setAutomaticRotation(
-                            $0, for: panel.serviceName)
-                    }))
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                    .fixedSize()
-                    .disabled(
-                        !manager.canPerform(
-                            .automaticRotation, for: panel.serviceName))
-                    .help(operationHelp(
-                        .automaticRotation,
-                        "Use the motion sensor to keep the image upright."))
+                HStack(spacing: 6) {
+                    Toggle("Automatic orientation", isOn: Binding(
+                        get: { enabled },
+                        set: {
+                            manager.setAutomaticRotation(
+                                $0, for: panel.serviceName)
+                        }))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityLabel("Automatic orientation")
+                    Spacer(minLength: 0)
+                }
+                .disabled(
+                    !manager.canPerform(
+                        .automaticRotation, for: panel.serviceName))
+                .help(operationHelp(
+                    .automaticRotation,
+                    "Use the motion sensor to keep the image upright."))
             }
             LabeledContent(
                 "Effective rotation",
@@ -1101,12 +1113,7 @@ struct PanelDetailView: View {
         } header: {
             Text("Screen")
         } footer: {
-            Text("Turning the screen off turns its backlight off, and puts the "
-                + "screen itself to sleep where the device supports that, while the device stays "
-                + "on WiFi and keeps receiving. A "
-                + "touch does not wake it. It stays off across restarts until it is "
-                + "turned back on here, or on a device with a button by holding it "
-                + "for three seconds (a shorter hold rotates the picture).")
+            Text("Off keeps the device on WiFi; hold its button for 3 seconds to turn it back on.")
         }
     }
 
@@ -1160,18 +1167,18 @@ struct PanelDetailView: View {
                         .monospacedDigit()
                         .frame(width: 38, alignment: .trailing)
                 } else {
-                    Toggle("High", isOn: Binding(
+                    Picker("Brightness", selection: Binding(
                         get: { panel.brightnessHigh },
-                        set: { manager.setBrightness(high: $0, for: panel.serviceName) }))
-                        .toggleStyle(.switch)
-                        // A switch Toggle stretches to fill, stranding its
-                        // switch at the far edge of the row from the words
-                        // naming it. fixedSize keeps the pair together.
+                        set: { manager.setBrightness(high: $0, for: panel.serviceName) })) {
+                        Text("Low").tag(false)
+                        Text("High").tag(true)
+                    }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
                         .fixedSize()
                         .disabled(panel.manuallyOff || !manager.canControl(
                             panel.serviceName, capability: .brightness))
                         .help(controlHelp(.brightness, "Set the screen backlight"))
-                    Spacer(minLength: 0)
                 }
             }
         }
@@ -2029,7 +2036,15 @@ struct PanelDetailView: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 260)
                 .onSubmit(setOTAPassword)
-            Toggle("Remember this password", isOn: $otaRememberPassword)
+            HStack(spacing: 6) {
+                Text("Remember this password")
+                Toggle("Remember this password", isOn: $otaRememberPassword)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityLabel("Remember this password")
+            }
+            .fixedSize()
             if let otaPasswordProblem {
                 Text(otaPasswordProblem)
                     .font(.caption)
@@ -2180,6 +2195,7 @@ struct MirrorHero: View {
     /// glance from across the room rather than as one more line of body text.
     private var statusPill: some View {
         HStack(spacing: 6) {
+            connectionStatusDot
             Image(systemName: symbol)
                 .foregroundStyle(tint)
                 .accessibilityHidden(true)
@@ -2193,8 +2209,19 @@ struct MirrorHero: View {
         .padding(.vertical, 6)
         .glassCard(cornerRadius: 11, tint: pillTint)
         .glassEffectID("status", in: glassNamespace)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Mirroring status: \(panel.captureStatus.summary)")
+    }
+
+    private var connectionStatusDot: some View {
+        let state = panel.isOnline && !panel.awaitingIdentity
+            ? ("Online", Color.green)
+            : panel.discovered || panel.awaitingIdentity
+                ? ("Connecting", Color.orange)
+                : ("Offline", Color.secondary)
+        return Circle()
+            .fill(state.1)
+            .frame(width: 8, height: 8)
+            .help("\(state.0). Uptime: \(panel.uptimeSummary)")
+            .accessibilityLabel("Device connection: \(state.0). Uptime: \(panel.uptimeSummary)")
     }
 
     /// The frame at its own aspect ratio, with no filler behind it. A fixed
