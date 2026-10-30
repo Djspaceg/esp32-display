@@ -210,14 +210,22 @@ int main() {
         CHECK(l.image.x == (w - bootimage::WIDTH) / 2);
         if (!l.compact) {
         ++bottomLayouts;
-        // Yoda at the bottom centre; the bar at the screen's centre.
-        CHECK(l.image.y + l.image.h == h);
-        // Centred, or lifted just clear of the image where centred would touch
-        // it (screens exactly twice its height).
-        CHECK(l.bar.y + l.bar.h / 2 <= h / 2);
-        CHECK(h / 2 - (l.bar.y + l.bar.h / 2) <= l.bar.h / 2 + 1);
-        if (h >= 2 * bootimage::HEIGHT + l.bar.h) {
-          CHECK(l.bar.y + l.bar.h / 2 == h / 2);
+        // Yoda is at the lower centre; the bar is at the screen's centre.
+        if (round) {
+          CHECK(bootscreenmodel::imageFitsOnRoundGlass(l, l.image.y));
+        } else {
+          CHECK(l.image.y + l.image.h == h);
+        }
+        // Centred, or lifted just clear of the image. Round glass can move
+        // the image farther up so every character pixel stays visible.
+        if (l.bar.y + l.bar.h == l.image.y) {
+          CHECK(l.bar.y + l.bar.h <= l.image.y);
+        } else {
+          CHECK(l.bar.y + l.bar.h / 2 <= h / 2);
+          CHECK(h / 2 - (l.bar.y + l.bar.h / 2) <= l.bar.h / 2 + 1);
+          if (h >= 2 * bootimage::HEIGHT + l.bar.h) {
+            CHECK(l.bar.y + l.bar.h / 2 == h / 2);
+          }
         }
         // The status line sits above the bar and clear of the image.
         CHECK(l.textY + 7 * s < l.bar.y);
@@ -363,11 +371,15 @@ int main() {
 #endif
     const Layout knob = bootscreenmodel::layout(240, 240, true);
     CHECK(!knob.compact);
+    CHECK(bootscreenmodel::imageFitsOnRoundGlass(knob, knob.image.y));
 #if defined(CONFIG_IDF_TARGET_ESP32C6)
-    CHECK(knob.image.y == 208);
+    CHECK(knob.image.y < 208);
 #else
-    CHECK(knob.image.y == 120);
+    CHECK(knob.image.y < 120);
 #endif
+    const Layout amoled = bootscreenmodel::layout(466, 466, true, 445);
+    CHECK(bootscreenmodel::imageFitsOnRoundGlass(amoled, amoled.image.y));
+    CHECK(amoled.image.y + amoled.image.h < amoled.height);
   }
 
   printf("boot screen: %d checks passed\n", checks);

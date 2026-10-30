@@ -81,6 +81,64 @@ int main() {
                           "2.1.0", "Battery 82% charging", "close", true);
     CHECK(pixel(widePixels, 128, 0, 0) == uitheme::CURRENT.background);
   }
+  {
+    std::vector<uint8_t> densePixels(466 * 466 * 2);
+    staticui::Panel panel = {densePixels.data(), 466, 466, true, 445};
+    const staticui::HintLayout hint =
+        staticui::hintLayout(panel, 140, 44, 98, "next", "hold: use");
+    CHECK(hint.style.pixels == 24);
+    CHECK(hint.stacked);
+    const wifiselector::SelectorLayout roundTouchLayout =
+        wifiselector::selectorLayout(240, 240, true, 10, 5);
+    const int roundHintWidth = roundTouchLayout.next.x +
+                               roundTouchLayout.next.width -
+                               roundTouchLayout.previous.x;
+    const int roundRowsBottom =
+        roundTouchLayout.rowsY +
+        (int)roundTouchLayout.visibleCount * roundTouchLayout.rowHeight + 4;
+    const staticui::HintLayout roundHint = staticui::hintLayout(
+        {nullptr, 240, 240, true}, roundHintWidth,
+        roundTouchLayout.previous.height,
+        roundTouchLayout.previous.y + roundTouchLayout.previous.height -
+            roundRowsBottom,
+        "next", "hold: start");
+    CHECK(roundHint.stacked);
+    CHECK(staticui::hintStackedWidth(
+              roundHint.style, roundTouchLayout.previous.height, "next",
+              "hold: start") <= roundHintWidth);
+    CHECK(roundTouchLayout.next.x + roundTouchLayout.next.width <
+          roundTouchLayout.connect.x);
+    char label[33];
+    staticui::truncateToWidth("studio-wifi-with-a-much-longer-name",
+                              {TextFamily::Large, 24}, 160, label,
+                              sizeof(label));
+    CHECK(textWidth(label, {TextFamily::Large, 24}) <= 160);
+    CHECK(strcmp(label + strlen(label) - 3, "...") == 0);
+    staticui::truncateToWidth("ABCDEFGHIJKLMNO", {TextFamily::Classic, 1},
+                              60, label, sizeof(label));
+    CHECK(textWidth(label, {TextFamily::Classic, 1}) <= 60);
+    CHECK(strcmp(label + strlen(label) - 3, "...") == 0);
+    TextStyle longNetworkStyle = staticui::styleToFit(
+        panel.width, panel.height, panel.diagonalTenthsMm, 160, panel.height,
+        "...", true);
+    if (longNetworkStyle.family == TextFamily::Large &&
+        longNetworkStyle.pixels > 24) {
+      longNetworkStyle = {TextFamily::Large, 24};
+    }
+    CHECK(longNetworkStyle.family == TextFamily::Large);
+    CHECK(longNetworkStyle.pixels == 24);
+    const TextStyle listStyle = staticui::styleToFit(
+        panel.width, panel.height, panel.diagonalTenthsMm, 140, 44, "...",
+        false);
+    staticui::truncateToWidth("studio-wifi-with-a-much-longer-name",
+                              listStyle, 140, label, sizeof(label));
+    CHECK(textWidth(label, listStyle) <= 140);
+    CHECK(staticui::wrappedLineCount(
+              "joining WiFi", {TextFamily::Small, 13},
+              textWidth("joining", {TextFamily::Small, 13})) == 2);
+    CHECK(staticui::textVisualCenterOffset({TextFamily::Small, 24}) <
+          textHeight({TextFamily::Small, 24}));
+  }
 
   printf("ui primitives: %d checks passed\n", checks);
   return 0;

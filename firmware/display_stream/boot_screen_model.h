@@ -131,6 +131,28 @@ inline int halfWidthAcross(const Layout &l, int y0, int y1) {
   return (int)(s / 2);
 }
 
+inline bool imageFitsOnRoundGlass(const Layout &l, int imageY) {
+  if (!l.round) return true;
+  const int64_t radius2 = (int64_t)l.width * l.width;
+  for (int iy = 0; iy < bootimage::HEIGHT; ++iy) {
+    const int y = imageY + iy;
+    for (uint16_t i = bootimage::ROW_RUNS[iy];
+         i < bootimage::ROW_RUNS[iy + 1]; ++i) {
+      const bootimage::Run &run = bootimage::RUNS[i];
+      for (int k = 0; k < run.length; ++k) {
+        if (bootimage::pixelAt(run.pixel + k) == bootimage::BACKGROUND) {
+          continue;
+        }
+        const int x = l.image.x + run.x + k;
+        const int64_t dx = 2 * (int64_t)x + 1 - l.width;
+        const int64_t dy = 2 * (int64_t)y + 1 - l.height;
+        if (dx * dx + dy * dy > radius2) return false;
+      }
+    }
+  }
+  return true;
+}
+
 inline Layout layout(int width, int height, bool round,
                      uint16_t diagonalTenthsMm = 0) {
   Layout l = {};
@@ -159,6 +181,11 @@ inline Layout layout(int width, int height, bool round,
   l.image.h = (int16_t)imageH;
   l.image.x = (int16_t)((width - imageW) / 2);
   l.image.y = (int16_t)(l.compact ? (height - imageH) / 2 : height - imageH);
+  if (round && !l.compact) {
+    while (l.image.y > 0 && !imageFitsOnRoundGlass(l, l.image.y)) {
+      --l.image.y;
+    }
+  }
 
   const int shortSide = width < height ? width : height;
   int scaleCap = shortSide / 80;

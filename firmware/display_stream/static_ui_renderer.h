@@ -46,7 +46,9 @@ inline TextStyle styleToFit(int width, int height, uint16_t diagonalTenthsMm,
                             : smallTextStyle(width, height, diagonalTenthsMm);
   while (textWidth(text, style) > availableWidth - 4 ||
          textHeight(style) > availableHeight - 4) {
-    if (style.family == TextFamily::Large) {
+    if (style.family == TextFamily::Large && style.pixels > 24) {
+      style = {TextFamily::Large, 24};
+    } else if (style.family == TextFamily::Large) {
       style = smallTextStyle(width, height, diagonalTenthsMm);
     } else if (style.family == TextFamily::Small && style.pixels > 18) {
       style = {TextFamily::Small, 18};
@@ -66,6 +68,17 @@ inline TextStyle styleToFit(int width, int height, uint16_t diagonalTenthsMm,
   return style;
 }
 
+inline int textVisualCenterOffset(TextStyle style) {
+  if (style.family == TextFamily::Classic) return 3 * style.pixels;
+#if !defined(CONFIG_IDF_TARGET_ESP32C6)
+  const panelfonts::Glyph &xGlyph =
+      faceFor(style).glyphs['x' - panelfonts::FIRST];
+  return xGlyph.yOffset + xGlyph.height / 2;
+#else
+  return 3 * style.pixels;
+#endif
+}
+
 inline void textInRect(const Panel &panel, const wifiselector::Rect &rect,
                        const char *text, bool heading, uint16_t color,
                        bool centred = true) {
@@ -74,10 +87,13 @@ inline void textInRect(const Panel &panel, const wifiselector::Rect &rect,
       rect.height, text, heading);
   const int x = centred ? rect.x + (rect.width - textWidth(text, style)) / 2
                         : rect.x;
-  const int y = rect.y + (rect.height - textHeight(style)) / 2;
+  const int y = rect.y + rect.height / 2 - textVisualCenterOffset(style);
   drawTextClipped(panel.pixels, panel.width, panel.height, x, y, text, color,
                   style, rect.x, rect.y, rect.width, rect.height);
 }
+
+inline void truncateToWidth(const char *text, TextStyle style, int maxWidth,
+                            char *out, size_t outSize);
 
 inline void centredText(const Panel &panel, int y, const char *text,
                         TextStyle style, uint16_t color) {
@@ -99,29 +115,123 @@ inline void drawButton(const Panel &panel, const wifiselector::Rect &rect,
   textInRect(panel, rect, label, false, color);
 }
 
+struct HintLayout {
+  TextStyle style;
+  bool stacked;
+};
+
+inline int hintInlineWidth(TextStyle style, int height, const char *first,
+                           const char *second) {
+  const int icon = height >= 34 ? 10 : 8;
+  const int edge = height >= 34 ? 14 : 7;
+  const int gap = icon;
+  return 2 * edge + 2 * icon + 3 * gap + 4 +
+         textWidth(first, style) + textWidth(second, style);
+}
+
+inline int hintStackedWidth(TextStyle style, int height, const char *first,
+                            const char *second) {
+  const int icon = height >= 34 ? 10 : 8;
+  const int gap = icon;
+  const int firstWidth = icon + gap + textWidth(first, style);
+  const int secondWidth = 7 + gap + textWidth(second, style);
+  return firstWidth > secondWidth ? firstWidth : secondWidth;
+}
+
+inline TextStyle hintStyleToFit(const Panel &panel, int width, int height,
+                                const char *first, const char *second) {
+  TextStyle style =
+      smallTextStyle(panel.width, panel.height, panel.diagonalTenthsMm);
+  while (hintInlineWidth(style, height, first, second) > width) {
+    if (style.family == TextFamily::Small && style.pixels > 18) {
+      style = {TextFamily::Small, 18};
+    } else if (style.family == TextFamily::Small && style.pixels > 13) {
+      style = {TextFamily::Small, 13};
+    } else if (style.family == TextFamily::Small && style.pixels > 9) {
+      style = {TextFamily::Small, 9};
+    } else {
+      return {TextFamily::Classic, 1};
+    }
+  }
+  return style;
+}
+
+inline HintLayout hintLayout(const Panel &panel, int width, int height,
+                             int availableHeight, const char *first,
+                             const char *second) {
+  const TextStyle preferred =
+      smallTextStyle(panel.width, panel.height, panel.diagonalTenthsMm);
+  if (hintInlineWidth(preferred, height, first, second) <= width) {
+    return {preferred, false};
+  }
+  TextStyle stacked = preferred;
+  while (hintStackedWidth(stacked, height, first, second) > width) {
+    if (stacked.family == TextFamily::Small && stacked.pixels > 18) {
+      stacked = {TextFamily::Small, 18};
+    } else if (stacked.family == TextFamily::Small && stacked.pixels > 13) {
+      stacked = {TextFamily::Small, 13};
+    } else if (stacked.family == TextFamily::Small && stacked.pixels > 9) {
+      stacked = {TextFamily::Small, 9};
+    } else {
+      break;
+    }
+  }
+  const int stackedHeight = 2 * textLineHeight(stacked) + 8;
+  if (hintStackedWidth(stacked, height, first, second) <= width &&
+      stackedHeight <= availableHeight) {
+    return {stacked, true};
+  }
+  return {hintStyleToFit(panel, width, height, first, second), false};
+}
+
 inline void drawHint(const Panel &panel, const wifiselector::Rect &rect,
-                     const char *first, const char *second) {
+                     const char *first, const char *second,
+                     const HintLayout &layout) {
   uitheme::card(panel.pixels, panel.width, panel.height,
                 {rect.x, rect.y, rect.width, rect.height}, false);
   const int icon = rect.height >= 34 ? 10 : 8;
   const int left = rect.x + (rect.width > 120 ? 14 : 7);
-  uiicons::pressHint(panel.pixels, panel.width, panel.height, left,
-                     rect.y + (rect.height - 8) / 2, uitheme::CURRENT.secondary);
   const int gap = icon;
-  TextStyle style = styleToFit(
-      panel.width, panel.height, panel.diagonalTenthsMm,
-      rect.width - 2 * icon - 3 * gap - 8, rect.height, second, false);
+  const TextStyle style = layout.style;
+  if (layout.stacked) {
+    const int firstWidth = icon + gap + textWidth(first, style);
+    const int secondWidth = 7 + gap + textWidth(second, style);
+    const int lineHeight = textLineHeight(style);
+    const int firstX = rect.x + (rect.width - firstWidth) / 2;
+    const int secondX = rect.x + (rect.width - secondWidth) / 2;
+    const int firstY = rect.y + rect.height / 2 - lineHeight / 2 -
+                       textVisualCenterOffset(style);
+    const int secondY = firstY + lineHeight;
+    uiicons::pressHint(panel.pixels, panel.width, panel.height, firstX,
+                       firstY + textVisualCenterOffset(style) - 4,
+                       uitheme::CURRENT.secondary);
+    drawText(panel.pixels, panel.width, panel.height, firstX + icon + gap,
+             firstY, first,
+             uitheme::CURRENT.secondary, style);
+    uiprim::fillCircle(panel.pixels, panel.width, panel.height, secondX + 3,
+                       secondY + textVisualCenterOffset(style), 3,
+                       uitheme::CURRENT.secondary);
+    drawText(panel.pixels, panel.width, panel.height, secondX + 7 + gap,
+             secondY, second,
+             uitheme::CURRENT.secondary, style);
+    return;
+  }
+  const int textY = rect.y + rect.height / 2 - textVisualCenterOffset(style);
+  uiicons::pressHint(panel.pixels, panel.width, panel.height, left,
+                     rect.y + rect.height / 2 - 4,
+                     uitheme::CURRENT.secondary);
   const int firstX = left + icon + gap / 2;
   const int secondIconX = firstX + textWidth(first, style) + gap;
   const int secondX = secondIconX + 4 + gap / 2;
   uiprim::fillCircle(panel.pixels, panel.width, panel.height, secondIconX,
-                     rect.y + rect.height / 2, 3, uitheme::CURRENT.secondary);
+                     rect.y + rect.height / 2, 3,
+                     uitheme::CURRENT.secondary);
   drawText(panel.pixels, panel.width, panel.height, firstX,
-           rect.y + (rect.height - textHeight(style)) / 2, first,
+           textY, first,
            uitheme::CURRENT.secondary, style);
   drawText(panel.pixels, panel.width, panel.height,
            secondX,
-           rect.y + (rect.height - textHeight(style)) / 2, second,
+           textY, second,
            uitheme::CURRENT.secondary, style);
 }
 
@@ -135,20 +245,6 @@ inline void drawListRow(const Panel &panel, const wifiselector::Rect &rect,
   const int iconSize = rect.height > 34 ? 16 : 10;
   const int left = rect.x + (rect.height > 34 ? 14 : 7);
   const int centreY = rect.y + rect.height / 2;
-  if (bootMenu && index == 1) {
-    uiicons::screen(panel.pixels, panel.width, panel.height, left,
-                    centreY - iconSize * 3 / 8, iconSize, foreground);
-  } else if (bootMenu && index == 2) {
-    uiicons::target(panel.pixels, panel.width, panel.height,
-                    left + iconSize / 2, centreY, iconSize, foreground);
-  } else if (active) {
-    uiicons::check(panel.pixels, panel.width, panel.height, left,
-                   centreY - iconSize / 2, iconSize, foreground);
-  } else {
-    uiicons::wifi(panel.pixels, panel.width, panel.height,
-                  left + iconSize / 2, centreY + iconSize / 4, iconSize,
-                  foreground, 2);
-  }
 
   char number[4];
   snprintf(number, sizeof(number), "%02u", index);
@@ -157,16 +253,42 @@ inline void drawListRow(const Panel &panel, const wifiselector::Rect &rect,
   const int indexWidth = textWidth(number, indexStyle);
   const int indexX = rect.x + rect.width - indexWidth -
                      (rect.height > 34 ? 14 : 7);
-  drawText(panel.pixels, panel.width, panel.height, indexX,
-           rect.y + (rect.height - textHeight(indexStyle)) / 2, number,
-           foreground, indexStyle);
-
   const int labelX = left + iconSize * 2;
   const wifiselector::Rect labelRect = {
       (int16_t)labelX, rect.y,
       (int16_t)(indexX - labelX - (rect.height > 34 ? 10 : 5)),
       rect.height};
-  textInRect(panel, labelRect, label, false, foreground, false);
+  const TextStyle labelStyle = styleToFit(
+      panel.width, panel.height, panel.diagonalTenthsMm, labelRect.width,
+      labelRect.height, "...", false);
+  char labelText[33];
+  truncateToWidth(label, labelStyle, labelRect.width, labelText,
+                  sizeof(labelText));
+
+  if (bootMenu && index == 1) {
+    uiicons::screen(panel.pixels, panel.width, panel.height, left,
+                    centreY - iconSize * 3 / 8 - 1, iconSize, foreground);
+  } else if (bootMenu && index == 2) {
+    uiicons::target(panel.pixels, panel.width, panel.height,
+                    left + iconSize / 2, centreY, iconSize, foreground);
+  } else if (active) {
+    uiicons::check(panel.pixels, panel.width, panel.height, left,
+                   centreY - iconSize * 3 / 4, iconSize, foreground);
+  } else {
+    uiicons::wifi(panel.pixels, panel.width, panel.height,
+                  left + iconSize / 2, centreY + iconSize / 2 - 1, iconSize,
+                  foreground, 2);
+  }
+
+  drawText(panel.pixels, panel.width, panel.height, indexX,
+           rect.y + rect.height / 2 - textVisualCenterOffset(indexStyle),
+           number,
+           foreground, indexStyle);
+  drawTextClipped(panel.pixels, panel.width, panel.height, labelRect.x,
+                  labelRect.y + labelRect.height / 2 -
+                      textVisualCenterOffset(labelStyle),
+                  labelText, foreground, labelStyle, labelRect.x,
+                  labelRect.y, labelRect.width, labelRect.height);
 }
 
 inline void drawSelector(const Panel &panel, const char *title,
@@ -214,20 +336,31 @@ inline void drawSelector(const Panel &panel, const char *title,
     }
   }
 
-  const wifiselector::Rect hint = touch
-                                      ? wifiselector::Rect{
-                                            layout.previous.x, layout.previous.y,
-                                            (int16_t)(layout.next.x +
-                                                      layout.next.width -
-                                                      layout.previous.x),
-                                            layout.previous.height}
-                                      : wifiselector::Rect{
-                                            layout.previous.x, layout.previous.y,
-                                            (int16_t)(layout.connect.x +
-                                                      layout.connect.width -
-                                                      layout.previous.x),
-                                            layout.previous.height};
-  drawHint(panel, hint, "next", bootMenu ? "hold: start" : "hold: use");
+  wifiselector::Rect hint = touch
+                                 ? wifiselector::Rect{
+                                       layout.previous.x, layout.previous.y,
+                                       (int16_t)(layout.next.x +
+                                                 layout.next.width -
+                                                 layout.previous.x),
+                                       layout.previous.height}
+                                 : wifiselector::Rect{
+                                       layout.previous.x, layout.previous.y,
+                                       (int16_t)(layout.connect.x +
+                                                 layout.connect.width -
+                                                 layout.previous.x),
+                                       layout.previous.height};
+  const int rowsBottom =
+      layout.rowsY + (int)layout.visibleCount * layout.rowHeight + 4;
+  const int availableHintHeight = hint.y + hint.height - rowsBottom;
+  const HintLayout hintLayout = staticui::hintLayout(
+      panel, hint.width, hint.height, availableHintHeight, "next",
+      bootMenu ? "hold: start" : "hold: use");
+  if (hintLayout.stacked) {
+    hint.height = (int16_t)(2 * textLineHeight(hintLayout.style) + 8);
+    hint.y = (int16_t)(hint.y + layout.previous.height - hint.height);
+  }
+  drawHint(panel, hint, "next", bootMenu ? "hold: start" : "hold: use",
+           hintLayout);
   if (touch) {
     drawButton(panel, layout.connect, bootMenu ? "Start" : "Connect", false,
                count > 0);
@@ -265,14 +398,41 @@ inline int wrappedLineCount(const char *text, TextStyle style, int width) {
   if (text == nullptr || *text == 0 || width <= 0) return 0;
   int lines = 1;
   int used = 0;
-  for (const char *at = text; *at; ++at) {
-    const char glyph[2] = {*at, 0};
-    const int advance = textWidth(glyph, style);
-    if (used > 0 && used + advance > width) {
+  for (const char *at = text; *at;) {
+    while (*at == ' ') ++at;
+    if (*at == 0) break;
+    int wordWidth = 0;
+    const char *word = at;
+    while (*at != 0 && *at != ' ') {
+      const char glyph[2] = {*at++, 0};
+      wordWidth += style.family == TextFamily::Classic
+                       ? 6 * style.pixels
+                       : textWidth(glyph, style);
+    }
+    if (wordWidth > width) {
+      if (used > 0) {
+        ++lines;
+        used = 0;
+      }
+      for (const char *letter = word; letter < at; ++letter) {
+        const char glyph[2] = {*letter, 0};
+        const int advance = style.family == TextFamily::Classic
+                                ? 6 * style.pixels
+                                : textWidth(glyph, style);
+        if (used > 0 && used + advance > width) {
+          ++lines;
+          used = 0;
+        }
+        used += advance;
+      }
+      continue;
+    }
+    const int gap = used == 0 ? 0 : textWidth(" ", style);
+    if (used > 0 && used + gap + wordWidth > width) {
       ++lines;
       used = 0;
     }
-    used += advance;
+    used += (used == 0 ? 0 : textWidth(" ", style)) + wordWidth;
   }
   return lines;
 }
@@ -301,32 +461,59 @@ inline void drawWrappedText(const Panel &panel, int x, int y, int width,
   char line[33] = {};
   int count = 0;
   int used = 0;
-  for (const char *at = text; at != nullptr && *at; ++at) {
-    const char glyph[2] = {*at, 0};
-    const int advance = textWidth(glyph, style);
-    if (count > 0 && used + advance > width) {
+  for (const char *at = text; at != nullptr && *at;) {
+    while (*at == ' ') ++at;
+    if (*at == 0) break;
+    const char *word = at;
+    int wordWidth = 0;
+    while (*at != 0 && *at != ' ') {
+      const char glyph[2] = {*at++, 0};
+      wordWidth += style.family == TextFamily::Classic
+                       ? 6 * style.pixels
+                       : textWidth(glyph, style);
+    }
+    const int gap = count == 0 ? 0 : textWidth(" ", style);
+    if (count > 0 && used + gap + wordWidth > width) {
       line[count] = 0;
-      drawText(panel.pixels, panel.width, panel.height, x, y, line, color,
-               style);
+      drawText(panel.pixels, panel.width, panel.height,
+               x + (width - used) / 2, y, line, color, style);
       y += textLineHeight(style);
       count = 0;
       used = 0;
     }
-    if (count == (int)sizeof(line) - 1) {
-      line[count] = 0;
-      drawText(panel.pixels, panel.width, panel.height, x, y, line, color,
-               style);
-      y += textLineHeight(style);
-      count = 0;
-      used = 0;
+    if (count > 0 && count < (int)sizeof(line) - 1) {
+      line[count++] = ' ';
+      used += textWidth(" ", style);
     }
-    line[count++] = *at;
-    used += advance;
+    for (const char *letter = word; letter < at; ++letter) {
+      const char glyph[2] = {*letter, 0};
+      const int advance = style.family == TextFamily::Classic
+                              ? 6 * style.pixels
+                              : textWidth(glyph, style);
+      if (count > 0 && used + advance > width) {
+        line[count] = 0;
+        drawText(panel.pixels, panel.width, panel.height,
+                 x + (width - used) / 2, y, line, color, style);
+        y += textLineHeight(style);
+        count = 0;
+        used = 0;
+      }
+      if (count == (int)sizeof(line) - 1) {
+        line[count] = 0;
+        drawText(panel.pixels, panel.width, panel.height,
+                 x + (width - used) / 2, y, line, color, style);
+        y += textLineHeight(style);
+        count = 0;
+        used = 0;
+      }
+      line[count++] = *letter;
+      used += advance;
+    }
   }
   if (count > 0) {
     line[count] = 0;
-    drawText(panel.pixels, panel.width, panel.height, x, y, line, color,
-             style);
+    drawText(panel.pixels, panel.width, panel.height, x + (width - used) / 2,
+             y, line, color, style);
   }
 }
 
@@ -342,6 +529,34 @@ inline int batteryPercent(const char *battery) {
     return value > 100 ? 100 : value;
   }
   return -1;
+}
+
+inline void truncateToWidth(const char *text, TextStyle style, int maxWidth,
+                            char *out, size_t outSize) {
+  if (out == nullptr || outSize == 0) return;
+  out[0] = 0;
+  if (text == nullptr || maxWidth <= 0) return;
+  if (textWidth(text, style) <= maxWidth) {
+    strncpy(out, text, outSize - 1);
+    out[outSize - 1] = 0;
+    return;
+  }
+  const int ellipsisWidth = textWidth("...", style);
+  int used = 0;
+  size_t count = 0;
+  while (text[count] != 0 && count + 4 <= outSize) {
+    const char glyph[2] = {text[count], 0};
+    const int advance = style.family == TextFamily::Classic
+                            ? 6 * style.pixels
+                            : textWidth(glyph, style);
+    if (used + advance + ellipsisWidth > maxWidth) break;
+    out[count] = text[count];
+    used += advance;
+    ++count;
+  }
+  if (ellipsisWidth <= maxWidth && count + 4 <= outSize) {
+    memcpy(out + count, "...", 4);
+  }
 }
 
 inline void drawSurvey(const Panel &panel, const char *network, int rssi,
@@ -378,16 +593,22 @@ inline void drawSurvey(const Panel &panel, const char *network, int rssi,
       percent >= 0 && panel.width >= 170
           ? 20 + textWidth(percentText, labelStyle)
           : 0;
-  const int networkWidth = wide - 18 - batteryWidth;
-  int networkLines = 1;
-  TextStyle networkStyle = wrappedStyle(
-      panel, network, networkWidth,
-      panel.width < 170 && panel.height < 170
-          ? smallTextStyle(panel.width, panel.height,
-                           panel.diagonalTenthsMm)
-          : largeTextStyle(panel.width, panel.height,
-                           panel.diagonalTenthsMm),
-      networkLines);
+  const int wifiIconSize = panel.height >= 240 ? 14 : 9;
+  const int iconGap = panel.width >= 240 ? 10 : 5;
+  const int networkX = margin + 2 * wifiIconSize + iconGap;
+  const int batteryX = margin + wide - batteryWidth;
+  const int networkRight =
+      batteryWidth > 0 ? batteryX - iconGap : margin + wide;
+  const int networkWidth = networkRight - networkX;
+  TextStyle networkStyle = styleToFit(
+      panel.width, panel.height, panel.diagonalTenthsMm, networkWidth,
+      panel.height, "...", true);
+  if (networkStyle.family == TextFamily::Large && networkStyle.pixels > 24) {
+    networkStyle = {TextFamily::Large, 24};
+  }
+  char networkLabel[33];
+  truncateToWidth(network, networkStyle, networkWidth, networkLabel,
+                  sizeof(networkLabel));
   TextStyle meterStyle =
       monoTextStyle(panel.width, panel.height, panel.diagonalTenthsMm);
   if (panel.height >= 96 && panel.width >= 96 && panel.height < 170) {
@@ -396,7 +617,7 @@ inline void drawSurvey(const Panel &panel, const char *network, int rssi,
     meterStyle = {TextFamily::Mono, 12};
   }
   const int titleY = margin + 2;
-  const int networkH = networkLines * textLineHeight(networkStyle);
+  const int networkH = textLineHeight(networkStyle);
   const int meterY = titleY + networkH + (panel.height >= 240 ? 8 : 4);
   const int qualityY = meterY + textHeight(meterStyle) + 2;
   const int cardsY = qualityY + textHeight(labelStyle) + (panel.height >= 240 ? 10 : 5);
@@ -408,20 +629,28 @@ inline void drawSurvey(const Panel &panel, const char *network, int rssi,
   const int gap = panel.width >= 240 ? 8 : 4;
   const int cardW = (wide - gap) / 2;
   const wifiselector::Rect networkRect = {
-      (int16_t)(margin + 18), (int16_t)titleY, (int16_t)networkWidth,
+      (int16_t)networkX, (int16_t)titleY, (int16_t)networkWidth,
       (int16_t)networkH};
-  uiicons::wifi(panel.pixels, panel.width, panel.height, margin + 7,
-                titleY + textHeight(networkStyle) * 3 / 4,
-                panel.height >= 240 ? 14 : 9, uitheme::CURRENT.secondary, 3);
-  drawWrappedText(panel, networkRect.x, networkRect.y, networkRect.width,
-                  network, networkStyle, uitheme::CURRENT.secondary);
+  uiicons::wifi(panel.pixels, panel.width, panel.height,
+                margin + wifiIconSize,
+                titleY + textVisualCenterOffset(networkStyle) +
+                    wifiIconSize / 2 - 1,
+                wifiIconSize, uitheme::CURRENT.secondary, 3);
+  drawTextClipped(panel.pixels, panel.width, panel.height, networkRect.x,
+                  networkRect.y, networkLabel, uitheme::CURRENT.secondary,
+                  networkStyle, networkRect.x, networkRect.y,
+                  networkRect.width, networkRect.height);
   if (percent >= 0 && batteryWidth > 0) {
     const int batteryX = margin + wide - batteryWidth;
+    const int batteryY =
+        titleY + textVisualCenterOffset(networkStyle) -
+        textVisualCenterOffset(labelStyle);
     uiicons::battery(panel.pixels, panel.width, panel.height, batteryX,
-                     titleY + (textHeight(networkStyle) - 8) / 2, 16, 8,
+                     batteryY + textVisualCenterOffset(labelStyle) - 4, 16,
+                     8,
                      uitheme::CURRENT.teal, percent);
     drawText(panel.pixels, panel.width, panel.height, batteryX + 20,
-             titleY + (textHeight(labelStyle) - 7) / 2, percentText,
+             batteryY, percentText,
              uitheme::CURRENT.secondary, labelStyle);
   }
 
@@ -474,7 +703,12 @@ inline void drawSurvey(const Panel &panel, const char *network, int rssi,
   if (touch) {
     drawButton(panel, action, "WiFi presets", true);
   } else {
-    drawHint(panel, action, "next", hint == nullptr ? "close" : hint);
+    const HintLayout hintLayout =
+        staticui::hintLayout(panel, action.width, action.height,
+                             action.height, "next",
+                             hint == nullptr ? "close" : hint);
+    drawHint(panel, action, "next", hint == nullptr ? "close" : hint,
+             hintLayout);
   }
   maskOutsideRoundPanel(panel);
 }
@@ -573,7 +807,7 @@ inline void drawStatusPill(const Panel &panel, const wifiselector::Rect &rect,
       panel.width, panel.height, panel.diagonalTenthsMm, rect.width / 2,
       rect.height - 6, status, false);
   drawText(panel.pixels, panel.width, panel.height, rect.x + 8,
-           middle - textHeight(statusStyle) / 2, status,
+           middle - textVisualCenterOffset(statusStyle), status,
            uitheme::CURRENT.primary, statusStyle);
   if (battery != nullptr && battery[0] != 0) {
     const TextStyle batteryStyle = styleToFit(
@@ -584,7 +818,7 @@ inline void drawStatusPill(const Panel &panel, const wifiselector::Rect &rect,
     uiicons::battery(panel.pixels, panel.width, panel.height, batteryX - 20,
                      middle - 4, 16, 8, uitheme::CURRENT.teal, 82);
     drawText(panel.pixels, panel.width, panel.height, batteryX,
-             middle - textHeight(batteryStyle) / 2, battery,
+             middle - textVisualCenterOffset(batteryStyle), battery,
              uitheme::CURRENT.primary, batteryStyle);
   }
 }

@@ -133,7 +133,10 @@ inline SelectorLayout selectorLayout(int width, int height, bool roundDisplay,
       (int16_t)(contentWidth - backWidth - gap), (int16_t)buttonHeight};
 
   const int footerY = height - margin - buttonHeight;
-  int connectWidth = contentWidth / 2;
+  // The navigation hint spans Previous and Next. Giving Connect one third of
+  // the footer preserves a usable combined hint rectangle on 240px touch
+  // screens without encoding a board-specific layout.
+  int connectWidth = contentWidth / 3;
   int navWidth = (contentWidth - connectWidth - 2 * gap) / 2;
   if (navWidth < 1) navWidth = 1;
   connectWidth = contentWidth - 2 * navWidth - 2 * gap;
