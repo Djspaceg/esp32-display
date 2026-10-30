@@ -35,6 +35,8 @@ let sources = [
          usedOnC6: false, weight: 500),
   Source(name: "SMALL_18", file: "IBMPlexSans-Variable.ttf", pointSize: 18,
          usedOnC6: false, weight: 500),
+  Source(name: "SMALL_24", file: "IBMPlexSans-Variable.ttf", pointSize: 24,
+         usedOnC6: false, weight: 500),
   Source(name: "MONO_12", file: "Inconsolata-Medium.ttf", pointSize: 12,
          usedOnC6: false, weight: nil),
   Source(name: "MONO_24", file: "Inconsolata-Medium.ttf", pointSize: 24,

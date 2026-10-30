@@ -106,6 +106,7 @@ vsync_front_porch = 0
 clear_memory = true
 
 [carrier]
+panel_diagonal_tenths_mm = 216
 # Setup211: MOSI GPIO2, SCLK GPIO3, CS GPIO5, DC GPIO6, RST GPIO1, BL GPIO10.
 # The backlight is a SI2301 P-FET (Q1) whose gate GPIO10 pulls low to light
 # it (TFT_BACKLIGHT_ON 0). Buttons, LVGL_Factory: left PIN_BTN_L GPIO0 (BOOT,

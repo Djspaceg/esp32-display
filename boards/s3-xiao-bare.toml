@@ -87,6 +87,7 @@ vsync_pulse_width = 0
 vsync_front_porch = 0
 
 [carrier]
+panel_diagonal_tenths_mm = 0
 pin_sclk = -1
 pin_mosi = -1
 pin_data1 = -1

@@ -95,6 +95,7 @@ struct Layout {
   int16_t width;
   int16_t height;
   bool round;
+  uint16_t diagonalTenthsMm;
   // Image centred on the screen, status line and bar in its margins.
   bool compact;
   Rect image;
@@ -130,11 +131,13 @@ inline int halfWidthAcross(const Layout &l, int y0, int y1) {
   return (int)(s / 2);
 }
 
-inline Layout layout(int width, int height, bool round) {
+inline Layout layout(int width, int height, bool round,
+                     uint16_t diagonalTenthsMm = 0) {
   Layout l = {};
   l.width = (int16_t)width;
   l.height = (int16_t)height;
   l.round = round;
+  l.diagonalTenthsMm = diagonalTenthsMm;
   if (width <= 96 || height <= 54) {
     // The 72x40 OLED and 96x54 colour XIAO cannot hold the 120x120 boot
     // image. Keep useful boot state: one sharp status line and a bottom
@@ -182,7 +185,8 @@ inline Layout layout(int width, int height, bool round) {
     return l;
   }
 
-  const TextStyle statusStyle = smallTextStyle(width, height);
+  const TextStyle statusStyle =
+      smallTextStyle(width, height, diagonalTenthsMm);
   const int statusHeight = textHeight(statusStyle);
   // A 128px panel cannot hold the 120px illustration, a status row and a
   // progress bar without overlap. Put the status on clean background first;
@@ -229,7 +233,8 @@ inline Layout layout(int width, int height, bool round) {
 
 // Rows a change of status text repaints, and rows a change of bar repaints.
 inline void textRows(const Layout &l, int &y0, int &y1) {
-  const TextStyle style = smallTextStyle(l.width, l.height);
+  const TextStyle style =
+      smallTextStyle(l.width, l.height, l.diagonalTenthsMm);
   y0 = l.textY - 1;
   y1 = l.textY + textHeight(style) + 1;
   if (y0 < 0) y0 = 0;
@@ -306,7 +311,8 @@ inline void composeRows(uint8_t *dst, const Layout &l, const char *text,
     }
   }
 
-  const TextStyle style = smallTextStyle(l.width, l.height);
+  const TextStyle style =
+      smallTextStyle(l.width, l.height, l.diagonalTenthsMm);
   const bool textHere =
       y0 < l.textY + textHeight(style) + 1 && y0 + rows > l.textY - 1;
   if (textHere && text != nullptr && *text != 0) {

@@ -188,7 +188,8 @@ int main() {
     for (int landscape = 0; landscape <= (square ? 0 : 1); ++landscape) {
       const int w = landscape ? cfg.panel->height : cfg.panel->width;
       const int h = landscape ? cfg.panel->width : cfg.panel->height;
-      const Layout l = bootscreenmodel::layout(w, h, round);
+      const Layout l =
+          bootscreenmodel::layout(w, h, round, cfg.panelDiagonalTenthsMm());
       const int s = l.textScale;
       CHECK(l.width == w && l.height == h);
       CHECK(s >= 1 && s <= 4);

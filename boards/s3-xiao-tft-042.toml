@@ -96,6 +96,7 @@ window_follows_mirror = true
 clear_memory = true
 
 [carrier]
+panel_diagonal_tenths_mm = 107
 # SCLK D8, SDIN D10, DC D3, RES D4, CS D5. The screen pulls its BL input high,
 # so the backlight is always on; BL reaches D1 (GPIO2) only through the
 # carrier's JP1, which is open as made. No backlight pin is declared, so GPIO2

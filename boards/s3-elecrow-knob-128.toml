@@ -96,6 +96,7 @@ vsync_front_porch = 0
 # Five WS2812 LEDs (GRB) chain from GPIO48 through a level shifter, and a green
 # power LED sinks into GPIO40; neither is driven by this firmware.
 [carrier]
+panel_diagonal_tenths_mm = 325
 pin_sclk = 10
 pin_mosi = 11
 pin_data1 = -1

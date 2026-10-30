@@ -67,8 +67,10 @@ bool infoBarActive() {
 // mirrors drawIdleScreen's own scale-fallback exactly rather than inventing
 // a second policy for "how big should on-device text be".
 static TextStyle infoBarTextStyle(const char *text, int frameWidth,
-                                  int frameHeight) {
-  TextStyle style = smallTextStyle(frameWidth, frameHeight);
+                                  int frameHeight,
+                                  uint16_t diagonalTenthsMm) {
+  TextStyle style =
+      smallTextStyle(frameWidth, frameHeight, diagonalTenthsMm);
   if (textWidth(text, style) > frameWidth - 8 && style.pixels > 9) {
     style = {TextFamily::Small, 9};
   }
@@ -150,7 +152,8 @@ void drawIdleScreen() {
     if (showBattery) lines[lineCount++] = lineBattery;
   }
 
-  staticui::Panel screen = {bufB, w, hgt, bcfg->panel->roundDisplay};
+  staticui::Panel screen = {bufB, w, hgt, bcfg->panel->roundDisplay,
+                            bcfg->panelDiagonalTenthsMm()};
   staticui::drawIdle(screen, lines, lineCount);
 
   if (queuePanelBitmap(panel, *bcfg, 0, 0, w, hgt, bufB) != ESP_OK) {
@@ -217,7 +220,8 @@ void drawWifiSelectorScreen() {
       break;
     }
   }
-  staticui::Panel screen = {bufB, width, height, bcfg->panel->roundDisplay};
+  staticui::Panel screen = {bufB, width, height, bcfg->panel->roundDisplay,
+                            bcfg->panelDiagonalTenthsMm()};
   staticui::drawSelector(screen, "WiFi presets", visibleLabels,
                          wifiSelectorCount == 0 ? nullptr : wifiSelectorSlots,
                          visibleCount, wifiSelectorCount == 0 ? 0 : wifiSelectorIndex,
@@ -248,7 +252,8 @@ void drawBootMenuScreen(const char *const *labels, size_t count,
 
   const int width = PANEL_GEOMETRY.frameWidth(panelLandscape);
   const int height = PANEL_GEOMETRY.frameHeight(panelLandscape);
-  staticui::Panel screen = {bufB, width, height, bcfg->panel->roundDisplay};
+  staticui::Panel screen = {bufB, width, height, bcfg->panel->roundDisplay,
+                            bcfg->panelDiagonalTenthsMm()};
   staticui::drawSelector(screen, title, labels, nullptr, count, selected, -1,
                          touchAvailable, true, message);
 
@@ -490,7 +495,8 @@ void drawSurveyScreen() {
   const char *ipValue = connected ? address + 3 : "--";
   char firmwareValue[16];
   snprintf(firmwareValue, sizeof(firmwareValue), "%s", FW_VERSION);
-  staticui::Panel screen = {bufB, w, hgt, bcfg->panel->roundDisplay};
+  staticui::Panel screen = {bufB, w, hgt, bcfg->panel->roundDisplay,
+                            bcfg->panelDiagonalTenthsMm()};
   staticui::drawSurvey(screen, network, rssi, qualityLabel, ipValue,
                        firmwareValue, showBattery ? battery : "", hint,
                        touchAvailable);
@@ -554,7 +560,8 @@ void showInfoBar(const char *text) {
 
   strncpy(infoBarText, text, sizeof(infoBarText) - 1);
   infoBarText[sizeof(infoBarText) - 1] = 0;
-  infoBarStyle = infoBarTextStyle(infoBarText, w, hgt);
+  infoBarStyle = infoBarTextStyle(infoBarText, w, hgt,
+                                  bcfg->panelDiagonalTenthsMm());
   int lineH = textLineHeight(infoBarStyle) + 10;
   if (w < 170) lineH += textLineHeight(infoBarStyle);
   const int margin =
@@ -573,7 +580,8 @@ void showInfoBar(const char *text) {
   if (!bootscreen::composeRows(bufB + off, w, infoBarY0, infoBarY1)) {
     memcpy(bufB + off, bufA + off, bytes);  // bufA stays pristine for the overlay
   }
-  staticui::Panel screen = {bufB, w, hgt, bcfg->panel->roundDisplay};
+  staticui::Panel screen = {bufB, w, hgt, bcfg->panel->roundDisplay,
+                            bcfg->panelDiagonalTenthsMm()};
   staticui::drawStatusPill(
       screen, {0, (int16_t)infoBarY0, (int16_t)w,
                (int16_t)(infoBarY1 - infoBarY0)},
@@ -655,7 +663,8 @@ void redrawInfoBarOverRun() {
   size_t off = (size_t)infoBarY0 * rowBytes;
   size_t bytes = (size_t)(infoBarY1 - infoBarY0) * rowBytes;
   memcpy(bufB + off, bufA + off, bytes);
-  staticui::Panel screen = {bufB, w, hgt, bcfg->panel->roundDisplay};
+  staticui::Panel screen = {bufB, w, hgt, bcfg->panel->roundDisplay,
+                            bcfg->panelDiagonalTenthsMm()};
   staticui::drawStatusPill(
       screen, {0, (int16_t)infoBarY0, (int16_t)w,
                (int16_t)(infoBarY1 - infoBarY0)},
@@ -750,11 +759,13 @@ void drawOtaScreen(const char *headline, int percent) {
     snprintf(pctText, sizeof(pctText), "%d%%", percent);
   }
 
-  TextStyle headlineStyle = largeTextStyle(w, hgt);
-  TextStyle percentStyle = monoTextStyle(w, hgt);
+  TextStyle headlineStyle =
+      largeTextStyle(w, hgt, bcfg->panelDiagonalTenthsMm());
+  TextStyle percentStyle =
+      monoTextStyle(w, hgt, bcfg->panelDiagonalTenthsMm());
   if (textWidth(headline, headlineStyle) > w - 2 * margin &&
       headlineStyle.family != TextFamily::Classic) {
-    headlineStyle = smallTextStyle(w, hgt);
+    headlineStyle = smallTextStyle(w, hgt, bcfg->panelDiagonalTenthsMm());
   }
   const int lineH = textLineHeight(headlineStyle);
   const int percentH = textLineHeight(percentStyle);

@@ -46,11 +46,13 @@ uint16_t currentColor() { return bootscreenmodel::viewFor(stage).barColor; }
 Layout currentLayout() {
   return bootscreenmodel::layout(PANEL_GEOMETRY.frameWidth(panelLandscape),
                                  PANEL_GEOMETRY.frameHeight(panelLandscape),
-                                 bcfg->panel->roundDisplay);
+                                 bcfg->panel->roundDisplay,
+                                 bcfg->panelDiagonalTenthsMm());
 }
 
 bool sameShape(const Layout &a, const Layout &b) {
-  return a.width == b.width && a.height == b.height;
+  return a.width == b.width && a.height == b.height &&
+         a.diagonalTenthsMm == b.diagonalTenthsMm;
 }
 
 // The transfer of one strip takes well under a millisecond, and

@@ -237,6 +237,7 @@
       "additionalProperties": false,
       "required": [
         "pin_sclk",
+        "panel_diagonal_tenths_mm",
         "pin_mosi",
         "pin_data1",
         "pin_data2",
@@ -249,6 +250,12 @@
         "pin_rgb_led"
       ],
       "properties": {
+        "panel_diagonal_tenths_mm": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "Visible panel diagonal in tenths of a millimetre; 0 only when bus is none."
+        },
         "pin_sclk": {"$ref": "#/$defs/pin"},
         "pin_mosi": {"$ref": "#/$defs/pin"},
         "pin_data1": {"$ref": "#/$defs/pin"},

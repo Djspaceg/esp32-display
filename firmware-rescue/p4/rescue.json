@@ -1,5 +1,5 @@
 {
-  "built_at": "2026-10-28T02:14:22Z",
+  "built_at": "2026-10-30T20:08:04Z",
   "chip": "esp32p4",
   "family": "p4",
   "format": 1,
@@ -30,9 +30,9 @@
       "bytes": 456336,
       "file": "app.bin",
       "role": "app",
-      "sha256": "cdb2a08e5a0df030b99ee21c32ad1f50d3cb7b7a19a0a56ecc394c392a59b6e3"
+      "sha256": "ac0f0aee7adbad5bc529db49218f3bc204168b1cd2a2a2127a28c59d6476236c"
     }
   ],
-  "source_commit": "72ffff122ae6cd6128c2c2a3810c503182c28487",
+  "source_commit": "7b689549e9f5dbbd481d7b83bc0ba5d416e4bb4f",
   "source_dirty": false
 }

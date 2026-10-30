@@ -20,6 +20,7 @@ struct Panel {
   int width;
   int height;
   bool round;
+  uint16_t diagonalTenthsMm = 0;
 };
 
 inline void maskOutsideRoundPanel(const Panel &panel) {
@@ -38,20 +39,25 @@ inline void maskOutsideRoundPanel(const Panel &panel) {
   }
 }
 
-inline TextStyle styleToFit(int width, int height, int availableWidth,
-                            int availableHeight, const char *text,
-                            bool heading) {
-  TextStyle style = heading ? largeTextStyle(width, height)
-                            : smallTextStyle(width, height);
-  if ((textWidth(text, style) > availableWidth - 4 ||
-       textHeight(style) > availableHeight - 4) &&
-      style.family != TextFamily::Classic) {
-    style = smallTextStyle(width, height);
-  }
-  if ((textWidth(text, style) > availableWidth - 4 ||
-       textHeight(style) > availableHeight - 4) &&
-      style.family != TextFamily::Classic) {
-    style = {TextFamily::Small, 9};
+inline TextStyle styleToFit(int width, int height, uint16_t diagonalTenthsMm,
+                            int availableWidth, int availableHeight,
+                            const char *text, bool heading) {
+  TextStyle style = heading ? largeTextStyle(width, height, diagonalTenthsMm)
+                            : smallTextStyle(width, height, diagonalTenthsMm);
+  while (textWidth(text, style) > availableWidth - 4 ||
+         textHeight(style) > availableHeight - 4) {
+    if (style.family == TextFamily::Large) {
+      style = smallTextStyle(width, height, diagonalTenthsMm);
+    } else if (style.family == TextFamily::Small && style.pixels > 18) {
+      style = {TextFamily::Small, 18};
+    } else if (style.family == TextFamily::Small && style.pixels > 13) {
+      style = {TextFamily::Small, 13};
+    } else if (style.family == TextFamily::Small && style.pixels > 9) {
+      style = {TextFamily::Small, 9};
+    } else {
+      style = {TextFamily::Classic, 1};
+      break;
+    }
   }
   if (textWidth(text, style) > availableWidth - 2 ||
       textHeight(style) > availableHeight - 2) {
@@ -63,8 +69,9 @@ inline TextStyle styleToFit(int width, int height, int availableWidth,
 inline void textInRect(const Panel &panel, const wifiselector::Rect &rect,
                        const char *text, bool heading, uint16_t color,
                        bool centred = true) {
-  const TextStyle style = styleToFit(panel.width, panel.height, rect.width,
-                                     rect.height, text, heading);
+  const TextStyle style = styleToFit(
+      panel.width, panel.height, panel.diagonalTenthsMm, rect.width,
+      rect.height, text, heading);
   const int x = centred ? rect.x + (rect.width - textWidth(text, style)) / 2
                         : rect.x;
   const int y = rect.y + (rect.height - textHeight(style)) / 2;
@@ -101,8 +108,9 @@ inline void drawHint(const Panel &panel, const wifiselector::Rect &rect,
   uiicons::pressHint(panel.pixels, panel.width, panel.height, left,
                      rect.y + (rect.height - 8) / 2, uitheme::CURRENT.secondary);
   const int gap = icon;
-  TextStyle style = styleToFit(panel.width, panel.height, rect.width - 2 * icon -
-                                     3 * gap - 8, rect.height, second, false);
+  TextStyle style = styleToFit(
+      panel.width, panel.height, panel.diagonalTenthsMm,
+      rect.width - 2 * icon - 3 * gap - 8, rect.height, second, false);
   const int firstX = left + icon + gap / 2;
   const int secondIconX = firstX + textWidth(first, style) + gap;
   const int secondX = secondIconX + 4 + gap / 2;
@@ -144,7 +152,8 @@ inline void drawListRow(const Panel &panel, const wifiselector::Rect &rect,
 
   char number[4];
   snprintf(number, sizeof(number), "%02u", index);
-  const TextStyle indexStyle = monoTextStyle(panel.width, panel.height);
+  const TextStyle indexStyle =
+      monoTextStyle(panel.width, panel.height, panel.diagonalTenthsMm);
   const int indexWidth = textWidth(number, indexStyle);
   const int indexX = rect.x + rect.width - indexWidth -
                      (rect.height > 34 ? 14 : 7);
@@ -231,11 +240,14 @@ inline void drawTonalInformationCard(const Panel &panel,
                                      const char *caption, const char *value) {
   uitheme::card(panel.pixels, panel.width, panel.height,
                 {rect.x, rect.y, rect.width, rect.height}, false);
-  TextStyle captionStyle = smallTextStyle(panel.width, panel.height);
-  TextStyle valueStyle = monoTextStyle(panel.width, panel.height);
+  TextStyle captionStyle =
+      smallTextStyle(panel.width, panel.height, panel.diagonalTenthsMm);
+  TextStyle valueStyle =
+      monoTextStyle(panel.width, panel.height, panel.diagonalTenthsMm);
   if (textWidth(value, valueStyle) > rect.width - 8 ||
       textHeight(valueStyle) > rect.height / 2) {
-    valueStyle = smallTextStyle(panel.width, panel.height);
+    valueStyle =
+        smallTextStyle(panel.width, panel.height, panel.diagonalTenthsMm);
   }
   const int captionY = rect.y + (rect.height - textHeight(captionStyle) -
                                  textHeight(valueStyle)) /
@@ -268,7 +280,8 @@ inline int wrappedLineCount(const char *text, TextStyle style, int width) {
 inline TextStyle wrappedStyle(const Panel &panel, const char *text, int width,
                               TextStyle preferred, int &lineCount) {
   const TextStyle candidates[] = {
-      preferred, smallTextStyle(panel.width, panel.height),
+      preferred, smallTextStyle(panel.width, panel.height,
+                                panel.diagonalTenthsMm),
       {TextFamily::Small, 9}, {TextFamily::Classic, 1},
   };
   for (TextStyle style : candidates) {
@@ -356,7 +369,8 @@ inline void drawSurvey(const Panel &panel, const char *network, int rssi,
   if (panel.width < 170 && panel.height < 170) control = 18;
   const int bottom = panel.height - margin - control;
   const int wide = panel.width - 2 * margin;
-  TextStyle labelStyle = smallTextStyle(panel.width, panel.height);
+  TextStyle labelStyle =
+      smallTextStyle(panel.width, panel.height, panel.diagonalTenthsMm);
   const int percent = batteryPercent(battery);
   char percentText[5] = {};
   if (percent >= 0) snprintf(percentText, sizeof(percentText), "%d%%", percent);
@@ -369,10 +383,13 @@ inline void drawSurvey(const Panel &panel, const char *network, int rssi,
   TextStyle networkStyle = wrappedStyle(
       panel, network, networkWidth,
       panel.width < 170 && panel.height < 170
-          ? smallTextStyle(panel.width, panel.height)
-          : largeTextStyle(panel.width, panel.height),
+          ? smallTextStyle(panel.width, panel.height,
+                           panel.diagonalTenthsMm)
+          : largeTextStyle(panel.width, panel.height,
+                           panel.diagonalTenthsMm),
       networkLines);
-  TextStyle meterStyle = monoTextStyle(panel.width, panel.height);
+  TextStyle meterStyle =
+      monoTextStyle(panel.width, panel.height, panel.diagonalTenthsMm);
   if (panel.height >= 96 && panel.width >= 96 && panel.height < 170) {
     meterStyle = {TextFamily::Mono, 24};
   } else if (panel.height < 96 || panel.width < 96) {
@@ -474,8 +491,10 @@ inline void drawIdle(const Panel &panel, const char *const *lines,
   }
   const int margin =
       wifiselector::safeMargin(panel.width, panel.height, panel.round);
-  TextStyle body = smallTextStyle(panel.width, panel.height);
-  TextStyle heading = largeTextStyle(panel.width, panel.height);
+  TextStyle body =
+      smallTextStyle(panel.width, panel.height, panel.diagonalTenthsMm);
+  TextStyle heading =
+      largeTextStyle(panel.width, panel.height, panel.diagonalTenthsMm);
   const int lineH = textHeight(body);
   const int contentH =
       count == 0 ? 0 : textHeight(heading) + (int)(count - 1) * lineH;
@@ -511,8 +530,9 @@ inline void drawInfoCard(const Panel &panel, const char *status,
       (int16_t)(panel.width - 2 * margin), (int16_t)cardH};
   uitheme::card(panel.pixels, panel.width, panel.height,
                 {card.x, card.y, card.width, card.height}, true);
-  const TextStyle title = styleToFit(panel.width, panel.height, card.width - 16,
-                                     card.height / 2, status, true);
+  const TextStyle title = styleToFit(
+      panel.width, panel.height, panel.diagonalTenthsMm, card.width - 16,
+      card.height / 2, status, true);
   centredText(panel, card.y + card.height / 5, status, title,
               uitheme::CURRENT.primary);
   if (battery != nullptr && battery[0] != 0) {
@@ -539,7 +559,8 @@ inline void drawStatusPill(const Panel &panel, const wifiselector::Rect &rect,
   uitheme::card(panel.pixels, panel.width, panel.height,
                 {rect.x, rect.y, rect.width, rect.height}, true);
   if (panel.width < 170) {
-    const TextStyle style = smallTextStyle(panel.width, panel.height);
+    const TextStyle style =
+        smallTextStyle(panel.width, panel.height, panel.diagonalTenthsMm);
     centredText(panel, rect.y + 3, status, style, uitheme::CURRENT.primary);
     if (battery != nullptr && battery[0] != 0) {
       centredText(panel, rect.y + rect.height - textHeight(style) - 3, battery,
@@ -548,16 +569,16 @@ inline void drawStatusPill(const Panel &panel, const wifiselector::Rect &rect,
     return;
   }
   const int middle = rect.y + rect.height / 2;
-  const TextStyle statusStyle =
-      styleToFit(panel.width, panel.height, rect.width / 2, rect.height - 6,
-                 status, false);
+  const TextStyle statusStyle = styleToFit(
+      panel.width, panel.height, panel.diagonalTenthsMm, rect.width / 2,
+      rect.height - 6, status, false);
   drawText(panel.pixels, panel.width, panel.height, rect.x + 8,
            middle - textHeight(statusStyle) / 2, status,
            uitheme::CURRENT.primary, statusStyle);
   if (battery != nullptr && battery[0] != 0) {
     const TextStyle batteryStyle = styleToFit(
-        panel.width, panel.height, rect.width / 2 - 28, rect.height - 6,
-        battery, false);
+        panel.width, panel.height, panel.diagonalTenthsMm,
+        rect.width / 2 - 28, rect.height - 6, battery, false);
     const int batteryWidth = textWidth(battery, batteryStyle);
     const int batteryX = rect.x + rect.width - batteryWidth - 8;
     uiicons::battery(panel.pixels, panel.width, panel.height, batteryX - 20,

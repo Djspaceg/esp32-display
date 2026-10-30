@@ -185,3 +185,27 @@ static constexpr Config CONFIG_AMOLED_CO5300 = {
     -1, 0x00, 1500, false, -1, -1,
     -1
 };
+
+inline uint16_t generatedPanelDiagonalTenthsMm(Variant variant) {
+  switch (variant) {
+    case Variant::C3_2424S012: return 610;
+    case Variant::LcdSt7789: return 374;
+    case Variant::TouchJd9853: return 374;
+    case Variant::P4_34C: return 864;
+    case Variant::P4_4B: return 1016;
+    case Variant::P4_4C: return 1016;
+    case Variant::ElecrowKnob128: return 325;
+    case Variant::LcdGc9107: return 216;
+    case Variant::LcdSt7789_130: return 330;
+    case Variant::LcdSt7789_190: return 483;
+    case Variant::LilygoTqtPro: return 216;
+    case Variant::LilygoTwatchS3: return 391;
+    case Variant::SeeedXiaoml: return 107;
+    case Variant::AmoledCo5300: return 445;
+    case Variant::TouchSt7789: return 391;
+    case Variant::LcdSt77916: return 470;
+    case Variant::XiaoS3Bare: return 0;
+    case Variant::XiaoSt7735: return 107;
+    default: return 0;
+  }
+}

@@ -88,6 +88,7 @@ window_follows_mirror = false
 clear_memory = false
 
 [carrier]
+panel_diagonal_tenths_mm = 107
 # XIAO D4 (GPIO5) is SDA and D5 (GPIO6) is SCL. The generic carrier names
 # retain their source-compatible display-data/clock roles for this I2C panel.
 pin_sclk = 6

@@ -23,14 +23,16 @@ struct Panel {
   int width;
   int height;
   bool round;
+  uint16_t diagonalTenthsMm;
 };
 
 // Every panel a Doom-capable profile carries (generated_board_configs.h).
 static const Panel DOOM_PANELS[] = {
-    {128, 128, false}, {170, 320, false}, {172, 320, false},
-    {240, 240, false}, {240, 240, true},  {360, 360, true},
-    {466, 466, true},  {720, 720, false}, {720, 720, true},
-    {800, 800, true},
+    {128, 128, false, 610}, {170, 320, false, 374},
+    {172, 320, false, 374}, {240, 240, false, 374},
+    {240, 240, true, 374},  {360, 360, true, 610},
+    {466, 466, true, 445},  {720, 720, false, 1016},
+    {720, 720, true, 1016}, {800, 800, true, 864},
 };
 
 static const char *LONG_REASON =
@@ -39,25 +41,37 @@ static const char *LONG_REASON =
 
 static int wrapsAndMarksTruncation() {
   char lines[doomfail::MAX_REASON_LINES][doomfail::LINE_CAP];
-  CHECK(doomfail::wrapText("touch unavailable", 20, lines, 4) == 1);
+  CHECK(doomfail::wrapTextToColumns("touch unavailable", 20, lines, 4) == 1);
   CHECK(strcmp(lines[0], "touch unavailable") == 0);
 
-  CHECK(doomfail::wrapText("Doom WAD is missing or invalid", 12, lines, 4) == 3);
+  CHECK(doomfail::wrapTextToColumns("Doom WAD is missing or invalid", 12,
+                                    lines, 4) == 3);
   CHECK(strcmp(lines[0], "Doom WAD is") == 0);
   CHECK(strcmp(lines[1], "missing or") == 0);
   CHECK(strcmp(lines[2], "invalid") == 0);
 
   // An unbroken word longer than a line is split, not dropped.
-  CHECK(doomfail::wrapText("ABCDEFGHIJKLMNOP", 10, lines, 4) == 2);
+  CHECK(doomfail::wrapTextToColumns("ABCDEFGHIJKLMNOP", 10, lines, 4) == 2);
   CHECK(strcmp(lines[0], "ABCDEFGHIJ") == 0);
   CHECK(strcmp(lines[1], "KLMNOP") == 0);
 
   // A reason cut at the line limit says so.
-  const int n = doomfail::wrapText(LONG_REASON, 20, lines, 4);
+  const int n = doomfail::wrapTextToColumns(LONG_REASON, 20, lines, 4);
   CHECK(n == 4);
-  CHECK(strlen(lines[3]) <= 20);
   CHECK(strcmp(lines[3] + strlen(lines[3]) - 3, "...") == 0);
-  for (int i = 0; i < n; i++) CHECK(strlen(lines[i]) <= 20);
+
+  // The 1.75-inch AMOLED uses 24px glyphs. Measured wrapping and line
+  // height keep its denser text from overlapping on the failure card.
+  const TextStyle dense = smallTextStyle(466, 466, 445);
+  CHECK(dense.pixels == 24);
+  CHECK(textLineHeight(dense) > 18);
+  const int denseLines = doomfail::wrapText(LONG_REASON, 290, dense, lines, 4);
+  CHECK(denseLines == 4);
+  CHECK(strcmp(lines[denseLines - 1] + strlen(lines[denseLines - 1]) - 3,
+               "...") == 0);
+  for (int i = 0; i < denseLines; i++) {
+    CHECK(textWidth(lines[i], dense) <= 290);
+  }
   return 0;
 }
 
@@ -68,7 +82,8 @@ static bool isBackground(const std::vector<uint8_t> &buf, size_t pixel) {
 
 static int textStaysOnTheGlass(const Panel &panel, const char *reason) {
   std::vector<uint8_t> buf((size_t)panel.width * panel.height * 2, 0);
-  doomfail::compose(buf.data(), panel.width, panel.height, panel.round, reason);
+  doomfail::compose(buf.data(), panel.width, panel.height, panel.round, reason,
+                    doomfail::HEADLINE, panel.diagonalTenthsMm);
   const int margin =
       doomfail::textMargin(panel.width, panel.height, panel.round);
   const float cx = panel.width / 2.0f, cy = panel.height / 2.0f;

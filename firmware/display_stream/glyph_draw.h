@@ -33,37 +33,60 @@ inline bool useClassicText(int width, int height) {
   return width <= 96 || height <= 54;
 }
 
-inline TextStyle smallTextStyle(int width, int height) {
+inline bool useLargerHighDensityText(int width, int height,
+                                     uint16_t diagonalTenthsMm) {
+  const int side = width < height ? width : height;
+  if (side < 400 || diagonalTenthsMm == 0) return false;
+  // PPI = pixel-diagonal * 254 / diagonal-in-tenths-mm. Compare squared
+  // values to keep this AVR-safe and avoid a floating-point dependency.
+  const int64_t pixelsSquared = (int64_t)width * width + (int64_t)height * height;
+  const int64_t physicalSquared =
+      (int64_t)diagonalTenthsMm * diagonalTenthsMm;
+  return pixelsSquared * 254 * 254 >= physicalSquared * 300 * 300;
+}
+
+inline TextStyle smallTextStyle(int width, int height,
+                                uint16_t diagonalTenthsMm = 0) {
   if (useClassicText(width, height)) return {TextFamily::Classic, 1};
 #if defined(CONFIG_IDF_TARGET_ESP32C6)
   (void)width;
   (void)height;
+  (void)diagonalTenthsMm;
   return {TextFamily::Classic, 1};
 #else
+  if (useLargerHighDensityText(width, height, diagonalTenthsMm)) {
+    return {TextFamily::Small, 24};
+  }
   const int side = width < height ? width : height;
   return {TextFamily::Small, (uint8_t)(side < 170 ? 9 : side < 400 ? 13 : 18)};
 #endif
 }
 
-inline TextStyle monoTextStyle(int width, int height) {
+inline TextStyle monoTextStyle(int width, int height,
+                               uint16_t diagonalTenthsMm = 0) {
   if (useClassicText(width, height)) return {TextFamily::Classic, 1};
 #if defined(CONFIG_IDF_TARGET_ESP32C6)
   (void)width;
   (void)height;
+  (void)diagonalTenthsMm;
   return {TextFamily::Classic, 1};
 #else
+  (void)diagonalTenthsMm;
   const int side = width < height ? width : height;
   return {TextFamily::Mono, (uint8_t)(side < 170 ? 12 : side < 400 ? 24 : 40)};
 #endif
 }
 
-inline TextStyle largeTextStyle(int width, int height) {
+inline TextStyle largeTextStyle(int width, int height,
+                                uint16_t diagonalTenthsMm = 0) {
   if (useClassicText(width, height)) return {TextFamily::Classic, 1};
 #if defined(CONFIG_IDF_TARGET_ESP32C6)
   (void)width;
   (void)height;
+  (void)diagonalTenthsMm;
   return {TextFamily::Classic, 2};
 #else
+  (void)diagonalTenthsMm;
   const int side = width < height ? width : height;
   return {TextFamily::Large, (uint8_t)(side < 170 ? 16 : side < 400 ? 24 : 40)};
 #endif
@@ -78,7 +101,8 @@ inline const panelfonts::Face &faceFor(TextStyle style) {
     case TextFamily::Small:
       if (style.pixels <= 9) return panelfonts::SMALL_9;
       if (style.pixels <= 13) return panelfonts::SMALL_13;
-      return panelfonts::SMALL_18;
+      if (style.pixels <= 18) return panelfonts::SMALL_18;
+      return panelfonts::SMALL_24;
     case TextFamily::Mono:
       if (style.pixels <= 12) return panelfonts::MONO_12;
       if (style.pixels <= 24) return panelfonts::MONO_24;

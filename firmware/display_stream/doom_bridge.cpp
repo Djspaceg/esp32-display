@@ -88,7 +88,8 @@ static bool showDoomFailure(const char *reason) {
   const size_t bytes = (size_t)PANEL_W * (size_t)PANEL_H * 2;
   uint8_t *card = (uint8_t *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
   if (card == nullptr) return false;
-  doomfail::compose(card, PANEL_W, PANEL_H, bcfg->panel->roundDisplay, reason);
+  doomfail::compose(card, PANEL_W, PANEL_H, bcfg->panel->roundDisplay, reason,
+                    doomfail::HEADLINE, bcfg->panelDiagonalTenthsMm());
   if (queuePanelBitmap(panel, *bcfg, 0, 0, PANEL_W, PANEL_H, card) != ESP_OK) {
     heap_caps_free(card);
     return false;

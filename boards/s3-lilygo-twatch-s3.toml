@@ -124,6 +124,7 @@ window_follows_mirror = true
 # so the hold is the way out. The streaming firmware reads the crown as the
 # PWR key input, assignable in the input map. No addressable LED.
 [carrier]
+panel_diagonal_tenths_mm = 391
 pin_sclk = 18
 pin_mosi = 13
 pin_data1 = -1

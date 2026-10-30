@@ -180,6 +180,8 @@ constexpr bool platformSupportsPanel(const PlatformConfig &platform,
 /// The carrier composition consumed after detection. Controller implementations
 /// may still branch on capabilities, but board facts belong in descriptor-backed
 /// rows rather than scattered profile tests.
+uint16_t generatedPanelDiagonalTenthsMm(Variant variant);
+
 struct Config {
   Variant variant;
   const char *name;
@@ -425,6 +427,12 @@ struct Config {
   /// Whether the board has a screen at all. A board without one (panel
   /// nullptr) runs headless: nothing reads `panel` until this says yes.
   bool hasPanel() const { return panel != nullptr; }
+  /// Visible panel diagonal from the descriptor-backed carrier data. Boards
+  /// can share a controller profile and pixel grid while mounting different
+  /// physical glass, so this is keyed by the carrier variant.
+  uint16_t panelDiagonalTenthsMm() const {
+    return generatedPanelDiagonalTenthsMm(variant);
+  }
 };
 
 #include "generated_board_configs.h"

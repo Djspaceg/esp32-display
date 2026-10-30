@@ -30,40 +30,45 @@ static void writePpm(const std::string &path, const std::vector<uint8_t> &pixels
 }
 
 static void drawBoot(std::vector<uint8_t> &pixels, int width, int height,
-                     bool round) {
+                     bool round, uint16_t diagonalTenthsMm) {
   const bootscreenmodel::Layout layout =
-      bootscreenmodel::layout(width, height, round);
+      bootscreenmodel::layout(width, height, round, diagonalTenthsMm);
   const bootscreenmodel::StageView view =
       bootscreenmodel::viewFor(bootscreenmodel::Stage::JoiningWifi);
   bootscreenmodel::composeRows(pixels.data(), layout, view.text, 550,
                                view.barColor, 0, height);
-  staticui::maskOutsideRoundPanel({pixels.data(), width, height, round});
+  staticui::maskOutsideRoundPanel(
+      {pixels.data(), width, height, round, diagonalTenthsMm});
 }
 
 static void drawSurvey(std::vector<uint8_t> &pixels, int width, int height,
-                       bool round) {
-  staticui::drawSurvey({pixels.data(), width, height, round}, "studio-wifi",
-                       -64, "Good", "192.168.1.42", "2.1.0",
-                       "Battery 82% charging", "close", true);
+                       bool round, uint16_t diagonalTenthsMm) {
+  staticui::drawSurvey(
+      {pixels.data(), width, height, round, diagonalTenthsMm}, "studio-wifi",
+      -64, "Good", "192.168.1.42", "2.1.0", "Battery 82% charging", "close",
+      true);
 }
 
 static void drawPresets(std::vector<uint8_t> &pixels, int width, int height,
-                        bool round) {
+                        bool round, uint16_t diagonalTenthsMm) {
   const char *labels[] = {"studio-wifi", "backup-link"};
   const uint8_t slots[] = {1, 2};
-  staticui::drawSelector({pixels.data(), width, height, round}, "WiFi presets",
-                         labels, slots, 2, 0, 0, true);
+  staticui::drawSelector(
+      {pixels.data(), width, height, round, diagonalTenthsMm}, "WiFi presets",
+      labels, slots, 2, 0, 0, true);
 }
 
 static void drawIdle(std::vector<uint8_t> &pixels, int width, int height,
-                     bool round) {
+                     bool round, uint16_t diagonalTenthsMm) {
   const char *lines[] = {"ESPDisplay", "192.168.1.42", "WiFi -64 dBm"};
-  staticui::drawIdle({pixels.data(), width, height, round}, lines, 3);
+  staticui::drawIdle({pixels.data(), width, height, round, diagonalTenthsMm},
+                     lines, 3);
 }
 
 static void drawStatus(std::vector<uint8_t> &pixels, int width, int height,
-                       bool round) {
-  staticui::Panel panel = {pixels.data(), width, height, round};
+                       bool round, uint16_t diagonalTenthsMm) {
+  staticui::Panel panel = {pixels.data(), width, height, round,
+                            diagonalTenthsMm};
   uitheme::background(panel.pixels, panel.width, panel.height);
   const int margin = wifiselector::safeMargin(width, height, round);
   const int pillHeight = wifiselector::controlHeight(height) + 10;
@@ -75,16 +80,17 @@ static void drawStatus(std::vector<uint8_t> &pixels, int width, int height,
 }
 
 static void drawModeMenu(std::vector<uint8_t> &pixels, int width, int height,
-                         bool round) {
+                         bool round, uint16_t diagonalTenthsMm) {
   const char *labels[] = {"Streaming", "Doom"};
-  staticui::drawSelector({pixels.data(), width, height, round}, "Choose a mode",
-                         labels, nullptr, 2, 0, -1, false, true);
+  staticui::drawSelector(
+      {pixels.data(), width, height, round, diagonalTenthsMm}, "Choose a mode",
+      labels, nullptr, 2, 0, -1, false, true);
 }
 
-typedef void (*Screen)(std::vector<uint8_t> &, int, int, bool);
+typedef void (*Screen)(std::vector<uint8_t> &, int, int, bool, uint16_t);
 
 static void preview(const char *directory, const char *name, int width,
-                    int height, bool round) {
+                    int height, bool round, uint16_t diagonalTenthsMm) {
   const Screen screens[] = {drawBoot, drawSurvey, drawPresets,
                             drawIdle, drawStatus, drawModeMenu};
   const int gutter = width <= 128 ? 2 : 0;
@@ -93,7 +99,7 @@ static void preview(const char *directory, const char *name, int width,
   std::vector<uint8_t> sheet((size_t)sheetWidth * sheetHeight * 2);
   for (int tile = 0; tile < 6; ++tile) {
     std::vector<uint8_t> panel((size_t)width * height * 2);
-    screens[tile](panel, width, height, round);
+    screens[tile](panel, width, height, round, diagonalTenthsMm);
     const int xOffset = tile % 3 * (width + gutter);
     const int yOffset = tile / 3 * (height + gutter);
     for (int y = 0; y < height; ++y) {
@@ -110,13 +116,13 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: %s OUTPUT_DIRECTORY\n", argv[0]);
     return 2;
   }
-  preview(argv[1], "amoled-175-round", 466, 466, true);
-  preview(argv[1], "lcd-185-round", 360, 360, true);
-  preview(argv[1], "lcd-154-square", 240, 240, false);
-  preview(argv[1], "lcd-085-small", 128, 128, false);
-  preview(argv[1], "tqt-128", 128, 128, false);
-  preview(argv[1], "xiao-042-color", 96, 54, false);
-  preview(argv[1], "xiaoml-oled-72x40", 72, 40, false);
-  preview(argv[1], "p4-720", 720, 720, true);
+  preview(argv[1], "amoled-175-round", 466, 466, true, 445);
+  preview(argv[1], "lcd-185-round", 360, 360, true, 470);
+  preview(argv[1], "lcd-154-square", 240, 240, false, 391);
+  preview(argv[1], "lcd-085-small", 128, 128, false, 216);
+  preview(argv[1], "tqt-128", 128, 128, false, 216);
+  preview(argv[1], "xiao-042-color", 96, 54, false, 107);
+  preview(argv[1], "xiaoml-oled-72x40", 72, 40, false, 107);
+  preview(argv[1], "p4-720", 720, 720, true, 1016);
   return 0;
 }

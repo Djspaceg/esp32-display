@@ -79,6 +79,7 @@ REQUIRED_FIELDS = (
     "panel.vsync_pulse_width",
     "panel.vsync_front_porch",
     "carrier.pin_sclk",
+    "carrier.panel_diagonal_tenths_mm",
     "carrier.pin_mosi",
     "carrier.pin_data1",
     "carrier.pin_data2",
@@ -1685,6 +1686,12 @@ def validate_descriptors(
             descriptor, "panel.width", smallest, 65535)
         panel_height = _expect_int_range(
             descriptor, "panel.height", smallest, 65535)
+        diagonal = _expect_int_range(
+            descriptor, "carrier.panel_diagonal_tenths_mm", 0, 65535)
+        if has_panel(descriptor) != (diagonal != 0):
+            raise DescriptorError(
+                "%s: carrier.panel_diagonal_tenths_mm must be nonzero exactly "
+                "when the board has a panel" % source)
         memory_width = _expect_int_range(
             descriptor, "panel.memory_width", 0, 65535)
         memory_height = _expect_int_range(

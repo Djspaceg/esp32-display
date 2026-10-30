@@ -547,6 +547,18 @@ def render_configs(descriptors: Sequence[Dict[str, Any]]) -> str:
     lines.append("\n")
     for descriptor in generated:
         lines.append(_config_initializer(descriptor))
+    lines.append("\ninline uint16_t generatedPanelDiagonalTenthsMm(Variant variant) {\n")
+    lines.append("  switch (variant) {\n")
+    for descriptor in descriptors:
+        lines.append(
+            "    case Variant::%s: return %d;\n" % (
+                descriptor["identity"]["variant"],
+                descriptor["carrier"]["panel_diagonal_tenths_mm"]))
+    lines.extend([
+        "    default: return 0;\n",
+        "  }\n",
+        "}\n",
+    ])
     return "".join(lines)
 
 

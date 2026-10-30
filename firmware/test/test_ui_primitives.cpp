@@ -63,6 +63,10 @@ int main() {
   CHECK(uitheme::signalColorForRssi(-60) == uitheme::CURRENT.teal);
   CHECK(uitheme::signalColorForRssi(-73) == 0xFCE1);
   CHECK(uitheme::signalColorForRssi(-80) == 0xFA27);
+  CHECK(smallTextStyle(466, 466, 445).pixels == 24);
+  CHECK(smallTextStyle(800, 800, 864).pixels == 24);
+  CHECK(smallTextStyle(720, 720, 1016).pixels == 18);
+  CHECK(smallTextStyle(96, 54, 107).family == TextFamily::Classic);
 
   {
     const char *longSsid = "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW";
