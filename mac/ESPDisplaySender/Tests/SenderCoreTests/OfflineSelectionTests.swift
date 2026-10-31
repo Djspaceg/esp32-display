@@ -81,6 +81,24 @@ final class OfflineSourceSelectionTests: XCTestCase {
             "a region has to be recorded without a session to apply it to")
     }
 
+    func testRegionActionsOnlyFollowTheirFramedDevice() throws {
+        try requireScreen()
+        var first = PanelSnapshot(serviceName: "teeny", displayName: "teeny")
+        first.geometry = .panel172x320
+        var second = PanelSnapshot(serviceName: "other", displayName: "other")
+        second.geometry = .panel172x320
+        let manager = PanelManager(
+            previewPanels: [first, second], savedNetworkNames: [], usbSerialPorts: [])
+
+        manager.chooseRegion(for: "teeny")
+        defer { manager.finishChoosingRegion() }
+
+        XCTAssertTrue(manager.isChoosingRegion(for: "teeny"))
+        XCTAssertFalse(
+            manager.isChoosingRegion(for: "other"),
+            "the other device must not present controls for teeny's marquee")
+    }
+
     func testScalePresetsWorkWhileOffline() throws {
         try requireScreen()
         let manager = offlineManager()

@@ -66,6 +66,11 @@ extension PanelManager {
     /// Whether the marquee is on screen, so the button can read "Done".
     var isChoosingRegion: Bool { regionSelector.isVisible }
 
+    /// Whether this device owns the visible marquee.
+    func isChoosingRegion(for serviceName: String) -> Bool {
+        regionTarget == serviceName && isChoosingRegion
+    }
+
     /// Put the marquee on screen for this panel and make its region the live
     /// source straight away.
     ///

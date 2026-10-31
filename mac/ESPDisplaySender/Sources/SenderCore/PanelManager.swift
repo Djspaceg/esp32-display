@@ -425,9 +425,9 @@ final class PanelManager: ObservableObject {
         regionSelector.onCancel = { [weak self] in
             self?.cancelChoosingRegion()
         }
-        // The scale presets and rotate live on the marquee itself - adjusting a
-        // region that is not on screen is meaningless, so these fire only while
-        // it is visible, for the panel it was opened for.
+        // The scale presets and rotate are available both on the marquee and in
+        // the manager window. Both paths use these same operations for the panel
+        // currently being framed.
         regionSelector.onScale = { [weak self] scale in
             guard let self, let target = self.regionTarget else { return }
             self.setRegionScale(scale, for: target)

@@ -939,9 +939,8 @@ private final class MarqueeView: NSView {
         drawButton("Done  ⏎", in: zones.done, prominent: true)
         drawButton("Cancel  ⎋", in: zones.cancel, prominent: false)
 
-        // The scale presets and rotate, which exist only here: adjusting a
-        // region while it is not on screen is meaningless, so these have no
-        // twin in the manager window.
+        // The scale presets and rotate are duplicated in the manager window
+        // for when this rectangle is too constrained to expose its controls.
         guard let presets = RegionSelector.presetZones(
             in: bounds, includeRotate: includeRotate) else { return }
         for entry in presets {

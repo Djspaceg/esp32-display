@@ -612,46 +612,53 @@ struct PanelDetailView: View {
         // the picture comes from and which way up it is, the screen, then the
         // firmware. Network credentials, touch bindings and the screensaver are
         // set once and left, and the audio and frame counters are diagnostics.
-        Form {
-            // A board with no screen has no picture, source or screen settings
-            // to offer: it says so once, with the facts the hero would carry.
-            if panel.hasNoScreen {
-                noScreenSection
-            } else {
+        VStack(spacing: 0) {
+            // A direct child of grouped Form receives an implicit rounded row.
+            // The hero already supplies its own card, so it lives above the form
+            // rather than inside that second background.
+            if !panel.hasNoScreen {
                 heroSection
-                sourceSection
-                displaySection
             }
-            firmwareSection
-            connectionSection
-            // Gated on the panel actually having an input this app can
-            // assign, so a panel without one does not offer to bind it.
-            if !panel.availableInputs.isEmpty {
-                gestureSection
+            Form {
+                // A board with no screen has no picture, source or screen settings
+                // to offer: it says so once, with the facts the hero would carry.
+                if panel.hasNoScreen {
+                    noScreenSection
+                } else {
+                    sourceSection
+                    displaySection
+                }
+                firmwareSection
+                connectionSection
+                // Gated on the panel actually having an input this app can
+                // assign, so a panel without one does not offer to bind it.
+                if !panel.availableInputs.isEmpty {
+                    gestureSection
+                }
+                // Outside the touch gate: a knob board's knob sends media keys
+                // under every preset, touch screen or not.
+                if panel.offersMediaKeyGrant(
+                    authorized: manager.accessibilityPermissionIsAllowed)
+                {
+                    mediaKeyGrantSection
+                }
+                if panel.capabilities.contains(.idleText) {
+                    screensaverSection
+                }
+                if panel.audioStatus != nil
+                    || panel.capabilities.contains(.audioDownlink)
+                    || panel.capabilities.contains(.audioUplink)
+                {
+                    audioSection
+                }
+                if panel.capabilities.contains(.camera) {
+                    cameraSection
+                }
+                diagnosticsSection
+                dangerSection
             }
-            // Outside the touch gate: a knob board's knob sends media keys
-            // under every preset, touch screen or not.
-            if panel.offersMediaKeyGrant(
-                authorized: manager.accessibilityPermissionIsAllowed)
-            {
-                mediaKeyGrantSection
-            }
-            if panel.capabilities.contains(.idleText) {
-                screensaverSection
-            }
-            if panel.audioStatus != nil
-                || panel.capabilities.contains(.audioDownlink)
-                || panel.capabilities.contains(.audioUplink)
-            {
-                audioSection
-            }
-            if panel.capabilities.contains(.camera) {
-                cameraSection
-            }
-            diagnosticsSection
-            dangerSection
+            .formStyle(.grouped)
         }
-        .formStyle(.grouped)
         // Every message in here - errors above all - can be selected and
         // copied. Set once at the root, so a message added later cannot be
         // the one that forgot.
@@ -772,26 +779,16 @@ struct PanelDetailView: View {
 
     // MARK: sections
 
-    /// The hero scrolls with everything else rather than being pinned above the
-    /// form.
-    ///
-    /// It was pinned, via `safeAreaInset`, so the glass would have moving
-    /// content to refract. That turned out to propagate an intrinsic minimum
-    /// height all the way up through NSHostingController: measured, a window
-    /// asked to shrink to 380pt refused to go below 465. Once the form needed
-    /// more room than the window would give, SwiftUI held its minimum size and
-    /// AppKit anchored it bottom-left, so the content ran off the *top* of the
-    /// window where nothing could scroll it back.
-    ///
-    /// The row background is cleared because the card brings its own glass.
-    /// Keeping this outside a `Section` prevents Form from wrapping it in a
-    /// second rounded surface.
+    /// The hero owns its single glass card. It must stay outside grouped Form:
+    /// Form gives even an unsectioned child an implicit rounded row, which would
+    /// place a second background around this one.
     private var heroSection: some View {
         MirrorHero(
             panel: panel, preview: manager.preview,
             facts: heroFacts)
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 6, trailing: 0))
+            .padding(.horizontal, 64)
+            .padding(.top, 2)
+            .padding(.bottom, 6)
     }
 
     /// What a board without a screen shows in place of the hero, the source
@@ -815,8 +812,8 @@ struct PanelDetailView: View {
     /// Why a board without a screen offers no picture, source or screen
     /// controls, and what it does offer.
     static let noScreenExplanation =
-        "This board has no screen, so nothing is captured or sent to it. "
-            + "Its WiFi, firmware updates and restart work as on any other board."
+        "This device has no screen, so nothing is captured or sent to it. "
+            + "Its WiFi, firmware updates and restart work as on any other device."
 
     /// The facts about the board itself that used to be spread over four
     /// sections - or, for the model and the USB device, nowhere at all.
@@ -956,17 +953,16 @@ struct PanelDetailView: View {
 
     /// The marquee controls, shown only while Region is the chosen source.
     ///
-    /// The manager keeps Done and Cancel beside Select region so the selection
-    /// can still be accepted when the marquee's own buttons need to move outside
-    /// the framed area.
+    /// Every marquee action also lives here, so a control remains reachable when
+    /// the framed area is too small or sits behind the Dock.
     private var regionControls: some View {
         LabeledContent("Rectangle") {
             HStack(spacing: 8) {
                 // Not gated on the panel being online: choosing what to send
                 // is a decision about this Mac's screen, and the preview
                 // shows the answer with the panel switched off.
-                Button(manager.isChoosingRegion ? "Done" : "Select region…") {
-                    if manager.isChoosingRegion {
+                Button(isChoosingThisRegion ? "Done" : "Select region…") {
+                    if isChoosingThisRegion {
                         manager.finishChoosingRegion()
                     } else {
                         manager.chooseRegion(for: panel.serviceName)
@@ -974,8 +970,22 @@ struct PanelDetailView: View {
                 }
                 .help("Drag an aspect-locked rectangle over your screen to "
                     + "choose what this device shows; its size presets (and, "
-                    + "on devices with square screens, rotation) are on the rectangle itself")
-                if manager.isChoosingRegion {
+                    + "on devices with square screens, rotation) are available here and on the rectangle")
+                if isChoosingThisRegion {
+                    ControlGroup {
+                        ForEach(RegionSpec.scalePresets, id: \.self) { scale in
+                            Button("\(scale)×") {
+                                manager.setRegionScale(scale, for: panel.serviceName)
+                            }
+                            .help("Frame \(scale) times this device's size")
+                        }
+                        if regionFrameAllowsRotation {
+                            Button("Rotate") {
+                                manager.rotateRegion(for: panel.serviceName)
+                            }
+                            .help("Turn the selected region on its side")
+                        }
+                    }
                     Button("Cancel") {
                         manager.cancelChoosingRegion()
                     }
@@ -989,6 +999,20 @@ struct PanelDetailView: View {
                 }
             }
         }
+    }
+
+    private var isChoosingThisRegion: Bool {
+        manager.isChoosingRegion(for: panel.serviceName)
+    }
+
+    /// Mirrors the marquee's rotate-button rule exactly: square device geometry
+    /// permits it, but a square region does not need a visible no-op action.
+    private var regionFrameAllowsRotation: Bool {
+        guard let geometry = panel.geometry,
+              geometry.width == geometry.height,
+              let region = panel.source.region
+        else { return false }
+        return abs(region.width - region.height) > 0.5
     }
 
     /// The preset, read back from the panel so the dropdown shows what is in

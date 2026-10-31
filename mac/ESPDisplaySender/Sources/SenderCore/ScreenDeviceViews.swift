@@ -180,6 +180,26 @@ struct ScreenDeviceDetailView: View {
                     }
                     .help("Drag an aspect-locked rectangle over another screen to choose "
                         + "what this device shows")
+                    if controller.choosingRegionFor == key && controller.isChoosingRegion {
+                        ControlGroup {
+                            ForEach(RegionSpec.scalePresets, id: \.self) { scale in
+                                Button("\(scale)×") {
+                                    controller.setRegionScale(scale, for: key)
+                                }
+                                .help("Frame \(scale) times this device's size")
+                            }
+                            if regionFrameAllowsRotation(record) {
+                                Button("Rotate") {
+                                    controller.rotateRegion(for: key)
+                                }
+                                .help("Turn the selected region on its side")
+                            }
+                        }
+                        Button("Cancel") {
+                            controller.cancelChoosingRegion()
+                        }
+                        .help("Discard this region selection")
+                    }
                     if let region = record.region {
                         Text("\(region.sizeDescription) on \(region.display)")
                             .font(.caption)
@@ -215,6 +235,14 @@ struct ScreenDeviceDetailView: View {
                 + "its side too, so the picture fills the screen mounted that way. Pause "
                 + "holds the last picture.")
         }
+    }
+
+    /// Mirrors the marquee's rotate-button rule exactly.
+    private func regionFrameAllowsRotation(_ record: ScreenDeviceRecord) -> Bool {
+        guard let region = record.region,
+              record.geometry.width == record.geometry.height
+        else { return false }
+        return abs(region.width - region.height) > 0.5
     }
 
     private func identityDescription(_ entry: ScreenDeviceEntry) -> String {

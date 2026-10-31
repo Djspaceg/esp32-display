@@ -256,8 +256,14 @@ final class ScreenDeviceController: ObservableObject {
         regionSelector.onChange = { [weak self] region in self?.regionDragged(region) }
         regionSelector.onConfirm = { [weak self] in self?.finishChoosingRegion() }
         regionSelector.onCancel = { [weak self] in self?.cancelChoosingRegion() }
-        regionSelector.onScale = { [weak self] scale in self?.scaleRegion(scale) }
-        regionSelector.onRotate = { [weak self] in self?.rotateRegion() }
+        regionSelector.onScale = { [weak self] scale in
+            guard let self, let key = self.choosingRegionFor else { return }
+            self.setRegionScale(scale, for: key)
+        }
+        regionSelector.onRotate = { [weak self] in
+            guard let self, let key = self.choosingRegionFor else { return }
+            self.rotateRegion(for: key)
+        }
         guard live else { return }
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil,
@@ -423,13 +429,17 @@ final class ScreenDeviceController: ObservableObject {
         regionSelector.activeScale = region.matchingScale(geometry: geometry(of: key))
     }
 
-    private func scaleRegion(_ scale: Int) {
+    /// Apply the same scale preset as the marquee control bar.
+    func setRegionScale(_ scale: Int, for key: String) {
+        guard choosingRegionFor == key else { return }
         transformRegion { region, geometry, size in
             region.scaled(to: scale, geometry: geometry, in: size)
         }
     }
 
-    private func rotateRegion() {
+    /// Apply the same region turn as the marquee control bar.
+    func rotateRegion(for key: String) {
+        guard choosingRegionFor == key else { return }
         transformRegion { region, _, size in region.rotated(in: size) }
     }
 
